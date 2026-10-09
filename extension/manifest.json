@@ -1,20 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "Nova Video Saver",
-  "version": "1.9",
-  "description": "Скачивание видео/аудио/субтитров YouTube, Rutube, Twitch, Coub, VK, Zvuk и TikTok, запись трансляций — без внешних сервисов",
+  "name": "MendoSave",
+  "version": "0.2.0",
+  "description": "Локальное сохранение видео, аудио и субтитров. Разрабатываемая версия.",
   "permissions": [
     "downloads",
     "offscreen",
-    "storage",
-    "alarms"
+    "storage"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://music.youtube.com/*",
     "https://i.ytimg.com/*",
-    "https://raw.githubusercontent.com/*",
-    "https://api.github.com/*",
     "https://rutube.ru/*",
     "https://rutube.sport/*",
     "https://*.rutube.ru/*",

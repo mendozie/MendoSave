@@ -1,57 +1,52 @@
 // Service worker: owns the offscreen document, persistent diagnostics and
 // browser downloads. ffmpeg.wasm itself runs in offscreen.html.
-if (typeof importScripts === 'function') importScripts('browser-host.js', 'platform.js');
+if (typeof importScripts === 'function') importScripts('browser-host.js', 'platform.js', 'diagnostics.js');
 
 const LOG_KEY = 'nova_logs';
 const LOG_LIMIT = 400;
 const LOG_ENTRY_LIMIT = 4_000;
 const ERROR_DETAIL_LIMIT = 50_000;
-const ERROR_LOG_FILENAME = 'NVS-debug.txt';
+const ERROR_LOG_FILENAME = 'MendoSave-debug.txt';
 const RELOAD_DOWNLOAD_PREFIX = 'nova_reload_download:';
 const RELOAD_GUARD_PREFIX = 'nova_reload_guard:';
 const RELOAD_GUARD_TTL_MS = 5 * 60_000;
-const UPDATE_STATE_KEY = 'nova_update';
 const HANDLED_MESSAGES = new Set([
-  'nova-check-update',
-  'nova-fetch-cover',
-  'nova-reload-tab',
-  'nova-navigate-tab',
-  'nova-log',
-  'nova-error',
-  'nova-ensure',
-  'nova-save',
-  'nova-download-state',
-  'nova-download-cancel',
-  'nova-fetch-caption',
-  'nova-register-job',
-  'nova-progress',
-  'nova-set-reload-download',
-  'nova-get-reload-download',
-  'nova-clear-reload-download',
-  'nova-clear-reload-guard',
-  'nova-ping',
-  'nova-flush-recovered',
-  'nova-recovery-read',
-  'nova-recovery-write',
+  'mendosave-fetch-cover',
+  'mendosave-reload-tab',
+  'mendosave-navigate-tab',
+  'mendosave-log',
+  'mendosave-error',
+  'mendosave-ensure',
+  'mendosave-save',
+  'mendosave-download-state',
+  'mendosave-download-cancel',
+  'mendosave-fetch-caption',
+  'mendosave-register-job',
+  'mendosave-progress',
+  'mendosave-set-reload-download',
+  'mendosave-get-reload-download',
+  'mendosave-clear-reload-download',
+  'mendosave-clear-reload-guard',
+  'mendosave-ping',
+  'mendosave-flush-recovered',
+  'mendosave-recovery-read',
+  'mendosave-recovery-write',
 ]);
 const RECOVERY_KEY = 'nova_recovered';
 
 let logWrite = Promise.resolve();
 let reloadGuardWrite = Promise.resolve();
 
-function serialize(value) {
-  if (typeof value === 'string') return value;
-  try { return JSON.stringify(value); } catch { return String(value); }
-}
-
 function truncate(value, limit) {
-  const text = serialize(value) || '';
+  const text = MendoDiagnostics.sanitize(value) || '';
   return text.length <= limit ? text : `${text.slice(0, limit)}\n…[truncated]`;
 }
 
 function formatTimestamp(value) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'unknown time' : date.toISOString();
+  if (Number.isNaN(date.getTime())) return 'unknown time';
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${pad(date.getUTCDate())}-${pad(date.getUTCMonth() + 1)}-${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())} UTC`;
 }
 
 // A report is read top to bottom by a human looking for one failing download.
@@ -79,6 +74,7 @@ function formatLogLines(logs) {
 }
 
 function appendLog(entry) {
+  entry = { ...entry, tag: MendoDiagnostics.text(entry.tag), text: MendoDiagnostics.text(entry.text) };
   // Serialize read-modify-write operations so concurrent content-script logs
   // cannot overwrite one another in chrome.storage.local.
   logWrite = logWrite
@@ -112,7 +108,7 @@ async function flushRecoveredFiles() {
   const entries = Array.isArray(stored[RECOVERY_KEY]) ? stored[RECOVERY_KEY] : [];
   if (!entries.some((entry) => entry && !entry.savedAt)) return { ok: true, saved: 0, pending: 0 };
   await ensureOffscreen();
-  const result = await chrome.runtime.sendMessage({ t: 'nova-flush' })
+  const result = await chrome.runtime.sendMessage({ t: 'mendosave-flush' })
     .catch((error) => ({ ok: false, error: String(error?.message || error) }));
   return result || { ok: false, error: 'обработчик медиа не ответил' };
 }
@@ -170,7 +166,7 @@ function repairFilename(value) {
   // short name (`ABCDEF~1.MP3`), which Chromium refuses as well.
   if (base.includes('~') && [...`${base}${extension}`].length <= 12) base = base.replace(/~/g, '-');
   if (RESERVED_DEVICE_NAMES.test(base)) base = `_${base}`;
-  if (!base) base = 'nova-download';
+  if (!base) base = 'mendosave-download';
   return `${base}${extension}`;
 }
 
@@ -192,7 +188,7 @@ async function saveDownload(url, filename) {
     if (!match || url.length > 6 * 1024 * 1024) throw new Error('Unsupported or oversized text download');
     const text = decodeURIComponent(match[2]);
     await ensureOffscreen();
-    const response = await chrome.runtime.sendMessage({ t: 'nova-save-text', text, type: match[1], filename: repaired });
+    const response = await chrome.runtime.sendMessage({ t: 'mendosave-save-text', text, type: match[1], filename: repaired });
     if (!response?.ok) throw new Error(response?.error || 'Не удалось сохранить текстовый файл');
     return response.id;
   }
@@ -214,7 +210,7 @@ function validateCaptionUrl(value) {
 async function downloadErrorLog(message, sender) {
   await logWrite.catch(() => {});
   const stored = await chrome.storage.local
-    .get([LOG_KEY, 'nvs_playlist_queue', UPDATE_STATE_KEY, RECOVERY_KEY])
+    .get([LOG_KEY, 'nvs_playlist_queue', RECOVERY_KEY])
     .catch(() => ({}));
   const logs = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
   // Extension state snapshot: without it "silent" misbehaviour (stalled
@@ -222,13 +218,12 @@ async function downloadErrorLog(message, sender) {
   const sessionState = await chrome.storage.session.get(null).catch(() => ({}));
   const state = {
     playlistQueue: stored.nvs_playlist_queue || null,
-    updateState: stored[UPDATE_STATE_KEY] || null,
     recovered: stored[RECOVERY_KEY] || null,
     session: sessionState,
   };
   const report = [
-    'Nova Video Saver error report',
-    `Time: ${new Date().toISOString()}`,
+    'MendoSave error report',
+    `Time: ${formatTimestamp(Date.now())}`,
     `Version: ${chrome.runtime.getManifest().version}`,
     `Context: ${message.context || 'unknown'}`,
     `Page: ${sender?.tab?.url || 'extension'}`,
@@ -240,7 +235,7 @@ async function downloadErrorLog(message, sender) {
     logs.length ? `\nRecent logs:\n${formatLogLines(logs).join('\n')}` : '',
   ].filter(Boolean).join('\n');
 
-  const url = `data:text/plain;charset=utf-8,${encodeURIComponent(`\uFEFF${report}\n`)}`;
+  const url = `data:text/plain;charset=utf-8,${encodeURIComponent(`\uFEFF${MendoDiagnostics.text(report)}\n`)}`;
   const id = await saveDownload(url, ERROR_LOG_FILENAME);
   return { ok: true, id, filename: ERROR_LOG_FILENAME };
 }
@@ -286,13 +281,10 @@ async function handleMessage(message, sender) {
     return `${RELOAD_GUARD_PREFIX}${sender.tab.id}`;
   };
   switch (message.t) {
-    case 'nova-check-update':
-      return { ok: true, available: false, current: chrome.runtime.getManifest().version, disabled: true };
-
     // Cover art for audio downloads. Fetched here because content pages are
     // bound by page CORS and the offscreen document by its COEP; the service
     // worker with the i.ytimg.com host permission has neither restriction.
-    case 'nova-fetch-cover': {
+    case 'mendosave-fetch-cover': {
       const videoId = String(message.videoId || '');
       if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw new Error('некорректный идентификатор видео');
       for (const name of ['maxresdefault', 'hqdefault']) {
@@ -316,13 +308,13 @@ async function handleMessage(message, sender) {
     // YouTube's SPA router can intercept page-initiated location.reload()/
     // assign() and keep a wedged media session alive. Browser-level tab
     // reloads/navigations (what a manual F5 does) cannot be intercepted.
-    case 'nova-reload-tab': {
+    case 'mendosave-reload-tab': {
       if (!Number.isInteger(sender?.tab?.id)) throw new Error('вкладка не определена');
       await chrome.tabs.reload(sender.tab.id);
       return { ok: true };
     }
 
-    case 'nova-navigate-tab': {
+    case 'mendosave-navigate-tab': {
       if (!Number.isInteger(sender?.tab?.id)) throw new Error('вкладка не определена');
       const url = new URL(String(message.url || ''));
       const allowedOrigins = ['https://www.youtube.com', 'https://music.youtube.com'];
@@ -333,7 +325,7 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
-    case 'nova-log':
+    case 'mendosave-log':
       await appendLog({
         ts: Date.now(),
         tag: message.tag,
@@ -343,28 +335,28 @@ async function handleMessage(message, sender) {
       });
       return { ok: true };
 
-    case 'nova-error':
+    case 'mendosave-error':
       return downloadErrorLog(message, sender);
 
-    case 'nova-ensure':
+    case 'mendosave-ensure':
       await ensureOffscreen();
       return { ok: true };
 
     // Heartbeat from the offscreen document. Receiving it resets this
     // worker's idle timer, so a long mux can no longer outlive the worker
     // that has to accept its result.
-    case 'nova-ping':
+    case 'mendosave-ping':
       return { ok: true };
 
-    case 'nova-flush-recovered':
+    case 'mendosave-flush-recovered':
       return flushRecoveredFiles();
 
-    case 'nova-recovery-read':
-    case 'nova-recovery-write': {
+    case 'mendosave-recovery-read':
+    case 'mendosave-recovery-write': {
       if (sender?.id !== chrome.runtime.id || sender?.url !== chrome.runtime.getURL('offscreen.html')) {
         throw new Error('Recovery storage is only available to the media processor');
       }
-      if (message.t === 'nova-recovery-read') {
+      if (message.t === 'mendosave-recovery-read') {
         const stored = await chrome.storage.local.get(RECOVERY_KEY);
         return { ok: true, entries: Array.isArray(stored[RECOVERY_KEY]) ? stored[RECOVERY_KEY] : [] };
       }
@@ -378,7 +370,7 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
-    case 'nova-save': {
+    case 'mendosave-save': {
       const owner = downloadOwner();
       const id = await saveDownload(message.url, message.filename);
       await chrome.storage.session.set({ [`mendo_download_owner:${id}`]: owner });
@@ -388,14 +380,14 @@ async function handleMessage(message, sender) {
     // A direct save is pulled by the browser itself, so the page has no byte
     // count of its own: without this the on-page panel could only say "handed
     // over" while Chrome's own bubble showed the real progress.
-    case 'nova-download-state':
-    case 'nova-download-cancel': {
+    case 'mendosave-download-state':
+    case 'mendosave-download-cancel': {
       const id = message.id;
       if (!Number.isInteger(id) || id < 0) return { ok: false, error: 'download id is missing' };
       const key = `mendo_download_owner:${id}`;
       const saved = await chrome.storage.session.get(key);
       if (saved[key] !== downloadOwner()) throw new Error('Download belongs to a different sender');
-      if (message.t === 'nova-download-cancel') {
+      if (message.t === 'mendosave-download-cancel') {
         await chrome.downloads.cancel(id);
         return { ok: true };
       }
@@ -411,7 +403,7 @@ async function handleMessage(message, sender) {
       };
     }
 
-    case 'nova-fetch-caption': {
+    case 'mendosave-fetch-caption': {
       const response = await fetch(validateCaptionUrl(message.url), {
         credentials: 'include',
         referrer: 'https://www.youtube.com/',
@@ -420,11 +412,11 @@ async function handleMessage(message, sender) {
       return { ok: response.ok, status: response.status, len: text.length, text };
     }
 
-    case 'nova-register-job':
+    case 'mendosave-register-job':
       if (!Number.isInteger(sender?.tab?.id)) throw new Error('download tab is unavailable');
       return { ok: true, tabId: sender.tab.id };
 
-    case 'nova-set-reload-download': {
+    case 'mendosave-set-reload-download': {
       const pending = message.pending;
       if (!pending || (pending.format !== 'mp4' && pending.format !== 'mp3')
         || !/^[A-Za-z0-9_-]{6,}$/.test(String(pending.videoId || ''))
@@ -488,27 +480,27 @@ async function handleMessage(message, sender) {
       return reloadGuardWrite;
     }
 
-    case 'nova-get-reload-download': {
+    case 'mendosave-get-reload-download': {
       const key = reloadDownloadKey();
       const stored = await chrome.storage.session.get(key);
       return { ok: true, pending: stored[key] || null };
     }
 
-    case 'nova-clear-reload-download':
+    case 'mendosave-clear-reload-download':
       await chrome.storage.session.remove(reloadDownloadKey());
       return { ok: true };
 
-    case 'nova-clear-reload-guard':
+    case 'mendosave-clear-reload-guard':
       await chrome.storage.session.remove([reloadDownloadKey(), reloadGuardKey()]);
       return { ok: true };
 
-    case 'nova-progress': {
+    case 'mendosave-progress': {
       if (sender?.url !== chrome.runtime.getURL('offscreen.html')) {
         throw new Error('progress messages are only accepted from the media processor');
       }
       if (!Number.isInteger(message.tabId)) throw new Error('progress tab is unavailable');
       await chrome.tabs.sendMessage(message.tabId, {
-        t: 'nova-progress',
+        t: 'mendosave-progress',
         jobId: message.jobId,
         value: message.value,
         percent: message.percent,

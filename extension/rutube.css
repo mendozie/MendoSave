@@ -3,7 +3,7 @@
 
 [hidden] { display: none !important; }
 
-.nova-rt-btn {
+.mendosave-rt-btn {
   border: 0;
   background: transparent;
   cursor: pointer;
@@ -13,7 +13,7 @@
 }
 
 /* Overlay variant: bottom-right corner of the player. */
-.nova-rt-overlay {
+.mendosave-rt-overlay {
   position: absolute;
   right: 14px;
   bottom: 62px;
@@ -24,9 +24,9 @@
   filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.6));
 }
 
-.nova-rt-overlay:hover { opacity: 1; }
+.mendosave-rt-overlay:hover { opacity: 1; }
 
-.nova-rt-overlay svg {
+.mendosave-rt-overlay svg {
   width: 100%;
   height: 100%;
   display: block;
@@ -34,7 +34,7 @@
 }
 
 /* Shorts variant: sits above the like counter, in the rhythm of its siblings. */
-.nova-rt-shorts {
+.mendosave-rt-shorts {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -42,7 +42,7 @@
   margin-bottom: 12px;
 }
 
-.nova-rt-circle {
+.mendosave-rt-circle {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -53,9 +53,9 @@
   transition: background 0.15s ease;
 }
 
-.nova-rt-shorts:hover .nova-rt-circle { background: rgba(255, 255, 255, 0.22); }
+.mendosave-rt-shorts:hover .mendosave-rt-circle { background: rgba(255, 255, 255, 0.22); }
 
-.nova-rt-circle svg {
+.mendosave-rt-circle svg {
   position: static;
   width: 26px;
   height: 26px;
@@ -64,7 +64,7 @@
   shape-rendering: geometricPrecision;
 }
 
-.nova-rt-label {
+.mendosave-rt-label {
   font-size: 12px;
   line-height: 1;
   font-weight: 500;
@@ -74,7 +74,7 @@
 
 /* ---- menu ---------------------------------------------------------------- */
 
-.nova-rt-menu {
+.mendosave-rt-menu {
   position: fixed;
   z-index: 2147483000;
   width: 260px;
@@ -89,30 +89,30 @@
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
 
-.nova-rt-head {
+.mendosave-rt-head {
   padding: 7px 10px;
   color: #9aa0a6;
   font-size: 12px;
 }
 
-.nova-rt-item {
+.mendosave-rt-item {
   padding: 9px 10px;
   border-radius: 7px;
   cursor: pointer;
 }
 
-.nova-rt-item:hover { background: #23262a; }
+.mendosave-rt-item:hover { background: #23262a; }
 
-.nova-rt-muted {
+.mendosave-rt-muted {
   color: #9aa0a6;
   cursor: default;
 }
 
-.nova-rt-muted:hover { background: transparent; }
+.mendosave-rt-muted:hover { background: transparent; }
 
 /* ---- toast --------------------------------------------------------------- */
 
-.nova-rt-toast {
+.mendosave-rt-toast {
   position: fixed;
   left: 50%;
   bottom: 28px;
@@ -129,7 +129,7 @@
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
 }
 
-.nova-rt-toast::after {
+.mendosave-rt-toast::after {
   content: "";
   position: absolute;
   left: 14px;
@@ -139,7 +139,7 @@
   border-radius: 2px;
   background: linear-gradient(
     to right,
-    #35d477 var(--nova-rt-progress, 0%),
-    rgba(255, 255, 255, 0.14) var(--nova-rt-progress, 0%)
+    #35d477 var(--mendosave-rt-progress, 0%),
+    rgba(255, 255, 255, 0.14) var(--mendosave-rt-progress, 0%)
   );
 }

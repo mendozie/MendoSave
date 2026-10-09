@@ -1,17 +1,17 @@
 // Isolated-world UI and the only bridge between the page hook and extension APIs.
 (() => {
-  const BUTTON_ID = 'nova-download-btn';
+  const BUTTON_ID = 'mendosave-download-btn';
   const IS_MUSIC = location.hostname === 'music.youtube.com';
   // Evaluated per call: YouTube moves between /watch and /shorts without a
   // page load, and the reel feed rewrites the URL on every swipe.
   const SHORTS_PATH = /^\/shorts\/[A-Za-z0-9_-]{6,}/;
   const IS_SHORTS = () => !IS_MUSIC && SHORTS_PATH.test(location.pathname);
   const IS_DOWNLOADABLE_PAGE = () => location.pathname === '/watch' || IS_SHORTS();
-  const TO_HOOK = '__nova_to_hook';
-  const FROM_HOOK = '__nova_from_hook';
-  const TO_UI = '__nova_to_ui';
-  const FROM_UI = '__nova_from_ui';
-  const RELAYED_MESSAGES = new Set(['nova-log', 'nova-fetch-caption']);
+  const TO_HOOK = '__mendosave_to_hook';
+  const FROM_HOOK = '__mendosave_from_hook';
+  const TO_UI = '__mendosave_to_ui';
+  const FROM_UI = '__mendosave_from_ui';
+  const RELAYED_MESSAGES = new Set(['mendosave-log', 'mendosave-fetch-caption']);
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
 
   let requestSequence = 1;
@@ -108,7 +108,7 @@
           if (lateMs > HOOK_SUSPEND_SLACK_MS && gracesLeft > 0) {
             gracesLeft -= 1;
             void sendRuntimeMessage({
-              t: 'nova-log', tag: 'hook',
+              t: 'mendosave-log', tag: 'hook',
               text: `${cmd}: timeout fired ${Math.round(lateMs / 1000)} s late (tab was suspended);`
                 + ` waiting ${HOOK_RESUME_GRACE_MS / 1000} s more; gracesLeft= ${gracesLeft}`,
             }).catch(() => {});
@@ -135,8 +135,8 @@
 
   async function reportError(context, error, details) {
     const text = [error?.message || String(error), error?.stack].filter(Boolean).join('\n');
-    console.error('[Nova Video Saver]', error);
-    return sendWorkerMessage({ t: 'nova-error', context, error: text, details }, 30_000).catch(() => null);
+    console.error('[MendoSave]', error);
+    return sendWorkerMessage({ t: 'mendosave-error', context, error: text, details }, 30_000).catch(() => null);
   }
 
   function sendRuntimeMessage(message, timeoutMs) {
@@ -150,7 +150,7 @@
 
   // The MV3 service worker can be mid-shutdown when a message arrives; the
   // send then fails even though the worker is back a moment later. Only
-  // idempotent worker-side requests may be retried — a repeated nova-chunk
+  // idempotent worker-side requests may be retried — a repeated mendosave-chunk
   // would duplicate track data.
   const WORKER_RETRY_DELAYS = [150, 400, 1_000, 2_500];
 
@@ -194,34 +194,34 @@
     ring.setAttribute('stroke-width', '2.2');
     const arrows = document.createElementNS(namespace, 'path');
     arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     svg.append(ring, arrows);
     return svg;
   }
 
-  // The Shorts variant deliberately does not share .nova-download-btn: that
+  // The Shorts variant deliberately does not share .mendosave-download-btn: that
   // class absolutely-centres the icon on the whole button, which for a button
   // with a caption underneath pushes the icon below the middle of its circle.
   const VARIANT_CLASS = {
-    player: 'ytp-button nova-download-btn',
-    music: 'nova-download-btn nova-music-btn',
-    shorts: 'nova-shorts-btn',
-    compact: 'nova-compact-btn',
+    player: 'ytp-button mendosave-download-btn',
+    music: 'mendosave-download-btn mendosave-music-btn',
+    shorts: 'mendosave-shorts-btn',
+    compact: 'mendosave-compact-btn',
   };
 
   function createButton(variant) {
     const button = createElement('button', VARIANT_CLASS[variant] || VARIANT_CLASS.player);
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.dataset.novaVariant = variant;
+    button.dataset.mendosaveVariant = variant;
     button.title = 'MendoSave - скачать';
     button.setAttribute('aria-label', button.title);
     if (variant === 'shorts') {
       // Matches the shape of its neighbours in the reel action column: a round
       // tonal button with a caption underneath.
-      const circle = createElement('span', 'nova-shorts-circle');
+      const circle = createElement('span', 'mendosave-shorts-circle');
       circle.append(createCircleIcon());
-      button.append(circle, createElement('span', 'nova-shorts-label', 'MendoSave'));
+      button.append(circle, createElement('span', 'mendosave-shorts-label', 'MendoSave'));
     } else if (variant === 'compact') {
       button.append(createCircleIcon(), createElement('span', null, 'MendoSave'));
     } else {
@@ -281,12 +281,12 @@
     // anchor null means "first in the container"; already-correct placement
     // must not re-insert on every mutation tick.
     const placed = button
-      && button.dataset.novaVariant === target.variant
+      && button.dataset.mendosaveVariant === target.variant
       && button.parentElement === target.parent
       && (target.anchor ? button.nextElementSibling === target.anchor
         : target.parent.firstElementChild === button);
     if (placed) return;
-    if (button && button.dataset.novaVariant !== target.variant) {
+    if (button && button.dataset.mendosaveVariant !== target.variant) {
       button.remove();
       button = null;
     }
@@ -326,11 +326,11 @@
   }
 
   function createHeading(text) {
-    return createElement('div', 'nova-menu-head', text);
+    return createElement('div', 'mendosave-menu-head', text);
   }
 
-  function createBrandHeading(updateState) {
-    const heading = createElement('div', 'nova-menu-head nova-brand-head');
+  function createBrandHeading() {
+    const heading = createElement('div', 'mendosave-menu-head mendosave-brand-head');
     const label = createElement('span');
     const version = chrome.runtime.getManifest().version;
     label.append(`MendoSave v${version}`);
@@ -340,7 +340,7 @@
 
   function setItemLabel(item, title, description) {
     item.append(createElement('b', null, title));
-    if (description) item.append(' ', createElement('span', 'nova-ext', description));
+    if (description) item.append(' ', createElement('span', 'mendosave-ext', description));
   }
 
   // Every audio download is format 'mp3' for the page hook (identical capture
@@ -392,7 +392,7 @@
       menu.append(createHeading('Видео'));
       const heights = [...new Set(info.heights || [])].sort((a, b) => b - a);
       for (const height of heights) {
-        const item = createElement('div', 'nova-menu-item');
+        const item = createElement('div', 'mendosave-menu-item');
         setItemLabel(item, `${height}p`, 'MP4 video');
         item.addEventListener('click', () => {
           closeMenu();
@@ -404,7 +404,7 @@
 
     menu.append(createHeading('Аудио'));
     for (const audio of audioFormatsFor(info)) {
-      const item = createElement('div', 'nova-menu-item');
+      const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, audio.title, audio.note);
       item.addEventListener('click', () => {
         closeMenu();
@@ -421,7 +421,7 @@
       { from: 'now', title: 'Записать с текущего момента', note: 'запись до конца эфира или до остановки' },
     ];
     for (const option of options) {
-      const item = createElement('div', 'nova-menu-item');
+      const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, option.title, option.note);
       item.addEventListener('click', () => {
         closeMenu();
@@ -433,7 +433,7 @@
 
   function addPlaylistSection(info, items) {
     menu.append(createHeading('Плейлист'));
-    const item = createElement('div', 'nova-menu-item');
+    const item = createElement('div', 'mendosave-menu-item');
     setItemLabel(item, 'Скачать плейлист…', `${items.length} видео, выбор в списке`);
     item.addEventListener('click', () => {
       closeMenu();
@@ -445,7 +445,7 @@
   function addSubtitleItems(info, availability) {
     menu.append(createHeading('Субтитры'));
     if (!availability?.available) {
-      const item = createElement('div', 'nova-menu-item disabled');
+      const item = createElement('div', 'mendosave-menu-item disabled');
       setItemLabel(item, '.srt', 'недоступны');
       item.title = 'Субтитры недоступны для этого видео';
       menu.append(item);
@@ -458,7 +458,7 @@
       ['.txt', 'txt', 'простой текст (без тайм-кодов)'],
     ];
     for (const [extension, format, description] of formats) {
-      const item = createElement('div', 'nova-menu-item');
+      const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, extension, `${language} · ${description}`);
       item.addEventListener('click', () => {
         closeMenu();
@@ -472,10 +472,10 @@
     menu.append(createHeading(heading));
     let selected = current;
     const rows = options.map((option) => {
-      const row = createElement('div', `nova-menu-radio${selected === option.value ? ' sel' : ''}`);
-      const text = createElement('span', 'nova-radio-txt');
+      const row = createElement('div', `mendosave-menu-radio${selected === option.value ? ' sel' : ''}`);
+      const text = createElement('span', 'mendosave-radio-txt');
       text.append(createElement('b', null, option.title), createElement('i', null, option.note));
-      row.append(createElement('span', 'nova-dot'), text);
+      row.append(createElement('span', 'mendosave-dot'), text);
       row.addEventListener('click', (event) => {
         event.stopPropagation();
         selected = option.value;
@@ -508,14 +508,13 @@
     menuOpening = true;
 
     try {
-      const [info, availability, settings, updateStored] = await Promise.all([
+      const [info, availability, settings] = await Promise.all([
         callHook('info'),
         callHook('subs-available'),
         chrome.storage.local.get(['transcode']),
-        chrome.storage.local.get('nova_update').catch(() => ({})),
       ]);
-      menu = createElement('div', 'nova-menu');
-      menu.append(createBrandHeading(updateStored?.nova_update));
+      menu = createElement('div', 'mendosave-menu');
+      menu.append(createBrandHeading());
       if (info.isLive) {
         addLiveSection(info);
       } else {
@@ -547,26 +546,26 @@
   }
 
   function getToast() {
-    let box = document.getElementById('nova-toast');
+    let box = document.getElementById('mendosave-toast');
     if (!box) {
       box = createElement('div');
-      box.id = 'nova-toast';
-      const bar = createElement('div', 'nova-toast-bar');
+      box.id = 'mendosave-toast';
+      const bar = createElement('div', 'mendosave-toast-bar');
       bar.append(createElement('i'));
-      const cancelButton = createElement('button', 'nova-toast-cancel', 'Отменить загрузку');
+      const cancelButton = createElement('button', 'mendosave-toast-cancel', 'Отменить загрузку');
       cancelButton.type = 'button';
       cancelButton.hidden = true;
-      cancelButton.addEventListener('click', () => box.__novaCancel?.());
-      box.append(createElement('span', 'nova-toast-txt'), bar, createElement('div', 'nova-toast-stages'), cancelButton);
+      cancelButton.addEventListener('click', () => box.__mendosaveCancel?.());
+      box.append(createElement('span', 'mendosave-toast-txt'), bar, createElement('div', 'mendosave-toast-stages'), cancelButton);
       document.body.append(box);
     }
-    const text = box.querySelector('.nova-toast-txt');
-    const legacyBar = box.querySelector(':scope > .nova-toast-bar');
+    const text = box.querySelector('.mendosave-toast-txt');
+    const legacyBar = box.querySelector(':scope > .mendosave-toast-bar');
     const progress = legacyBar.querySelector('i');
-    const stages = box.querySelector('.nova-toast-stages');
-    const cancel = box.querySelector('.nova-toast-cancel');
+    const stages = box.querySelector('.mendosave-toast-stages');
+    const cancel = box.querySelector('.mendosave-toast-cancel');
     const hideCancel = () => {
-      box.__novaCancel = null;
+      box.__mendosaveCancel = null;
       cancel.hidden = true;
     };
     return {
@@ -585,7 +584,7 @@
           hideCancel();
           return;
         }
-        box.__novaCancel = handler;
+        box.__mendosaveCancel = handler;
         cancel.textContent = label;
         cancel.hidden = false;
       },
@@ -595,11 +594,11 @@
         legacyBar.hidden = true;
         stages.replaceChildren();
         for (const definition of definitions) {
-          const row = createElement('div', 'nova-stage queued');
+          const row = createElement('div', 'mendosave-stage queued');
           row.dataset.stage = definition.id;
-          const header = createElement('div', 'nova-stage-head');
-          header.append(createElement('span', 'nova-stage-label', definition.label), createElement('span', 'nova-stage-value', 'ожидание'));
-          const bar = createElement('div', 'nova-stage-bar');
+          const header = createElement('div', 'mendosave-stage-head');
+          header.append(createElement('span', 'mendosave-stage-label', definition.label), createElement('span', 'mendosave-stage-value', 'ожидание'));
+          const bar = createElement('div', 'mendosave-stage-bar');
           bar.append(createElement('i'));
           row.append(header, bar);
           stages.append(row);
@@ -610,10 +609,10 @@
       stage(id, fraction, state = 'active', label) {
         const row = stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
-        row.className = `nova-stage ${state}`;
-        if (label) row.querySelector('.nova-stage-label').textContent = label;
-        const value = row.querySelector('.nova-stage-value');
-        const bar = row.querySelector('.nova-stage-bar i');
+        row.className = `mendosave-stage ${state}`;
+        if (label) row.querySelector('.mendosave-stage-label').textContent = label;
+        const value = row.querySelector('.mendosave-stage-value');
+        const bar = row.querySelector('.mendosave-stage-bar i');
         if (Number.isFinite(fraction)) {
           const percent = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
           value.textContent = state === 'done' ? 'готово' : `${percent}%`;
@@ -704,7 +703,7 @@
       const content = output.timed ? buildTimedSubtitles(response.cues, output.extension) : response.text;
       const filename = `${safeFilename(info.title)} [${language}].${output.extension}`;
       const url = `data:${output.mime};charset=utf-8,${encodeURIComponent(`\uFEFF${content}`)}`;
-      const saved = await sendWorkerMessage({ t: 'nova-save', url, filename }, 30_000);
+      const saved = await sendWorkerMessage({ t: 'mendosave-save', url, filename }, 30_000);
       if (!saved?.ok) throw new Error(saved?.error || 'не удалось сохранить субтитры');
       notification.set(`Готово: ${filename}`, 1);
       notification.hide(4000);
@@ -784,17 +783,17 @@
       notification.setCancel(null);
       // Cancelling one item of a running playlist queue stops the whole queue.
       void clearQueue();
-      try { sessionStorage.removeItem('nvs_queue_token'); } catch (error) {}
-      document.getElementById('nova-queue')?.remove();
+      try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
+      document.getElementById('mendosave-queue')?.remove();
       void callHook('download-cancel').catch(() => {});
       if (IS_MUSIC) void callHook('music-mute', { mute: false }).catch(() => {});
-      void sendRuntimeMessage({ t: 'nova-abort', jobId }, 10_000).catch(() => {});
+      void sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
     });
 
     const onFfmpegProgress = (message) => {
       // The SABR attempt runs under its own id; its encode progress is this
       // download's progress too (a 5 h MP3 encodes for minutes).
-      if (message?.t !== 'nova-progress'
+      if (message?.t !== 'mendosave-progress'
         || (message.jobId !== jobId && message.jobId !== `${jobId}-sabr`)) return;
       const value = Math.max(0, Math.min(1, message.value || 0));
       const fallback = isMp3
@@ -965,7 +964,8 @@
       notification.set(`Готово: ${result.filename || filename}`, 1);
       notification.hide(4000);
       return true;
-    } catch (error) {
+    } catch (caughtError) {
+      let error = caughtError;
       if (cancelRequested || error?.details?.cancelled) {
         notification.set('Загрузка отменена', 1);
         notification.hide(4000);
@@ -978,7 +978,7 @@
       // requested, or failed while being scheduled.
       if (error?.details?.reloadRequired || error?.details?.reason) {
         void sendRuntimeMessage({
-          t: 'nova-log', tag: 'download',
+          t: 'mendosave-log', tag: 'download',
           text: `download failed; reloadRequired= ${Boolean(error?.details?.reloadRequired)}`
             + ` reason= ${error?.details?.reason || 'unknown'} reloadCount= ${reloadCount}`
             + ` willReload= ${Boolean(error?.details?.reloadRequired) && reloadCount < 2}`,
@@ -987,7 +987,7 @@
       if (error?.details?.reloadRequired && reloadCount < 2) {
         try {
           const queued = await sendRuntimeMessage({
-            t: 'nova-set-reload-download',
+            t: 'mendosave-set-reload-download',
             pending: {
               videoId: info.videoId,
               title: info.title,
@@ -1019,7 +1019,7 @@
             try { primedMedia.muted = true; } catch (primeError) {}
             try { primedMedia.pause(); } catch (primeError) {}
           }
-          // Nova's own reload: the playlist queue must survive it, while a
+          // MendoSave's own reload: the playlist queue must survive it, while a
           // manual user reload (no flag) cancels the queue on the next load.
           try { sessionStorage.setItem('nvs_queue_nav', '1'); } catch (navError) {}
           // Reload through the browser, not the page: YouTube's SPA router can
@@ -1027,7 +1027,7 @@
           // alive — a tab-level reload behaves like a manual F5. On Music the
           // reload must target the track's own URL: a plain reload lets
           // ytmusic reopen the queue on the NEXT track and strand the resume.
-          let reloadRequest = { t: 'nova-reload-tab' };
+          let reloadRequest = { t: 'mendosave-reload-tab' };
           if (IS_MUSIC && info.videoId) {
             const target = new URL('/watch', location.origin);
             target.searchParams.set('v', info.videoId);
@@ -1035,7 +1035,7 @@
             // start a RADIO for the track and wander off to other songs.
             const listId = playlistIdFromLocation();
             if (listId) target.searchParams.set('list', listId);
-            reloadRequest = { t: 'nova-navigate-tab', url: target.href };
+            reloadRequest = { t: 'mendosave-navigate-tab', url: target.href };
           }
           setTimeout(() => {
             sendRuntimeMessage(reloadRequest, 5_000)
@@ -1045,7 +1045,7 @@
           return 'reload';
         } catch (reloadError) {
           void sendRuntimeMessage({
-            t: 'nova-log', tag: 'download',
+            t: 'mendosave-log', tag: 'download',
             text: `automatic reload could not be scheduled: ${String(reloadError?.message || reloadError)}`,
           }).catch(() => {});
           error = reloadError;
@@ -1081,12 +1081,19 @@
   // offscreen adopts it only for the tracks it confirmed.
   const STAGING_POLL_MS = 700;
 
+  function ownedTransferChunk(buffer, offset) {
+    // Gecko may retain a page/DOM realm for views over bridged ArrayBuffers.
+    // subarray() then reads a forbidden foreign `constructor` via species.
+    // Copy only this chunk into our realm before slicing/base64 encoding.
+    const length = Math.min(TRANSFER_CHUNK_SIZE, buffer.byteLength - offset);
+    return new Uint8Array(new Uint8Array(buffer, offset, length));
+  }
+
   async function stageBuffer(jobId, track, buffer) {
-    const bytes = new Uint8Array(buffer);
-    for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
-      const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
+    for (let offset = 0; offset < buffer.byteLength; offset += TRANSFER_CHUNK_SIZE) {
+      const chunk = ownedTransferChunk(buffer, offset);
       const response = await sendRuntimeMessage({
-        t: 'nova-stage', jobId, track, b64: encodeBase64(chunk),
+        t: 'mendosave-stage', jobId, track, b64: encodeBase64(chunk),
       }, 60_000).catch(() => null);
       if (!response?.ok) return false;
     }
@@ -1103,9 +1110,9 @@
     const give = (why) => { failed = true; reason = why; };
     const pump = (async () => {
       try {
-        const ensured = await sendWorkerMessage({ t: 'nova-ensure' }, 30_000);
+        const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
         if (!ensured?.ok) { give(`offscreen unavailable: ${ensured?.error || 'no answer'}`); return; }
-        // `nova-ensure` resolves as soon as the document is created, and the
+        // `mendosave-ensure` resolves as soon as the document is created, and the
         // document registers its message listener only after ffmpeg.js and
         // offscreen.js have both parsed. A request sent into that window is
         // answered by nobody — the service worker sees an unknown type and
@@ -1115,7 +1122,7 @@
         let opened = null;
         for (let attempt = 0; attempt < 6 && !opened?.ok && !stopped; attempt++) {
           if (attempt) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
-          opened = await sendRuntimeMessage({ t: 'nova-stage-open', jobId }, 10_000).catch(() => null);
+          opened = await sendRuntimeMessage({ t: 'mendosave-stage-open', jobId }, 10_000).catch(() => null);
         }
         if (!opened?.ok) { give(`stage-open refused: ${opened?.error || 'no answer'}`); return; }
       } catch (error) { give(`setup failed: ${String(error?.message || error)}`); return; }
@@ -1148,7 +1155,7 @@
           // Without this line a silent staging failure is invisible: the report
           // only shows that nothing was staged, never why.
           void sendRuntimeMessage({
-            t: 'nova-log', tag: 'transfer',
+            t: 'mendosave-log', tag: 'transfer',
             text: `staging stopped; shippedBytes= ${shippedBytes} drains= ${drains}`
               + ` seconds= ${((Date.now() - openedAt) / 1000).toFixed(1)}`
               + `${failed ? ` failed= ${reason}` : ''}`,
@@ -1182,9 +1189,9 @@
   }
 
   async function warmupMediaProcessor() {
-    const ensured = await sendWorkerMessage({ t: 'nova-ensure' }, 30_000);
+    const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const warmed = await sendRuntimeMessage({ t: 'nova-warmup' }, 120_000);
+    const warmed = await sendRuntimeMessage({ t: 'mendosave-warmup' }, 120_000);
     if (!warmed?.ok) throw new Error(warmed?.error || 'не удалось загрузить медиадвижок');
   }
 
@@ -1192,16 +1199,16 @@
     const jobId = job.jobId;
     let begun = false;
     try {
-      const ensured = await sendWorkerMessage({ t: 'nova-ensure' }, 30_000);
+      const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
 
-      const registration = await sendRuntimeMessage({ t: 'nova-register-job', jobId }, 10_000);
+      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000);
       if (!registration?.ok || !Number.isInteger(registration.tabId)) {
         throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
       }
 
       const started = await sendRuntimeMessage({
-        t: 'nova-begin', jobId, tabId: registration.tabId,
+        t: 'mendosave-begin', jobId, tabId: registration.tabId,
         filename: job.filename, format: job.format,
         audioFormat: job.audioFormat, audioQuality: job.audioQuality,
         videoId: job.videoId || '',
@@ -1227,11 +1234,10 @@
       onStage?.('transfer', 0, 'active', 'Передача и сборка');
       const sendTrack = async (track, buffer) => {
         if (!buffer) return;
-        const bytes = new Uint8Array(buffer);
-        for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
-          const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
+        for (let offset = 0; offset < buffer.byteLength; offset += TRANSFER_CHUNK_SIZE) {
+          const chunk = ownedTransferChunk(buffer, offset);
           const response = await sendRuntimeMessage({
-            t: 'nova-chunk', jobId, track, b64: encodeBase64(chunk),
+            t: 'mendosave-chunk', jobId, track, b64: encodeBase64(chunk),
           }, 60_000);
           if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${track})`);
           transferredBytes += chunk.length;
@@ -1258,16 +1264,16 @@
       job.videoPrefix = null;
       job.audio = null;
       void sendRuntimeMessage({
-        t: 'nova-log', tag: 'transfer',
+        t: 'mendosave-log', tag: 'transfer',
         text: `tracks handed to offscreen; bytes= ${totalBytes}`
           + ` staged= ${job.staged?.audio ? 'audio' : ''}${job.staged?.video ? '+video' : ''}`
           + ` seconds= ${((Date.now() - transferStartedAt) / 1000).toFixed(1)}`,
       }).catch(() => {});
       onStage?.('transfer', 1, 'done', 'Передача и сборка');
       onStage?.('process', 0, 'active');
-      return await sendRuntimeMessage({ t: 'nova-finalize', jobId }, 2 * 60 * 60_000);
+      return await sendRuntimeMessage({ t: 'mendosave-finalize', jobId }, 2 * 60 * 60_000);
     } catch (error) {
-      if (begun) await sendRuntimeMessage({ t: 'nova-abort', jobId }, 10_000).catch(() => {});
+      if (begun) await sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
       throw error;
     }
   }
@@ -1287,9 +1293,9 @@
       throw cancelled;
     };
     try {
-      const ensured = await sendWorkerMessage({ t: 'nova-ensure' }, 30_000);
+      const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-      const registration = await sendRuntimeMessage({ t: 'nova-register-job', jobId }, 10_000);
+      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000);
       if (!registration?.ok || !Number.isInteger(registration.tabId)) {
         throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
       }
@@ -1305,7 +1311,7 @@
       const totalBytes = videoSize + tracks.audio.size;
 
       const begin = await sendRuntimeMessage({
-        t: 'nova-begin', jobId, tabId: registration.tabId,
+        t: 'mendosave-begin', jobId, tabId: registration.tabId,
         filename: job.filename(tracks), format: job.format,
         audioFormat: job.audioFormat, audioQuality: job.audioQuality,
         videoId: job.videoId || '',
@@ -1334,7 +1340,7 @@
           for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
             const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
             const response = await sendRuntimeMessage({
-              t: 'nova-chunk', jobId, track: chunk.track, b64: encodeBase64(slice),
+              t: 'mendosave-chunk', jobId, track: chunk.track, b64: encodeBase64(slice),
             }, 60_000);
             if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${chunk.track})`);
             transferred += slice.length;
@@ -1357,10 +1363,10 @@
       // toast's abort names the base job id, not this one — a press here used
       // to be ignored and followed by "Готово". Minutes long for a 5 h MP3.
       job.onProcessing?.();
-      return await sendRuntimeMessage({ t: 'nova-finalize', jobId }, 2 * 60 * 60_000);
+      return await sendRuntimeMessage({ t: 'mendosave-finalize', jobId }, 2 * 60 * 60_000);
     } catch (error) {
       void callHook('sabr-cancel').catch(() => {});
-      if (begun) await sendRuntimeMessage({ t: 'nova-abort', jobId }, 10_000).catch(() => {});
+      if (begun) await sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
       throw error;
     }
   }
@@ -1400,8 +1406,8 @@
         + ` ${String(error?.message || error)}`;
       // Also to the console: a silent fall-through to the capture looks like the
       // SABR path was never tried, and the journal is not visible while testing.
-      console.warn('[Nova Video Saver]', reason);
-      void sendRuntimeMessage({ t: 'nova-log', tag: 'sabr', text: reason }).catch(() => {});
+      console.warn('[MendoSave]', reason);
+      void sendRuntimeMessage({ t: 'mendosave-log', tag: 'sabr', text: reason }).catch(() => {});
       return null;
     }
   }
@@ -1418,11 +1424,11 @@
   }
 
   async function clearReloadDownload() {
-    return sendRuntimeMessage({ t: 'nova-clear-reload-download' }, 10_000).catch(() => null);
+    return sendRuntimeMessage({ t: 'mendosave-clear-reload-download' }, 10_000).catch(() => null);
   }
 
   async function clearReloadGuard() {
-    return sendRuntimeMessage({ t: 'nova-clear-reload-guard' }, 10_000).catch(() => null);
+    return sendRuntimeMessage({ t: 'mendosave-clear-reload-guard' }, 10_000).catch(() => null);
   }
 
   async function resumeReloadedVideoDownload() {
@@ -1433,10 +1439,10 @@
     // for a routine slow start is far worse than a missed resume.
     let response;
     try {
-      response = await sendWorkerMessage({ t: 'nova-get-reload-download' }, 20_000);
+      response = await sendWorkerMessage({ t: 'mendosave-get-reload-download' }, 20_000);
     } catch (error) {
       void sendRuntimeMessage({
-        t: 'nova-log', tag: 'resume',
+        t: 'mendosave-log', tag: 'resume',
         text: `pending-download probe skipped: ${String(error?.message || error)}`,
       }).catch(() => {});
       return;
@@ -1454,9 +1460,9 @@
         // reload; the pending download then silently died here. Go back to
         // the track it belongs to (once) and resume there.
         let alreadyRedirected = false;
-        try { alreadyRedirected = sessionStorage.getItem('nvs_resume_redirect') === pending.videoId; } catch (error) {}
+        try { alreadyRedirected = sessionStorage.getItem('mendosave_resume_redirect') === pending.videoId; } catch (error) {}
         if (!alreadyRedirected) {
-          try { sessionStorage.setItem('nvs_resume_redirect', pending.videoId); } catch (error) {}
+          try { sessionStorage.setItem('mendosave_resume_redirect', pending.videoId); } catch (error) {}
           try { sessionStorage.setItem('nvs_queue_nav', '1'); } catch (error) {}
           const target = new URL('/watch', location.origin);
           target.searchParams.set('v', pending.videoId);
@@ -1464,12 +1470,12 @@
           const listId = playlistIdFromLocation();
           if (listId) target.searchParams.set('list', listId);
           const navigated = await sendRuntimeMessage({
-            t: 'nova-navigate-tab', url: target.href,
+            t: 'mendosave-navigate-tab', url: target.href,
           }, 5_000).catch(() => null);
           if (navigated?.ok) return; // pending stays stored; retried after load
         }
       }
-      try { sessionStorage.removeItem('nvs_resume_redirect'); } catch (error) {}
+      try { sessionStorage.removeItem('mendosave_resume_redirect'); } catch (error) {}
       const valid = pending.reloadAttempted === true
         && (pending.format === 'mp4' || pending.format === 'mp3')
         && typeof pending.token === 'string'
@@ -1509,7 +1515,7 @@
       // spend that wait building a fresh SourceBuffer beginning at the saved
       // playback position, forcing a complete second download at 99%.
       holdReloadedMediaAtStart();
-      // Nova's own reload can land in a tab the user is not looking at, and
+      // MendoSave's own reload can land in a tab the user is not looking at, and
       // YouTube does not build its player in a hidden tab. The readiness poll
       // would then spend its whole budget on a page that was never going to be
       // ready, and the resume — a one-shot — is lost for good. Wait to be shown
@@ -1589,17 +1595,17 @@
   let liveJob = null;
 
   function removeLivePanel() {
-    document.getElementById('nova-live-panel')?.remove();
+    document.getElementById('mendosave-live-panel')?.remove();
   }
 
   function renderLivePanel(state) {
-    let box = document.getElementById('nova-live-panel');
+    let box = document.getElementById('mendosave-live-panel');
     if (!box) {
       box = createElement('div');
-      box.id = 'nova-live-panel';
-      const head = createElement('div', 'nova-live-head');
-      head.append(createElement('span', 'nova-live-dot'), createElement('span', 'nova-live-txt'));
-      const stopButton = createElement('button', 'nova-btn nova-live-stop', 'Остановить и сохранить');
+      box.id = 'mendosave-live-panel';
+      const head = createElement('div', 'mendosave-live-head');
+      head.append(createElement('span', 'mendosave-live-dot'), createElement('span', 'mendosave-live-txt'));
+      const stopButton = createElement('button', 'mendosave-btn mendosave-live-stop', 'Остановить и сохранить');
       stopButton.addEventListener('click', () => {
         stopButton.disabled = true;
         stopButton.textContent = 'Останавливаю…';
@@ -1608,7 +1614,7 @@
       box.append(head, stopButton);
       document.body.append(box);
     }
-    const label = box.querySelector('.nova-live-txt');
+    const label = box.querySelector('.mendosave-live-txt');
     const megabytes = (Number(state.bytes || 0) / (1024 * 1024)).toFixed(1);
     const total = Math.max(0, Math.floor(Number(state.seconds) || 0));
     const minutes = Math.floor(total / 60);
@@ -1638,10 +1644,10 @@
     const onLiveChunk = (event) => {
       if (event.source !== window || event.origin !== location.origin) return;
       const data = event.data;
-      if (!data || data.__nova_live_chunk !== true || !data.buffer) return;
+      if (!data || data.__mendosave_live_chunk !== true || !data.buffer) return;
       if (!liveJob || liveJob.jobId !== jobId || liveJob.failed) return;
-      const bytes = new Uint8Array(data.buffer);
-      liveJob.queuedBytes += bytes.length;
+      const buffer = data.buffer;
+      liveJob.queuedBytes += buffer.byteLength;
       if (liveJob.queuedBytes - liveJob.sentBytes > 192 * 1024 * 1024) {
         failLiveTransfer('передача сегментов не успевает за эфиром');
         return;
@@ -1649,32 +1655,32 @@
       const track = data.kind === 'audio' ? 'audio' : 'video';
       chains[track] = chains[track].then(async () => {
         if (!liveJob || liveJob.failed) return;
-        for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
-          const part = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
+        for (let offset = 0; offset < buffer.byteLength; offset += TRANSFER_CHUNK_SIZE) {
+          const part = ownedTransferChunk(buffer, offset);
           const response = await sendRuntimeMessage({
-            t: 'nova-live-chunk', jobId, track, mime: data.mime || '', b64: encodeBase64(part),
+            t: 'mendosave-live-chunk', jobId, track, mime: data.mime || '', b64: encodeBase64(part),
           }, 60_000);
           if (!response?.ok) throw new Error(response?.error || 'сегмент не принят обработчиком');
         }
-        liveJob.sentBytes += bytes.length;
+        liveJob.sentBytes += buffer.byteLength;
       }).catch((error) => failLiveTransfer(String(error?.message || error)));
     };
     window.addEventListener('message', onLiveChunk);
     const onFfmpegProgress = (message) => {
-      if (message?.t !== 'nova-progress' || message.jobId !== jobId) return;
+      if (message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
       notification.set(message.status || 'Сборка записи эфира…', Math.max(0, Math.min(1, message.value || 0)));
     };
     chrome.runtime.onMessage.addListener(onFfmpegProgress);
     try {
       notification.set('Подготовка записи эфира…', 0.05);
-      const ensured = await sendWorkerMessage({ t: 'nova-ensure' }, 30_000);
+      const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-      const registration = await sendRuntimeMessage({ t: 'nova-register-job', jobId }, 10_000);
+      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000);
       if (!registration?.ok || !Number.isInteger(registration.tabId)) {
         throw new Error(registration?.error || 'не удалось определить вкладку записи');
       }
       const begun = await sendRuntimeMessage({
-        t: 'nova-live-begin', jobId, tabId: registration.tabId,
+        t: 'mendosave-live-begin', jobId, tabId: registration.tabId,
       }, 30_000);
       if (!begun?.ok) throw new Error(begun?.error || 'не удалось начать запись эфира');
       notification.hide(800);
@@ -1692,7 +1698,7 @@
       notification.set('Собираю файл записи…', 0.25);
       const filename = `${safeFilename(info.title)} [LIVE].mp4`;
       const finalized = await sendRuntimeMessage({
-        t: 'nova-live-finalize',
+        t: 'mendosave-live-finalize',
         jobId,
         filename,
         duration: Number(result.durationSeconds) || 0,
@@ -1714,7 +1720,7 @@
       return true;
     } catch (error) {
       removeLivePanel();
-      await sendRuntimeMessage({ t: 'nova-live-abort', jobId }, 10_000).catch(() => {});
+      await sendRuntimeMessage({ t: 'mendosave-live-abort', jobId }, 10_000).catch(() => {});
       const detail = String(error?.message || error);
       notification.set(error?.recovered ? detail : `Ошибка записи эфира: ${detail.slice(0, 240)}`, 1);
       notification.hide(error?.recovered ? 25_000 : 9000);
@@ -1734,11 +1740,11 @@
   // single-video pipeline and then navigates to the next video itself.
   const QUEUE_KEY = 'nvs_playlist_queue';
   let queueRunning = false;
-  // Consumed once per page load: set by Nova right before its own reloads and
+  // Consumed once per page load: set by MendoSave right before its own reloads and
   // navigations. A page load without it means the user reloaded manually.
-  let pageLoadWasNovaNavigation = false;
+  let pageLoadWasMendoSaveNavigation = false;
   try {
-    pageLoadWasNovaNavigation = sessionStorage.getItem('nvs_queue_nav') === '1';
+    pageLoadWasMendoSaveNavigation = sessionStorage.getItem('nvs_queue_nav') === '1';
     sessionStorage.removeItem('nvs_queue_nav');
   } catch (error) {}
 
@@ -1796,19 +1802,19 @@
   }
 
   function closePlaylistPicker() {
-    document.getElementById('nova-playlist-overlay')?.remove();
+    document.getElementById('mendosave-playlist-overlay')?.remove();
   }
 
   function openPlaylistPicker(info, items) {
     closePlaylistPicker();
     const overlay = createElement('div');
-    overlay.id = 'nova-playlist-overlay';
-    const panel = createElement('div', 'nova-playlist');
-    panel.append(createElement('div', 'nova-playlist-head', `Скачивание плейлиста — ${items.length} видео`));
-    panel.append(createElement('div', 'nova-playlist-note',
+    overlay.id = 'mendosave-playlist-overlay';
+    const panel = createElement('div', 'mendosave-playlist');
+    panel.append(createElement('div', 'mendosave-playlist-head', `Скачивание плейлиста — ${items.length} видео`));
+    panel.append(createElement('div', 'mendosave-playlist-note',
       'В списке видео, уже загруженные плеером. Если плейлист длиннее — прокрутите его на странице и откройте это окно снова.'));
 
-    const formatRow = createElement('div', 'nova-playlist-format');
+    const formatRow = createElement('div', 'mendosave-playlist-format');
     formatRow.append(createElement('span', null, 'Формат:'));
     const select = document.createElement('select');
     // On Music the queue mixes songs and clips; a fixed video height would
@@ -1827,16 +1833,16 @@
     formatRow.append(select);
     panel.append(formatRow);
 
-    const allRow = createElement('label', 'nova-playlist-row nova-playlist-all');
+    const allRow = createElement('label', 'mendosave-playlist-row mendosave-playlist-all');
     const selectAll = document.createElement('input');
     selectAll.type = 'checkbox';
     selectAll.checked = true;
-    allRow.append(selectAll, createElement('span', 'nova-playlist-title', 'Выбрать все'));
+    allRow.append(selectAll, createElement('span', 'mendosave-playlist-title', 'Выбрать все'));
     panel.append(allRow);
 
-    const list = createElement('div', 'nova-playlist-list');
+    const list = createElement('div', 'mendosave-playlist-list');
     const checks = items.map((item, index) => {
-      const row = createElement('label', 'nova-playlist-row');
+      const row = createElement('label', 'mendosave-playlist-row');
       const check = document.createElement('input');
       check.type = 'checkbox';
       check.checked = true;
@@ -1844,17 +1850,17 @@
         selectAll.checked = checks.every((box) => box.checked);
       });
       row.append(check,
-        createElement('span', 'nova-playlist-idx', String(index + 1)),
-        createElement('span', 'nova-playlist-title', item.title));
+        createElement('span', 'mendosave-playlist-idx', String(index + 1)),
+        createElement('span', 'mendosave-playlist-title', item.title));
       list.append(row);
       return check;
     });
     panel.append(list);
     selectAll.addEventListener('change', () => checks.forEach((box) => { box.checked = selectAll.checked; }));
 
-    const actions = createElement('div', 'nova-playlist-actions');
-    const startButton = createElement('button', 'nova-btn primary', 'Скачать выбранные');
-    const closeButton = createElement('button', 'nova-btn', 'Закрыть');
+    const actions = createElement('div', 'mendosave-playlist-actions');
+    const startButton = createElement('button', 'mendosave-btn primary', 'Скачать выбранные');
+    const closeButton = createElement('button', 'mendosave-btn', 'Закрыть');
     actions.append(startButton, closeButton);
     panel.append(actions);
     overlay.append(panel);
@@ -1870,7 +1876,7 @@
       // The token lives in this tab's sessionStorage: another tab (or a tab
       // opened after this one closes) can never adopt and resume this queue.
       const token = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
-      try { sessionStorage.setItem('nvs_queue_token', token); } catch (error) {}
+      try { sessionStorage.setItem('mendosave_queue_token', token); } catch (error) {}
       await writeQueue({
         listId: playlistIdFromLocation(),
         createdAt: Date.now(),
@@ -1893,44 +1899,44 @@
   }
 
   function renderQueuePanel(queue, state = {}) {
-    let box = document.getElementById('nova-queue');
+    let box = document.getElementById('mendosave-queue');
     if (!box) {
       box = createElement('div');
-      box.id = 'nova-queue';
-      const body = createElement('div', 'nova-queue-body');
-      const cancelButton = createElement('button', 'nova-btn nova-queue-cancel', 'Отменить очередь');
+      box.id = 'mendosave-queue';
+      const body = createElement('div', 'mendosave-queue-body');
+      const cancelButton = createElement('button', 'mendosave-btn mendosave-queue-cancel', 'Отменить очередь');
       cancelButton.addEventListener('click', async () => {
         await clearQueue();
-        try { sessionStorage.removeItem('nvs_queue_token'); } catch (error) {}
+        try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
         if (IS_MUSIC) void callHook('music-mute', { mute: false }).catch(() => {});
         // Do not touch the toast here: a download may be mid-item and owns the
         // staged progress UI (with its own cancel button). Removing the panel
         // is the visible confirmation that the queue is gone.
         box.remove();
       });
-      const actions = createElement('div', 'nova-queue-actions');
+      const actions = createElement('div', 'mendosave-queue-actions');
       actions.append(cancelButton);
-      body.append(createElement('div', 'nova-queue-list'), actions);
-      box.append(createElement('div', 'nova-queue-pill'), body);
+      body.append(createElement('div', 'mendosave-queue-list'), actions);
+      box.append(createElement('div', 'mendosave-queue-pill'), body);
       document.body.append(box);
     }
     const done = queue.items.filter((item) => item.status === 'done').length;
     const failed = queue.items.filter((item) => item.status === 'error').length;
     const activeItem = queue.items.find((item) => item.status === 'active');
-    const pill = box.querySelector('.nova-queue-pill');
+    const pill = box.querySelector('.mendosave-queue-pill');
     pill.textContent = state.finished
       ? `Плейлист: готово ${done}/${queue.items.length}${failed ? `, ошибок: ${failed}` : ''}`
       : `Плейлист: ${done}/${queue.items.length}${activeItem ? ` · ${activeItem.title}` : ''}`;
-    box.querySelector('.nova-queue-cancel').textContent = state.finished ? 'Закрыть' : 'Отменить очередь';
+    box.querySelector('.mendosave-queue-cancel').textContent = state.finished ? 'Закрыть' : 'Отменить очередь';
     box.classList.toggle('finished', Boolean(state.finished));
-    const list = box.querySelector('.nova-queue-list');
+    const list = box.querySelector('.mendosave-queue-list');
     list.replaceChildren(...queue.items.map((item, index) => {
-      const row = createElement('div', `nova-queue-row ${item.status}`);
+      const row = createElement('div', `mendosave-queue-row ${item.status}`);
       const icon = item.status === 'done' ? '✓'
         : (item.status === 'error' ? '✗' : (item.status === 'active' ? '▶' : '•'));
-      row.append(createElement('span', 'nova-queue-ic', icon),
-        createElement('span', 'nova-queue-idx', `${index + 1}.`),
-        createElement('span', 'nova-queue-title', item.title));
+      row.append(createElement('span', 'mendosave-queue-ic', icon),
+        createElement('span', 'mendosave-queue-idx', `${index + 1}.`),
+        createElement('span', 'mendosave-queue-title', item.title));
       return row;
     }));
   }
@@ -1973,7 +1979,7 @@
       let queue = await readQueue();
       if (!queue?.active || !Array.isArray(queue.items) || !queue.items.length) return;
       let sessionToken = null;
-      try { sessionToken = sessionStorage.getItem('nvs_queue_token'); } catch (error) {}
+      try { sessionToken = sessionStorage.getItem('mendosave_queue_token'); } catch (error) {}
       if (!queue.token || queue.token !== sessionToken) {
         // Queue owned by another tab: never adopt it here — and never destroy
         // it either, its owner tab may be running it right now. Only remove
@@ -1984,11 +1990,11 @@
         return;
       }
       if (entry === 'load') {
-        if (!pageLoadWasNovaNavigation) {
-          // A page load without Nova's navigation flag is the user pressing
+        if (!pageLoadWasMendoSaveNavigation) {
+          // A page load without MendoSave's navigation flag is the user pressing
           // reload by hand — that is the stop signal for the queue.
           await clearQueue();
-          try { sessionStorage.removeItem('nvs_queue_token'); } catch (error) {}
+          try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
           const notification = getToast();
           notification.set('Очередь плейлиста остановлена после обновления страницы', 1);
           notification.hide(6000);
@@ -2041,7 +2047,7 @@
           // transition where YouTube preloads media before the URL changes and
           // the captured head is lost.
           const navigated = await sendRuntimeMessage({
-            t: 'nova-navigate-tab', url: target.href,
+            t: 'mendosave-navigate-tab', url: target.href,
           }, 5_000).catch(() => null);
           if (!navigated?.ok) location.assign(target.href);
           return;
@@ -2099,11 +2105,11 @@
       // user set manually.
       if (IS_MUSIC) {
         let hadToken = false;
-        try { hadToken = Boolean(sessionStorage.getItem('nvs_queue_token')); } catch (error) {}
+        try { hadToken = Boolean(sessionStorage.getItem('mendosave_queue_token')); } catch (error) {}
         if (hadToken) {
           const remaining = await readQueue().catch(() => null);
           if (!remaining?.active) {
-            try { sessionStorage.removeItem('nvs_queue_token'); } catch (error) {}
+            try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
             void callHook('music-mute', { mute: false }).catch(() => {});
           }
         }
@@ -2120,7 +2126,7 @@
   // possible (the capture itself mutes only for its own duration).
   function muteEarlyIfQueueActive() {
     try {
-      if (!sessionStorage.getItem('nvs_queue_token')) return;
+      if (!sessionStorage.getItem('mendosave_queue_token')) return;
       holdQueueMediaAtStart();
       // ytmusic re-applies its stored volume over element.muted; mute the
       // player app itself for the whole queue run (unmuted at completion).
@@ -2140,13 +2146,13 @@
   function pushSettings(settings) {
     return callHook('settings', { settings }).catch((error) => {
       void sendRuntimeMessage({
-        t: 'nova-log', tag: 'settings',
+        t: 'mendosave-log', tag: 'settings',
         text: `push failed: ${String(error?.message || error)}`,
       }).catch(() => {});
     });
   }
   (async () => {
-    const settings = globalThis.NovaSettings;
+    const settings = globalThis.MendoSaveSettings;
     if (!settings) return;
     await pushSettings(await settings.load());
     settings.subscribe((next) => { void pushSettings(next); });

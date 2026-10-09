@@ -2,7 +2,7 @@
 //
 // mediabunny used to run on the offscreen document's own main thread, and a
 // 700 s video occupied it for more than a minute: the document stopped
-// answering messages entirely — `nova-finalize` sat in its queue for 68 s while
+// answering messages entirely — `mendosave-finalize` sat in its queue for 68 s while
 // the assembly was already finished — and the browser felt frozen down to the
 // extensions panel. The work is identical here, it simply no longer blocks the
 // thread that has to keep talking to the rest of the extension.

@@ -16,7 +16,7 @@ globalThis.MendoProcessorHost = {
     }
     // Creation resolves before scripts have registered. Do not lose the first job.
     for (let attempt = 0; attempt < 100; attempt++) {
-      const ready = await chrome.runtime.sendMessage({ t: 'nova-host-probe' }).catch(() => null);
+      const ready = await chrome.runtime.sendMessage({ t: 'mendosave-host-probe' }).catch(() => null);
       if (ready?.ok) return;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }

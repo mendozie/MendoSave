@@ -2,13 +2,13 @@
 function bind(menu, close) {
   menu.setAttribute('role', 'menu');
   menu.setAttribute('aria-label', 'MendoSave');
-  const controls = [...menu.querySelectorAll('.nova-menu-item, .nova-menu-radio')];
+  const controls = [...menu.querySelectorAll('.mendosave-menu-item, .mendosave-menu-radio')];
   for (const control of controls) {
     const disabled = control.classList.contains('disabled');
     control.tabIndex = disabled ? -1 : 0;
-    control.setAttribute('role', control.classList.contains('nova-menu-radio') ? 'menuitemradio' : 'menuitem');
+    control.setAttribute('role', control.classList.contains('mendosave-menu-radio') ? 'menuitemradio' : 'menuitem');
     control.setAttribute('aria-disabled', String(disabled));
-    if (control.classList.contains('nova-menu-radio')) control.setAttribute('aria-checked', String(control.classList.contains('sel')));
+    if (control.classList.contains('mendosave-menu-radio')) control.setAttribute('aria-checked', String(control.classList.contains('sel')));
   }
   const enabled = controls.filter((control) => !control.classList.contains('disabled'));
   menu.addEventListener('keydown', (event) => {

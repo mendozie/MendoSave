@@ -3,7 +3,7 @@
 [hidden] { display: none !important; }
 
 body {
-  width: 288px;
+  width: min(288px, calc(100vw - 28px));
   margin: 0;
   padding: 14px;
   background: #181a1c;
@@ -70,9 +70,9 @@ body {
 
 .icon-btn:disabled { opacity: 0.5; cursor: default; }
 
-.icon-btn.busy svg { animation: nova-spin 0.9s linear infinite; }
+.icon-btn.busy svg { animation: mendosave-spin 0.9s linear infinite; }
 
-@keyframes nova-spin { to { transform: rotate(360deg); } }
+@keyframes mendosave-spin { to { transform: rotate(360deg); } }
 
 .status {
   margin: 12px 0 0;

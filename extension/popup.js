@@ -9,7 +9,7 @@ function fillQualitySelect(select, heights) {
   // `screen` here is the display the popup — and therefore the browser window
   // — is on, so the number quoted next to "Как у монитора" is what that same
   // window will resolve 'auto' to.
-  const monitor = globalThis.NovaSettings.monitorHeight();
+  const monitor = globalThis.MendoSaveSettings.monitorHeight();
   const options = [
     ['auto', `Как у монитора (${monitor}p)`],
     ['max', 'Максимальное'],
@@ -24,7 +24,7 @@ function fillQualitySelect(select, heights) {
 }
 
 async function setupSettings() {
-  const { YOUTUBE_HEIGHTS, TWITCH_HEIGHTS, save, load } = globalThis.NovaSettings;
+  const { YOUTUBE_HEIGHTS, TWITCH_HEIGHTS, save, load } = globalThis.MendoSaveSettings;
   const youtubeQuality = document.getElementById('yt-quality');
   const youtubeLock = document.getElementById('yt-lock');
   const twitchQuality = document.getElementById('tw-quality');
@@ -108,7 +108,7 @@ async function refreshRecovered() {
 saveRecoveredButton.addEventListener('click', async () => {
   saveRecoveredButton.disabled = true;
   saveRecoveredButton.textContent = 'Сохраняю…';
-  const result = await chrome.runtime.sendMessage({ t: 'nova-flush-recovered' })
+  const result = await chrome.runtime.sendMessage({ t: 'mendosave-flush-recovered' })
     .catch((error) => ({ ok: false, error: String(error?.message || error) }));
   saveRecoveredButton.disabled = false;
   saveRecoveredButton.textContent = 'Сохранить готовый файл';
@@ -131,12 +131,12 @@ exportButton.addEventListener('click', async () => {
   exportButton.disabled = true;
   exportButton.textContent = 'Сохраняю журнал…';
   const result = await chrome.runtime.sendMessage({
-    t: 'nova-error',
+    t: 'mendosave-error',
     context: 'manual-export',
     error: 'Журнал сохранён по запросу пользователя (это не ошибка).',
   }).catch((error) => ({ ok: false, error: String(error?.message || error) }));
   exportButton.disabled = false;
   exportButton.textContent = result?.ok
-    ? 'Журнал сохранён в загрузки (NVS-debug.txt)'
+    ? 'Журнал сохранён в загрузки (MendoSave-debug.txt)'
     : `Не удалось сохранить журнал: ${result?.error || 'ошибка'}`;
 });

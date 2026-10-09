@@ -1,0 +1,78 @@
+{
+  "source": "https://www.tiktok.com/@scout2015/video/6718335390845095173",
+  "observed": "09-10-2026",
+  "sanitized": true,
+  "item": {
+    "id": "6718335390845095173",
+    "author": {
+      "uniqueId": "scout2015"
+    },
+    "video": {
+      "width": 576,
+      "height": 1024,
+      "duration": 10,
+      "bitrateInfo": [
+        {
+          "GearName": "normal_540_0",
+          "Bitrate": 2240963,
+          "PlayAddr": {
+            "Width": 576,
+            "Height": 1024,
+            "DataSize": "2953029",
+            "UrlList": [
+              "https://media.invalid/rendition-0.mp4"
+            ]
+          }
+        },
+        {
+          "GearName": "adapt_lower_720_1",
+          "Bitrate": 1504834,
+          "PlayAddr": {
+            "Width": 720,
+            "Height": 1280,
+            "DataSize": "2004627",
+            "UrlList": [
+              "https://media.invalid/rendition-1.mp4"
+            ]
+          }
+        },
+        {
+          "GearName": "lower_540_0",
+          "Bitrate": 1376802,
+          "PlayAddr": {
+            "Width": 576,
+            "Height": 1024,
+            "DataSize": "1814281",
+            "UrlList": [
+              "https://media.invalid/rendition-2.mp4"
+            ]
+          }
+        },
+        {
+          "GearName": "adapt_540_1",
+          "Bitrate": 1297374,
+          "PlayAddr": {
+            "Width": 576,
+            "Height": 1024,
+            "DataSize": "1728265",
+            "UrlList": [
+              "https://media.invalid/rendition-3.mp4"
+            ]
+          }
+        },
+        {
+          "GearName": "lowest_540_0",
+          "Bitrate": 992286,
+          "PlayAddr": {
+            "Width": 576,
+            "Height": 1024,
+            "DataSize": "1307586",
+            "UrlList": [
+              "https://media.invalid/rendition-4.mp4"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

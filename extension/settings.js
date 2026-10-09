@@ -113,7 +113,7 @@
     return () => chrome.storage.onChanged.removeListener(listener);
   }
 
-  globalThis.NovaSettings = {
+  globalThis.MendoSaveSettings = {
     KEY, DEFAULTS, YOUTUBE_HEIGHTS, TWITCH_HEIGHTS,
     normalize, monitorHeight, resolveHeight, load, save, subscribe,
   };

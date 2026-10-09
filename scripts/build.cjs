@@ -11,12 +11,12 @@ for (const target of ['firefox', 'chromium']) {
   fs.cpSync(source, output, { recursive: true, filter: (file) => !/musify\.(js|css)$/.test(file) });
   const manifest = structuredClone(original);
   manifest.name = 'MendoSave';
-  manifest.version = '0.1.0';
+  manifest.version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
   manifest.description = 'Локальное сохранение видео, аудио и субтитров. Разрабатываемая версия.';
   manifest.host_permissions = manifest.host_permissions.filter((host) => !/github/.test(host));
   if (target === 'firefox') {
     manifest.permissions = manifest.permissions.filter((permission) => permission !== 'offscreen');
-    manifest.background = { scripts: ['platform.js', 'background.js'] };
+    manifest.background = { scripts: ['platform.js', 'diagnostics.js', 'background.js'] };
     manifest.browser_specific_settings = { gecko: {
       id: 'mendosave-dev@mendozie.local', strict_min_version: '157.0',
       data_collection_permissions: { required: ['none'] },

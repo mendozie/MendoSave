@@ -4,13 +4,13 @@
 // the buffer edge only when the requested tail has not been loaded yet.
 
 (function () {
-  if (window.__novaHookInstalled) return;
-  window.__novaHookInstalled = true;
+  if (window.__mendosaveHookInstalled) return;
+  window.__mendosaveHookInstalled = true;
 
-  const TO_UI = '__nova_to_ui';
-  const FROM_UI = '__nova_from_ui';
-  const TO_HOOK = '__nova_to_hook';
-  const FROM_HOOK = '__nova_from_hook';
+  const TO_UI = '__mendosave_to_ui';
+  const FROM_UI = '__mendosave_from_ui';
+  const TO_HOOK = '__mendosave_to_hook';
+  const FROM_HOOK = '__mendosave_from_hook';
   let backgroundRequestSequence = 1;
   const backgroundRequests = new Map();
 
@@ -44,8 +44,8 @@
   function log(tag, ...args) {
     try {
       const text = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-      console.log('[NOVA ' + tag + '] ' + text);
-      sendLog({ t: 'nova-log', tag, text });
+      console.log('[MENDOSAVE ' + tag + '] ' + text);
+      sendLog({ t: 'mendosave-log', tag, text });
     } catch (e) {}
   }
 
@@ -56,7 +56,7 @@
   function logLocal(tag, ...args) {
     try {
       const text = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-      console.log('[NOVA ' + tag + '] ' + text);
+      console.log('[MENDOSAVE ' + tag + '] ' + text);
     } catch (e) {}
   }
 
@@ -113,7 +113,7 @@
               target = Math.max(0, mediaDuration - 1.2);
             }
           }
-          return timeDescriptor.set.call(this, target);
+          timeDescriptor.set.call(this, target);
         },
       });
     } catch (e) {}
@@ -122,16 +122,16 @@
   // Worker script URLs must be TrustedScriptURL wherever Trusted Types are
   // enforced (music.youtube.com does). Without a policy the MSE worker bridge
   // below silently fell back to an unwrapped worker and captured nothing.
-  let novaScriptUrlPolicy = null;
+  let mendosaveScriptUrlPolicy = null;
   try {
-    novaScriptUrlPolicy = window.trustedTypes?.createPolicy?.(
-      `nova-worker-${Math.random().toString(36).slice(2)}`,
+    mendosaveScriptUrlPolicy = window.trustedTypes?.createPolicy?.(
+      `mendosave-worker-${Math.random().toString(36).slice(2)}`,
       { createScriptURL: (input) => input },
     ) || null;
   } catch (e) {}
   const asWorkerScriptUrl = (rawUrl) => {
-    if (!novaScriptUrlPolicy) return rawUrl;
-    try { return novaScriptUrlPolicy.createScriptURL(rawUrl); } catch (e) { return rawUrl; }
+    if (!mendosaveScriptUrlPolicy) return rawUrl;
+    try { return mendosaveScriptUrlPolicy.createScriptURL(rawUrl); } catch (e) { return rawUrl; }
   };
 
   const store = {
@@ -176,7 +176,7 @@
   function throwIfDownloadCancelled() {
     if (!store.cancelRequested) return;
     const error = new Error('загрузка отменена пользователем');
-    error.novaFatal = true;
+    error.mendosaveFatal = true;
     error.details = { cancelled: true };
     throw error;
   }
@@ -299,7 +299,7 @@
     for (const sb of [...store.sourceBuffers[kind]]) {
       try {
         void sb.buffered;
-        if (!currentVideoOnly || sb.__novaInitVideoId === currentVideoId) buffers.push(sb);
+        if (!currentVideoOnly || sb.__mendosaveInitVideoId === currentVideoId) buffers.push(sb);
       } catch (e) {
         store.sourceBuffers[kind].delete(sb);
       }
@@ -340,14 +340,14 @@
   }
   function rememberTimedText(text) {
     if (!text || text.length <= 5) return;
-    const captured = window.__nova_captured_timedtext ||= [];
+    const captured = window.__mendosave_captured_timedtext ||= [];
     captured.push(text);
     if (captured.length > 20) captured.splice(0, captured.length - 20);
   }
 
   function rememberTranscriptParams(text) {
     if (!text) return;
-    const params = window.__nova_next_params ||= [];
+    const params = window.__mendosave_next_params ||= [];
     const pattern = /"getTranscriptEndpoint"\s*:\s*\{\s*"params"\s*:\s*"([^"]+)"/g;
     for (const match of text.matchAll(pattern)) params.push(match[1]);
     if (params.length > 50) params.splice(0, params.length - 50);
@@ -385,13 +385,13 @@
         height: observedHeight,
         videoId: vidId(),
         observedAt: Date.now(),
-        _novaSource: source,
+        _mendosaveSource: source,
       };
       if (!directUrlIsUsable(entry.url)) return;
       const entries = store.observedMediaFormats[kind];
       const key = `${entry.videoId || ''}:${entry.itag}:${entry.height || ''}:${entry.url}`;
-      const duplicateIndex = entries.findIndex((candidate) => candidate._novaKey === key);
-      entry._novaKey = key;
+      const duplicateIndex = entries.findIndex((candidate) => candidate._mendosaveKey === key);
+      entry._mendosaveKey = key;
       if (duplicateIndex >= 0) entries.splice(duplicateIndex, 1);
       entries.push(entry);
       if (entries.length > 30) entries.splice(0, entries.length - 30);
@@ -426,8 +426,8 @@
   }
 
   try {
-    const xhrUrl = Symbol('novaUrl');
-    const xhrWrapped = Symbol('novaWrapped');
+    const xhrUrl = Symbol('mendosaveUrl');
+    const xhrWrapped = Symbol('mendosaveWrapped');
     const OrigXHRSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function () {
       if (!this[xhrWrapped]) {
@@ -456,19 +456,19 @@
   // ---- ordered media capture -------------------------------------------------
   function hookMediaSourceConstructor(MediaSourceConstructor, label) {
     const proto = MediaSourceConstructor?.prototype;
-    if (!proto || typeof proto.addSourceBuffer !== 'function' || proto.addSourceBuffer.__novaWrapped) return;
+    if (!proto || typeof proto.addSourceBuffer !== 'function' || proto.addSourceBuffer.__mendosaveWrapped) return;
     const originalAddSourceBuffer = proto.addSourceBuffer;
     const wrappedAddSourceBuffer = function (mime) {
       const sb = originalAddSourceBuffer.call(this, mime);
       try {
-        sb.__novaMime = mime;
-        sb.__novaKind = /audio/i.test(mime) ? 'audio' : (/video/i.test(mime) ? 'video' : null);
-        sb.__novaMediaSourceType = label;
-        if (sb.__novaKind) store.sourceBuffers[sb.__novaKind].add(sb);
+        sb.__mendosaveMime = mime;
+        sb.__mendosaveKind = /audio/i.test(mime) ? 'audio' : (/video/i.test(mime) ? 'video' : null);
+        sb.__mendosaveMediaSourceType = label;
+        if (sb.__mendosaveKind) store.sourceBuffers[sb.__mendosaveKind].add(sb);
       } catch (e) {}
       return sb;
     };
-    wrappedAddSourceBuffer.__novaWrapped = true;
+    wrappedAddSourceBuffer.__mendosaveWrapped = true;
     proto.addSourceBuffer = wrappedAddSourceBuffer;
   }
   hookMediaSourceConstructor(window.MediaSource, 'MediaSource');
@@ -476,9 +476,9 @@
   function observeMediaAppend(transport, data) {
     try {
       if (store.liveSession) forwardLiveAppend(transport, data);
-      const kind = transport.__novaKind;
+      const kind = transport.__mendosaveKind;
+      const currentVideoId = vidId();
       if (kind === 'video' || kind === 'audio') {
-        const currentVideoId = vidId();
         // yt-navigate-finish can arrive after the first media append. Reset on
         // the first observed URL video-id change so passive capture never loses
         // the opening fragments of an SPA-loaded video.
@@ -492,20 +492,20 @@
           log('capture', 'video change detected from media append; vid=', currentVideoId);
         }
         // Re-register buffers after resetCapture or a YouTube SPA transition.
-        if (!transport.__novaWorker) store.sourceBuffers[kind].add(transport);
-        transport.__novaLastAppendAt = Date.now();
+        if (!transport.__mendosaveWorker) store.sourceBuffers[kind].add(transport);
+        transport.__mendosaveLastAppendAt = Date.now();
         if (!store.capturing) {
           const dormantBytes = u8of(data);
           if (dormantBytes?.length && startsWithInit(dormantBytes)) {
             const bytes = dormantBytes.slice();
-            transport.__novaLastInit = {
+            transport.__mendosaveLastInit = {
               bytes,
-              mime: transport.__novaMime || '',
+              mime: transport.__mendosaveMime || '',
               height: kind === 'video' ? currentQuality() : null,
               initKey: fragmentFingerprint(dormantBytes),
             };
-            transport.__novaInitVideoId = currentVideoId;
-            store.initFallback[kind] = transport.__novaLastInit;
+            transport.__mendosaveInitVideoId = currentVideoId;
+            store.initFallback[kind] = transport.__mendosaveLastInit;
           }
         }
       }
@@ -514,15 +514,15 @@
         if (u8 && u8.length) {
           store.lastAppendAt[kind] = Date.now();
           const init = startsWithInit(u8);
-          const mime = transport.__novaMime || '';
+          const mime = transport.__mendosaveMime || '';
           if (init) {
             const bytes = u8.slice();
             const height = kind === 'video' ? currentQuality() : null;
             const initKey = fragmentFingerprint(u8);
             const previousInit = store._lastInit[kind];
             const initRecord = { bytes, mime, height, initKey };
-            transport.__novaLastInit = initRecord;
-            transport.__novaInitVideoId = currentVideoId;
+            transport.__mendosaveLastInit = initRecord;
+            transport.__mendosaveInitVideoId = currentVideoId;
             store._lastInit[kind] = initRecord;
             store.initFallback[kind] = initRecord;
             if (store.tracks[kind] && previousInit?.initKey !== initKey) {
@@ -542,17 +542,17 @@
             // The companion is already captured — drop its fragments here.
             if (store.singleTrackPass && store.singleTrackPass !== kind) return;
             const appendMediaTime = Number(video()?.currentTime);
-            if (!store._lastInit[kind] && transport.__novaLastInit) {
+            if (!store._lastInit[kind] && transport.__mendosaveLastInit) {
               // YouTube commonly reuses one SourceBuffer across SPA videos and
               // omits a new init when the codec configuration is unchanged.
               // The first media fragment proves that this attached transport is
               // now serving the current video, so its decoder init is reusable.
-              const reusedAcrossNavigation = transport.__novaInitVideoId !== currentVideoId;
+              const reusedAcrossNavigation = transport.__mendosaveInitVideoId !== currentVideoId;
               store._lastInit[kind] = {
-                ...transport.__novaLastInit,
-                height: kind === 'video' ? (currentQuality() || transport.__novaLastInit.height) : null,
+                ...transport.__mendosaveLastInit,
+                height: kind === 'video' ? (currentQuality() || transport.__mendosaveLastInit.height) : null,
               };
-              transport.__novaInitVideoId = currentVideoId;
+              transport.__mendosaveInitVideoId = currentVideoId;
               if (reusedAcrossNavigation) log('capture', 'reused active MSE init; kind=', kind, 'vid=', currentVideoId);
             }
             if (!store._lastInit[kind] && store.initFallback[kind]) {
@@ -563,7 +563,7 @@
               if (!mime || !fallback.mime || mime === fallback.mime) {
                 store._lastInit[kind] = fallback;
                 log('capture', 'reused remembered init segment; kind=', kind,
-                  'worker=', Boolean(transport.__novaWorker), 'mime=', mime || fallback.mime || '');
+                  'worker=', Boolean(transport.__mendosaveWorker), 'mime=', mime || fallback.mime || '');
               }
             }
             const pendingInit = store._pendingInit[kind];
@@ -610,7 +610,7 @@
                 if (t.capturedBytes + u8.length > MAX_CAPTURE_TRACK_BYTES) {
                   const error = new Error(`дорожка ${kind} превышает безопасный лимит памяти`);
                   error.details = { kind, bytes: t.capturedBytes + u8.length, limit: MAX_CAPTURE_TRACK_BYTES };
-                  error.novaFatal = true;
+                  error.mendosaveFatal = true;
                   store.captureError = error;
                   store.capturing = false;
                 } else {
@@ -669,14 +669,14 @@
       return `
         (() => {
           let nextStreamId = 1;
-          const novaPostMessage = self.postMessage.bind(self);
+          const mendosavePostMessage = self.postMessage.bind(self);
           const reportMediaUrl = (rawUrl) => {
             try {
               const url = new URL(String(rawUrl || ''), self.location.href);
               if (url.protocol === 'https:'
                 && (url.hostname === 'googlevideo.com'
                   || url.hostname.endsWith('.googlevideo.com'))) {
-                novaPostMessage({ __novaMediaUrl: true, url: url.href });
+                mendosavePostMessage({ __mendosaveMediaUrl: true, url: url.href });
               }
             } catch (e) {}
           };
@@ -699,22 +699,22 @@
             }
           } catch (e) {}
           const hookAppend = (proto) => {
-            if (!proto || typeof proto.appendBuffer !== 'function' || proto.appendBuffer.__novaWorkerWrapped) return;
+            if (!proto || typeof proto.appendBuffer !== 'function' || proto.appendBuffer.__mendosaveWorkerWrapped) return;
             const originalAppend = proto.appendBuffer;
             const wrappedAppend = function (data) {
               try {
-                const kind = this.__novaKind;
+                const kind = this.__mendosaveKind;
                 if (kind === 'audio' || kind === 'video') {
                   const view = data instanceof ArrayBuffer
                     ? new Uint8Array(data)
                     : new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
                   if (view.byteLength) {
                     const copy = view.slice();
-                    novaPostMessage({
-                      __novaMseSegment: true,
-                      streamId: this.__novaStreamId,
+                    mendosavePostMessage({
+                      __mendosaveMseSegment: true,
+                      streamId: this.__mendosaveStreamId,
                       kind,
-                      mime: this.__novaMime || '',
+                      mime: this.__mendosaveMime || '',
                       bytes: copy.buffer,
                     }, [copy.buffer]);
                   }
@@ -722,24 +722,24 @@
               } catch (e) {}
               return originalAppend.apply(this, arguments);
             };
-            wrappedAppend.__novaWorkerWrapped = true;
+            wrappedAppend.__mendosaveWorkerWrapped = true;
             proto.appendBuffer = wrappedAppend;
           };
-          const novaBuffers = new Map();
+          const mendosaveBuffers = new Map();
           const hookMediaSource = (Ctor) => {
             const proto = Ctor && Ctor.prototype;
-            if (!proto || typeof proto.addSourceBuffer !== 'function' || proto.addSourceBuffer.__novaWorkerWrapped) return;
+            if (!proto || typeof proto.addSourceBuffer !== 'function' || proto.addSourceBuffer.__mendosaveWorkerWrapped) return;
             const originalAddSourceBuffer = proto.addSourceBuffer;
             const wrappedAddSourceBuffer = function (mime) {
               const sourceBuffer = originalAddSourceBuffer.call(this, mime);
-              sourceBuffer.__novaMime = String(mime || '');
-              sourceBuffer.__novaKind = /audio/i.test(sourceBuffer.__novaMime)
-                ? 'audio' : (/video/i.test(sourceBuffer.__novaMime) ? 'video' : null);
-              sourceBuffer.__novaStreamId = nextStreamId++;
-              novaBuffers.set(sourceBuffer.__novaStreamId, sourceBuffer);
+              sourceBuffer.__mendosaveMime = String(mime || '');
+              sourceBuffer.__mendosaveKind = /audio/i.test(sourceBuffer.__mendosaveMime)
+                ? 'audio' : (/video/i.test(sourceBuffer.__mendosaveMime) ? 'video' : null);
+              sourceBuffer.__mendosaveStreamId = nextStreamId++;
+              mendosaveBuffers.set(sourceBuffer.__mendosaveStreamId, sourceBuffer);
               return sourceBuffer;
             };
-            wrappedAddSourceBuffer.__novaWorkerWrapped = true;
+            wrappedAddSourceBuffer.__mendosaveWorkerWrapped = true;
             proto.addSourceBuffer = wrappedAddSourceBuffer;
           };
           // Buffered-range removal requested by the page: the capture pass
@@ -748,9 +748,9 @@
           // keeps these internal messages away from YouTube's own handlers.
           self.addEventListener('message', (event) => {
             const message = event.data;
-            if (!message || message.__novaWorkerRemove !== true) return;
+            if (!message || message.__mendosaveWorkerRemove !== true) return;
             event.stopImmediatePropagation();
-            const sourceBuffer = novaBuffers.get(message.streamId);
+            const sourceBuffer = mendosaveBuffers.get(message.streamId);
             let removed = false;
             try {
               if (sourceBuffer && !sourceBuffer.updating) {
@@ -764,13 +764,13 @@
                 }
               }
             } catch (e) {}
-            novaPostMessage({ __novaWorkerRemoved: true, streamId: message.streamId, removed });
+            mendosavePostMessage({ __mendosaveWorkerRemoved: true, streamId: message.streamId, removed });
           });
           hookAppend(self.SourceBuffer && self.SourceBuffer.prototype);
           hookAppend(self.ManagedSourceBuffer && self.ManagedSourceBuffer.prototype);
           hookMediaSource(self.MediaSource);
           hookMediaSource(self.ManagedMediaSource);
-          novaPostMessage({ __novaMseBridgeReady: true });
+          mendosavePostMessage({ __mendosaveMseBridgeReady: true });
           ${loader}
         })();
       `;
@@ -805,34 +805,34 @@
       const transports = new Map();
       worker.addEventListener('message', (event) => {
         const message = event.data;
-        if (message?.__novaMediaUrl && message.url) {
+        if (message?.__mendosaveMediaUrl && message.url) {
           event.stopImmediatePropagation();
           rememberObservedMediaFormat(message.url, 'worker-request');
           return;
         }
-        if (message?.__novaMseBridgeReady) {
+        if (message?.__mendosaveMseBridgeReady) {
           event.stopImmediatePropagation();
           log('capture', 'worker MSE bridge ready; module=', options?.type === 'module');
           return;
         }
-        if (message?.__novaWorkerRemoved) {
+        if (message?.__mendosaveWorkerRemoved) {
           event.stopImmediatePropagation();
           if (message.removed) store.workerRemoveAcks += 1;
           return;
         }
-        if (!message?.__novaMseSegment || !message.bytes) return;
+        if (!message?.__mendosaveMseSegment || !message.bytes) return;
         event.stopImmediatePropagation();
         const key = `${message.kind}:${message.streamId}`;
         let transport = transports.get(key);
         if (!transport) {
           transport = {
-            __novaWorker: true,
-            __novaKind: message.kind,
-            __novaMime: String(message.mime || ''),
-            __novaStreamId: message.streamId,
-            __novaRequestRemove(start, end) {
+            __mendosaveWorker: true,
+            __mendosaveKind: message.kind,
+            __mendosaveMime: String(message.mime || ''),
+            __mendosaveStreamId: message.streamId,
+            __mendosaveRequestRemove(start, end) {
               worker.postMessage({
-                __novaWorkerRemove: true, streamId: message.streamId, start, end,
+                __mendosaveWorkerRemove: true, streamId: message.streamId, start, end,
               });
             },
           };
@@ -1321,7 +1321,7 @@
     }
     if (bytes.length > 400_000_000) {
       const error = new Error(`дорожка ${kind} слишком велика для безопасной перестановки WebM-кластеров`);
-      error.novaFatal = true;
+      error.mendosaveFatal = true;
       throw error;
     }
     const fragments = normalizedClusters.map((cluster) => {
@@ -1497,7 +1497,7 @@
     if (!changed) return { bytes, container: 'mp4', fragments: moofs.length, reordered: false };
     if (bytes.length > 400_000_000) {
       const error = new Error(`дорожка ${kind} слишком велика для безопасной перестановки MP4-фрагментов`);
-      error.novaFatal = true;
+      error.mendosaveFatal = true;
       throw error;
     }
     const prefixEnd = moofs[0].offset;
@@ -1536,7 +1536,7 @@
       );
       error.details = {
         kind: 'audio',
-        source: audio?._novaSource || 'direct',
+        source: audio?._mendosaveSource || 'direct',
         declaredDuration,
         expectedDuration,
         durationTolerance,
@@ -1591,7 +1591,7 @@
       let n = 0; for (const p of parts) n += p.length;
       if (n > MAX_CAPTURE_TRACK_BYTES) {
         const error = new Error(`дорожка ${kind} превышает безопасный лимит памяти`);
-        error.novaFatal = true;
+        error.mendosaveFatal = true;
         throw error;
       }
       const buf = new Uint8Array(n);
@@ -1652,7 +1652,7 @@
   // range requests. Ordinary playback fights that — the player prefetches on its
   // own schedule, overrides the seek target and keeps advancing currentTime — so
   // downloads used to come out clean only when the user had already pressed
-  // pause. Nova now pins the element to paused for the whole download and lifts
+  // pause. MendoSave now pins the element to paused for the whole download and lifts
   // the pin only for the playback it starts on purpose (SABR primers and the
   // MediaRecorder fallbacks), then restores the user's play state at the end.
   let deliberatePlaybackDepth = 0;
@@ -1728,7 +1728,7 @@
 
   async function playWithTimeout(media, timeoutMs = 10_000) {
     // Every deliberate playback start goes through here, so the hold above can
-    // tell "Nova asked for this" apart from autoplay or a user resume.
+    // tell "MendoSave asked for this" apart from autoplay or a user resume.
     deliberatePlaybackDepth += 1;
     let timer;
     const playback = media.play();
@@ -2067,7 +2067,7 @@
     if (!transports.length) return false;
     const acksBefore = store.workerRemoveAcks;
     for (const transport of transports) {
-      try { transport.__novaRequestRemove?.(Math.max(0, startSeconds), endSeconds); } catch (e) {}
+      try { transport.__mendosaveRequestRemove?.(Math.max(0, startSeconds), endSeconds); } catch (e) {}
     }
     const deadline = Date.now() + 1_500;
     while (Date.now() < deadline) {
@@ -2146,7 +2146,7 @@
     // URLs published in the player response always answer 403 on Music, so a
     // usable candidate must be one the player itself has requested.
     const usable = (format) => Boolean(format)
-      && format._novaSource !== 'player-response'
+      && format._mendosaveSource !== 'player-response'
       && kbpsOf(format) >= MUSIC_GOOD_AUDIO_KBPS;
     if (usable(selectDirectAudioFormat())) return;
     await primeMusicMediaSession(video(), durationSeconds, { force: true });
@@ -2162,7 +2162,7 @@
     }
     const fallbackCandidate = selectDirectAudioFormat();
     log('direct-audio', 'no observed high-bitrate audio; continuing with',
-      fallbackCandidate?._novaSource || 'none', Math.round(kbpsOf(fallbackCandidate)), 'kbps');
+      fallbackCandidate?._mendosaveSource || 'none', Math.round(kbpsOf(fallbackCandidate)), 'kbps');
   }
 
   async function primeMusicMediaSession(media, capEnd, options = {}) {
@@ -2202,11 +2202,11 @@
   }
 
   function adoptAttachedInitForCapture(kind, buffers, currentVideoId) {
-    const withInit = buffers.filter((sb) => sb?.__novaLastInit?.bytes?.length);
-    const current = withInit.filter((sb) => sb.__novaInitVideoId === currentVideoId);
+    const withInit = buffers.filter((sb) => sb?.__mendosaveLastInit?.bytes?.length);
+    const current = withInit.filter((sb) => sb.__mendosaveInitVideoId === currentVideoId);
     let selected = null;
     if (current.length) {
-      selected = current.sort((a, b) => (b.__novaLastAppendAt || 0) - (a.__novaLastAppendAt || 0))[0];
+      selected = current.sort((a, b) => (b.__mendosaveLastAppendAt || 0) - (a.__mendosaveLastAppendAt || 0))[0];
     } else if (withInit.length === 1) {
       // A SourceBuffer may survive a YouTube SPA navigation without receiving
       // another init segment. If there is exactly one transport for this kind,
@@ -2220,10 +2220,10 @@
       // in a page reload. The transport that received bytes most recently is
       // the live one — but only trust that when the timestamps actually differ.
       const ranked = withInit
-        .filter((sourceBuffer) => Number(sourceBuffer.__novaLastAppendAt) > 0)
-        .sort((left, right) => right.__novaLastAppendAt - left.__novaLastAppendAt);
+        .filter((sourceBuffer) => Number(sourceBuffer.__mendosaveLastAppendAt) > 0)
+        .sort((left, right) => right.__mendosaveLastAppendAt - left.__mendosaveLastAppendAt);
       if (ranked.length === 1
-        || (ranked.length > 1 && ranked[0].__novaLastAppendAt > ranked[1].__novaLastAppendAt)) {
+        || (ranked.length > 1 && ranked[0].__mendosaveLastAppendAt > ranked[1].__mendosaveLastAppendAt)) {
         selected = ranked[0];
       }
     }
@@ -2232,14 +2232,14 @@
         'withInit=', withInit.length);
       return false;
     }
-    const init = selected.__novaLastInit;
+    const init = selected.__mendosaveLastInit;
     store._lastInit[kind] = {
       bytes: init.bytes,
-      mime: init.mime || selected.__novaMime || '',
+      mime: init.mime || selected.__mendosaveMime || '',
       height: kind === 'video' ? (currentQuality() || init.height || null) : null,
       initKey: init.initKey || fragmentFingerprint(init.bytes),
     };
-    selected.__novaInitVideoId = currentVideoId;
+    selected.__mendosaveInitVideoId = currentVideoId;
     log('capture', 'adopted attached init; kind=', kind, 'reusedAcrossNavigation=', current.length === 0);
     return true;
   }
@@ -2312,7 +2312,7 @@
           mimeType: mime || 'application/octet-stream',
           contentLength: 0,
           approxDurationMs: Number(video()?.duration) > 0 ? Math.round(video().duration * 1000) : 0,
-          _novaSource: 'resource-timing',
+          _mendosaveSource: 'resource-timing',
         };
       } catch (e) {}
     }
@@ -2323,7 +2323,7 @@
   // The web player has moved to SABR: streamingData now carries adaptiveFormats
   // with neither `url` nor `signatureCipher`, just a single
   // serverAbrStreamingUrl, and every media request is a POST to
-  // /videoplayback?sabr=1 whose query has no itag or mime. Both of Nova's
+  // /videoplayback?sabr=1 whose query has no itag or mime. Both of MendoSave's
   // direct-URL sources — the player response and observed player requests —
   // therefore find nothing on an ordinary watch page, and each download
   // degraded to the real-time MSE capture (minutes for a long video).
@@ -2377,7 +2377,7 @@
         audioQuality: format.audioQuality || '',
         audioTrack: format.audioTrack || null,
         isDrc: Boolean(format.isDrc),
-        _novaSource: 'innertube',
+        _mendosaveSource: 'innertube',
       }))
       .filter((format) => directUrlIsUsable(format.url));
   }
@@ -2388,7 +2388,7 @@
     let lastError = null;
     for (const candidate of INNERTUBE_CLIENTS) {
       try {
-        // Deliberately the unhooked fetch: this request is Nova's own and has
+        // Deliberately the unhooked fetch: this request is MendoSave's own and has
         // no business passing through the page-observation wrapper.
         const response = await (OrigFetch || fetch)(
           `${location.origin}/youtubei/v1/player?key=${encodeURIComponent(key)}&prettyPrint=false`,
@@ -2486,7 +2486,7 @@
   }
 
   function noteInnertubeSuccess(format) {
-    if (format?._novaSource !== 'innertube' || !store.innertubeRefusals) return;
+    if (format?._mendosaveSource !== 'innertube' || !store.innertubeRefusals) return;
     store.innertubeRefusals = 0;
     store.innertubeBlockedUntil = 0;
   }
@@ -2525,7 +2525,7 @@
   // ignored: a garbage token behaves identically). SABR is the only channel
   // that serves a whole track, and it runs at ~16 MB/s against ~0.7 MB/s.
   //
-  // Nova does not build that request from scratch — the PO token and the
+  // MendoSave does not build that request from scratch — the PO token and the
   // ustreamer config live inside one the player already sent. It copies the
   // last such request and rewrites it. What each field does — all measured, the
   // proto is not published:
@@ -3404,7 +3404,7 @@
   }
 
   // No global surface on purpose. During the bring-up this module was exposed as
-  // `window.__novaSabr` (template/bytes/request/collect), which is fine on a
+  // `window.__mendosaveSabr` (template/bytes/request/collect), which is fine on a
   // bench and wrong in a release: the hook shares its world with the page, so
   // any script on youtube.com could have read the intercepted request — the PO
   // token and the ustreamer config included — or driven downloads through it.
@@ -3466,7 +3466,7 @@
     const observed = observedDirectAudioFormat();
     if (MUSIC_HOST && observed) return observed;
     if (selected) {
-      return { ...selected, url: withoutTransientMediaParams(selected.url), _novaSource: 'player-response' };
+      return { ...selected, url: withoutTransientMediaParams(selected.url), _mendosaveSource: 'player-response' };
     }
     // InnerTube last: on Music an observed URL is Opus, which beats the mobile
     // ladder's AAC. It only fills the hole SABR left on ordinary watch pages.
@@ -3492,7 +3492,7 @@
       return {
         ...selected,
         url: withoutTransientMediaParams(selected.url),
-        _novaSource: 'player-response',
+        _mendosaveSource: 'player-response',
       };
     }
     const intercepted = store.observedMediaFormats.video
@@ -3522,7 +3522,7 @@
           contentLength: Number(url.searchParams.get('clen')) || 0,
           approxDurationMs: (Number(url.searchParams.get('dur')) || Number(video()?.duration) || 0) * 1000,
           height: requestedHeight,
-          _novaSource: 'resource-timing',
+          _mendosaveSource: 'resource-timing',
         };
       } catch (e) {}
     }
@@ -3573,7 +3573,7 @@
       mime: cached.mime,
       duration: Number(cached.duration) || duration,
       captureRate: 1,
-      _novaSource: 'completed-mp3-cache',
+      _mendosaveSource: 'completed-mp3-cache',
     };
   }
 
@@ -3643,7 +3643,7 @@
     // and a visibly slow start.
     if (!directUrlIsUsable(url)) {
       const retired = new Error('ссылка уже отклонена сервером');
-      retired.novaRetiredUrl = true;
+      retired.mendosaveRetiredUrl = true;
       throw retired;
     }
 
@@ -3664,7 +3664,7 @@
           // it a 403 is indistinguishable from an expired signature.
           const reason = await response.text().then((text) => text.trim().slice(0, 160)).catch(() => '');
           const error = new Error(`HTTP ${response.status}${reason ? `: ${reason}` : ''}`);
-          error.novaHttpStatus = response.status;
+          error.mendosaveHttpStatus = response.status;
           throw error;
         }
         const bytes = new Uint8Array(await response.arrayBuffer());
@@ -3685,8 +3685,8 @@
         // away the whole format set, and dropped the download into the MSE
         // capture — which is where the holes, the repairs and the page reloads
         // come from. One flaky connection used to cost the entire fast path.
-        const refused = error?.novaHttpStatus === 401 || error?.novaHttpStatus === 403
-          || error?.novaHttpStatus === 410;
+        const refused = error?.mendosaveHttpStatus === 401 || error?.mendosaveHttpStatus === 403
+          || error?.mendosaveHttpStatus === 410;
         if (!refused) continue;
         // Retire the URL so the sibling slices stop repeating the same failure.
         invalidateDirectUrl(url);
@@ -3731,8 +3731,8 @@
         received += bytes.length;
         onProgress(Math.min(0.99, received / totalLength));
       } catch (error) {
-        const spent = error?.novaHttpStatus === 403 || error?.novaHttpStatus === 401
-          || error?.novaHttpStatus === 410 || error?.novaRetiredUrl;
+        const spent = error?.mendosaveHttpStatus === 403 || error?.mendosaveHttpStatus === 401
+          || error?.mendosaveHttpStatus === 410 || error?.mendosaveRetiredUrl;
         // Renew only when the signature actually carried the download part of
         // the way and then stopped. A refusal at the same byte the last renewal
         // started from is not an exhausted signature — nothing was spent — and
@@ -3796,7 +3796,7 @@
       mime: format.mimeType || '',
       bitrate: Number(format.bitrate) || 0,
       contentLength: declaredLength || null,
-      source: format._novaSource || 'player-response',
+      source: format._mendosaveSource || 'player-response',
       resumable: true,
     }));
     reportProgress(0.01);
@@ -3809,7 +3809,7 @@
         // spent signature costs one InnerTube round trip instead of the whole
         // download. Null when nothing equivalent is on offer.
         const renewUrl = async () => {
-          if (format._novaSource !== 'innertube') return null;
+          if (format._mendosaveSource !== 'innertube') return null;
           const videoId = requestedVideoId;
           store.innertubeFormats = null;
           await ensureInnertubeFormats(videoId);
@@ -3823,7 +3823,7 @@
             format.url, declaredLength, reportProgress, directLogTag, renewUrl);
         } catch (error) {
           downloadError = error;
-          if (error?.novaFatal) throw error;
+          if (error?.mendosaveFatal) throw error;
           log(directLogTag, 'sequential range download failed:', String(error?.message || error));
         }
         if (!assembled) {
@@ -3833,14 +3833,14 @@
           // instead of grinding through the throttled sequential path.
           invalidateDirectUrl(format.url);
           const retired = downloadError || new Error('последовательная загрузка не удалась');
-          retired.novaRetiredUrl = true;
+          retired.mendosaveRetiredUrl = true;
           log(directLogTag, 'direct URL retired (no data);', directUrlDiagnostics(format.url));
-          if (format._novaSource === 'innertube') dropInnertubeFormats();
+          if (format._mendosaveSource === 'innertube') dropInnertubeFormats();
           throw retired;
         }
         if (vidId() !== requestedVideoId) {
           const navigationError = new Error('страница YouTube перешла к другому видео во время загрузки');
-          navigationError.novaFatal = true;
+          navigationError.mendosaveFatal = true;
           throw navigationError;
         }
         reportProgress(1);
@@ -3850,20 +3850,20 @@
           mime: responseMime,
           duration: (Number(format.approxDurationMs) || 0) / 1000,
           captureRate: 1,
-          _novaSource: `${format._novaSource || 'player-response'}+parallel`,
+          _mendosaveSource: `${format._mendosaveSource || 'player-response'}+parallel`,
         };
       } catch (error) {
-        if (error?.novaFatal || error?.novaRetiredUrl) throw error;
-        if (error?.novaHttpStatus === 403 || error?.novaHttpStatus === 401
-          || error?.novaHttpStatus === 410) {
+        if (error?.mendosaveFatal || error?.mendosaveRetiredUrl) throw error;
+        if (error?.mendosaveHttpStatus === 403 || error?.mendosaveHttpStatus === 401
+          || error?.mendosaveHttpStatus === 410) {
           // The signature is refused, not merely unlucky: the sequential path
           // would spend four more attempts on the very same URL. Retire it,
           // record why, and let the caller move on.
           invalidateDirectUrl(format.url);
           log(directLogTag, 'direct URL refused;', String(error?.message || error),
             directUrlDiagnostics(format.url));
-          if (format._novaSource === 'innertube') dropInnertubeFormats();
-          error.novaRetiredUrl = true;
+          if (format._mendosaveSource === 'innertube') dropInnertubeFormats();
+          error.mendosaveRetiredUrl = true;
           throw error;
         }
         log(directLogTag, 'parallel range download unavailable; falling back to stream:',
@@ -3886,7 +3886,7 @@
       try {
         const headers = received > 0 ? { Range: `bytes=${received}-` } : {};
         armIdleWatchdog();
-        // Bypass our observation wrapper: a failed Nova request must not make
+        // Bypass our observation wrapper: a failed MendoSave request must not make
         // its own stale signed URL appear newly observed.
         const response = await (OrigFetch || window.fetch.bind(window))(format.url, {
           credentials: 'omit',
@@ -3895,10 +3895,10 @@
         });
         if (!response.ok || (response.status !== 200 && response.status !== 206)) {
           const httpError = new Error(`HTTP ${response.status}`);
-          httpError.novaHttpStatus = response.status;
+          httpError.mendosaveHttpStatus = response.status;
           if (response.status === 401 || response.status === 403 || response.status === 410) {
             invalidateDirectUrl(format.url);
-            httpError.novaStaleDirectUrl = true;
+            httpError.mendosaveStaleDirectUrl = true;
           }
           throw httpError;
         }
@@ -3940,7 +3940,7 @@
           if (vidId() !== requestedVideoId) {
             controller.abort();
             const navigationError = new Error('страница YouTube перешла к другому видео во время загрузки');
-            navigationError.novaFatal = true;
+            navigationError.mendosaveFatal = true;
             throw navigationError;
           }
           armIdleWatchdog();
@@ -3960,7 +3960,7 @@
                 controller.abort();
                 const throttled = new Error(
                   `сервер отдаёт прямой поток со скоростью воспроизведения (${speedFactor.toFixed(1)}x)`);
-                throttled.novaDirectThrottled = true;
+                throttled.mendosaveDirectThrottled = true;
                 throw throttled;
               }
             }
@@ -3987,10 +3987,10 @@
         }
         lastError = new Error(`поток завершился раньше (${received} из ${expectedLength} байт)`);
       } catch (error) {
-        if (error?.novaFatal) throw error;
-        if (error?.novaDirectThrottled) {
+        if (error?.mendosaveFatal) throw error;
+        if (error?.mendosaveDirectThrottled) {
           // Deliberate switch to the MSE path: skip the resume loop and never
-          // mark the error novaNoFallback despite the partial data.
+          // mark the error mendosaveNoFallback despite the partial data.
           log(directLogTag, 'throttled by server; falling back to MSE;',
             'received=', received, 'reason=', error.message);
           throw error;
@@ -4003,7 +4003,7 @@
       }
 
       if (!lastError) break;
-      if (lastError.novaStaleDirectUrl) break;
+      if (lastError.mendosaveStaleDirectUrl) break;
       // A bare connection failure with nothing received is NOT a verdict on the
       // URL — measured 2 of 5 identical requests failing seconds apart with the
       // same signature. Retiring it here (and discarding the whole InnerTube
@@ -4028,7 +4028,7 @@
       const meaningfulProgress = expectedLength
         ? received >= expectedLength * 0.25
         : received > 1_000_000;
-      if (meaningfulProgress) lastError.novaNoFallback = true;
+      if (meaningfulProgress) lastError.mendosaveNoFallback = true;
       throw lastError;
     }
     if (!received) throw new Error('прямой медиапоток пуст');
@@ -4037,7 +4037,7 @@
     }
     if (vidId() !== requestedVideoId) {
       const navigationError = new Error('страница YouTube перешла к другому видео во время загрузки');
-      navigationError.novaFatal = true;
+      navigationError.mendosaveFatal = true;
       throw navigationError;
     }
 
@@ -4055,7 +4055,7 @@
       mime: responseMime,
       duration: (Number(format.approxDurationMs) || 0) / 1000,
       height: mediaKind === 'video' ? (Number(format.height) || null) : null,
-      _novaSource: format._novaSource || 'direct',
+      _mendosaveSource: format._mendosaveSource || 'direct',
     };
   }
 
@@ -4211,7 +4211,7 @@
         throwIfDownloadCancelled();
         if (vidId() !== requestedVideoId) {
           const navigationError = new Error('страница YouTube перешла к другому видео во время захвата аудио');
-          navigationError.novaFatal = true;
+          navigationError.mendosaveFatal = true;
           throw navigationError;
         }
         if (recorderError) throw recorderError;
@@ -4440,7 +4440,7 @@
         throwIfDownloadCancelled();
         if (vidId() !== requestedVideoId) {
           const navigationError = new Error('страница YouTube перешла к другому видео во время записи видео');
-          navigationError.novaFatal = true;
+          navigationError.mendosaveFatal = true;
           throw navigationError;
         }
         if (recorderError) throw recorderError;
@@ -4619,7 +4619,7 @@
       await sleep(100);
       if (vidId() !== videoId) {
         const error = new Error('видео переключилось во время подготовки резервной записи');
-        error.novaFatal = true;
+        error.mendosaveFatal = true;
         throw error;
       }
       media = video() || media;
@@ -5179,7 +5179,7 @@
         const completedReloads = Math.max(0, Number(opts.reloadCount) || 0);
         if (completedReloads < 2) {
           const retry = new Error('плеер не отдаёт сегменты уже показанного ролика; страница будет обновлена, загрузка продолжится автоматически');
-          retry.novaFatal = true;
+          retry.mendosaveFatal = true;
           retry.details = {
             reloadRequired: true,
             reason: 'prebuffered-no-capture',
@@ -5231,7 +5231,7 @@
     // paused seek in its queue. It used to run exactly once: when that single
     // attempt produced nothing, the pass sat on paused seeks until the 60 s
     // stall guard fired. Previously an autoplaying player accidentally kept
-    // re-priming; now that playback is pinned, Nova re-primes on purpose.
+    // re-priming; now that playback is pinned, MendoSave re-primes on purpose.
     let primerCount = 0;
     let lastPrimeAt = 0;
     const maxPrimers = 6;
@@ -5257,7 +5257,7 @@
         if (store.trackRevision.audio !== initialAudioRevision
           || (needVideo && store.trackRevision.video !== initialVideoRevision)) {
           const error = new Error('YouTube сменил медиапоток во время загрузки; файл не сохранён во избежание повреждения');
-          if (freshMseRestarted) error.novaSkipSequential = true;
+          if (freshMseRestarted) error.mendosaveSkipSequential = true;
           error.details = {
             audioRevisionBefore: initialAudioRevision,
             audioRevisionAfter: store.trackRevision.audio,
@@ -5433,7 +5433,7 @@
           };
           log('capture-stall', JSON.stringify(stallDetails));
           const error = new Error(`нет новых медиаданных более 60 секунд (${cursor.toFixed(1)} из ${capEnd.toFixed(1)} сек)`);
-          if (freshMseRestarted) error.novaSkipSequential = true;
+          if (freshMseRestarted) error.mendosaveSkipSequential = true;
           error.details = stallDetails;
           throw error;
         }
@@ -5463,7 +5463,7 @@
     }));
     if (needVideo && trackStats.video.bytes * 8 < trackStats.audio.bytes) {
       const error = new Error('видеодорожка подозрительно мала относительно аудио; файл не сохранён во избежание зависших кадров');
-      if (freshMseRestarted) error.novaSkipSequential = true;
+      if (freshMseRestarted) error.mendosaveSkipSequential = true;
       error.details = { duration: capEnd, tracks: trackStats };
       throw error;
     }
@@ -5472,7 +5472,7 @@
       const lastVideoTime = Number(trackStats.video.lastMediaTime) || 0;
       if (firstVideoTime > 5 && lastVideoTime - firstVideoTime < capEnd * 0.5) {
         const error = new Error('получен только конечный фрагмент видеодорожки; требуется повторный MSE-проход от начала');
-        if (freshMseRestarted) error.novaSkipSequential = true;
+        if (freshMseRestarted) error.mendosaveSkipSequential = true;
         error.details = { duration: capEnd, tracks: trackStats };
         throw error;
       }
@@ -5859,7 +5859,7 @@
       // so the caller can stop instead of burning its whole attempt budget.
       const boundsError = new Error('неверные границы пропущенного медиасегмента'
         + ` (${details?.gapStartMs} → ${details?.gapEndMs} мс при длительности ${duration.toFixed(1)} с)`);
-      boundsError.novaUnrepairable = true;
+      boundsError.mendosaveUnrepairable = true;
       throw boundsError;
     }
 
@@ -6447,7 +6447,7 @@
   function forwardLiveAppend(transport, data) {
     const session = store.liveSession;
     try {
-      const kind = transport.__novaKind;
+      const kind = transport.__mendosaveKind;
       if (!session || session.stopped || (kind !== 'audio' && kind !== 'video')) return;
       // After an SPA navigation the next video's fragments arrive before the
       // capture loop can stop the session; they must never reach the file.
@@ -6455,14 +6455,14 @@
       const u8 = u8of(data);
       if (!u8 || !u8.length) return;
       const track = session.tracks[kind] ||= {
-        mime: transport.__novaMime || '',
+        mime: transport.__mendosaveMime || '',
         initKey: null,
         firstTimecode: null,
         lastTimecode: -Infinity,
         bytes: 0,
         fragments: 0,
       };
-      const mime = transport.__novaMime || track.mime || '';
+      const mime = transport.__mendosaveMime || track.mime || '';
       track.mime ||= mime;
       if (startsWithInit(u8)) {
         const key = fragmentFingerprint(u8);
@@ -6480,7 +6480,7 @@
         // the codec configuration is unchanged; adopt the remembered one — but
         // only if it belongs to the same container. A stale WebM init in front
         // of fMP4 fragments makes the whole track file unreadable.
-        const savedInit = transport.__novaLastInit || store._lastInit[kind];
+        const savedInit = transport.__mendosaveLastInit || store._lastInit[kind];
         const boxType = u8.length >= 8 ? String.fromCharCode(u8[4], u8[5], u8[6], u8[7]) : '';
         const looksMp4Fragment = /^(?:ftyp|styp|moof|sidx|emsg|prft|mdat|moov|free|skip)$/.test(boxType);
         const looksWebmFragment = u8[0] === 0x1f && u8[1] === 0x43 && u8[2] === 0xb6 && u8[3] === 0x75;
@@ -6544,7 +6544,7 @@
         const copy = bytes.slice();
         session.postedBytes += copy.length;
         window.postMessage({
-          __nova_live_chunk: true,
+          __mendosave_live_chunk: true,
           sessionId: session.id,
           kind,
           mime: mime || '',
@@ -6960,8 +6960,8 @@
     }
 
     // Check captured network responses first!
-    if (window.__nova_next_params) {
-      for (const p of window.__nova_next_params) {
+    if (window.__mendosave_next_params) {
+      for (const p of window.__mendosave_next_params) {
         if (typeof p === 'string' && b64Contains(p, vid)) return p;
       }
     }
@@ -7020,8 +7020,8 @@
         for (const p of panels) { if (p.__data || p.data) walkFirst(p.__data || p.data); }
       } catch(e) {}
     }
-    if (!firstFound && window.__nova_next_params && window.__nova_next_params.length) {
-      firstFound = window.__nova_next_params[window.__nova_next_params.length - 1];
+    if (!firstFound && window.__mendosave_next_params && window.__mendosave_next_params.length) {
+      firstFound = window.__mendosave_next_params[window.__mendosave_next_params.length - 1];
     }
     return firstFound;
   }
@@ -7147,7 +7147,7 @@
 
   async function fetchViaBackground(url) {
     try {
-      const res = await sendToBackground({ t: 'nova-fetch-caption', url });
+      const res = await sendToBackground({ t: 'mendosave-fetch-caption', url });
       if (!res || !res.ok) return { ok: false, len: 0, text: '', error: res ? res.error : 'bg proxy error' };
       return res;
     } catch (e) { return { ok: false, len: 0, text: '', error: e.message }; }
@@ -7170,7 +7170,7 @@
   }
   async function triggerPlayerCaptions(track) {
     try {
-      window.__nova_captured_timedtext = [];
+      window.__mendosave_captured_timedtext = [];
       const p = player();
       if (!p) return null;
       if (typeof p.loadModule === 'function') p.loadModule('captions');
@@ -7183,8 +7183,8 @@
 
     for (let i = 0; i < 15; i++) {
       await sleep(100);
-      if (window.__nova_captured_timedtext && window.__nova_captured_timedtext.length) {
-        for (const text of window.__nova_captured_timedtext) {
+      if (window.__mendosave_captured_timedtext && window.__mendosave_captured_timedtext.length) {
+        for (const text of window.__mendosave_captured_timedtext) {
           const parsed = tryParse(text, track);
           if (parsed) return parsed;
         }
@@ -7767,7 +7767,7 @@
                     return await fetchDirectAudio((pct) => reply({ progress: pct, phase: 'direct-audio' }));
                   } catch (error) {
                     lastError = error;
-                    if (error?.novaFatal || error?.novaNoFallback) throw error;
+                    if (error?.mendosaveFatal || error?.mendosaveNoFallback) throw error;
                     log('direct-audio', 'candidate', candidate + 1, 'failed:',
                       String(error?.message || error));
                   }
@@ -7781,7 +7781,7 @@
                 // A Music track opened by the queue has never played, so no
                 // media URL has been observed yet. One short muted play makes
                 // the player request its first segments — and reveal the URL.
-                if (!MUSIC_HOST || firstError?.novaFatal || firstError?.novaNoFallback) throw firstError;
+                if (!MUSIC_HOST || firstError?.mendosaveFatal || firstError?.mendosaveNoFallback) throw firstError;
                 log('direct-audio', 'no usable direct URL yet; priming playback:',
                   String(firstError?.message || firstError));
                 await primeMusicMediaSession(video(), expectedDuration);
@@ -7790,7 +7790,7 @@
               cap = { duration: Number(video()?.duration) || directAudio.duration || 0 };
               result = { audio: directAudio };
             } catch (error) {
-              if (error?.novaFatal || error?.novaNoFallback) throw error;
+              if (error?.mendosaveFatal || error?.mendosaveNoFallback) throw error;
               log('direct-audio', 'fallback to fast MSE:', error?.message || error);
               reply({ progress: 0.001, phase: 'mse-audio' });
             }
@@ -7850,7 +7850,7 @@
               };
               result = { video: directVideo, audio: directAudio };
             } catch (error) {
-              if (error?.novaFatal || error?.novaNoFallback) throw error;
+              if (error?.mendosaveFatal || error?.mendosaveNoFallback) throw error;
               log('direct-video', 'fallback to fast MSE:', error?.message || error);
               reply({ progress: 0.001, phase: 'mse-video' });
             }
@@ -8106,7 +8106,7 @@
               // actually closes these holes — the same thing that fixed Shorts.
               // content_ui bounds this to two reloads and then reports honestly.
               exhaustedDetails.reloadRequired = fatal;
-              error.novaFatal = fatal;
+              error.mendosaveFatal = fatal;
               error.details = exhaustedDetails;
               throw error;
             };
@@ -8166,7 +8166,7 @@
                       ? 'обнаружен пропущенный внутренний медиасегмент; дорожка будет скачана заново'
                       : 'крайние сегменты повреждены; медиадорожка будет скачана заново',
                   );
-                  retry.novaFatal = true;
+                  retry.mendosaveFatal = true;
                   retry.details = {
                     ...details,
                     reloadRequired: true,
@@ -8179,7 +8179,7 @@
                   throw retry;
                 }
 
-                error.novaFatal = true;
+                error.mendosaveFatal = true;
                 error.details = {
                   ...details,
                   reloadRequired: false,
@@ -8211,7 +8211,7 @@
               try {
                 await withDeliberatePlayback(() => preparePlayerForRenderedCapture(vidId(), targetQ));
               } catch (prepareError) {
-                if (prepareError?.novaFatal) throw prepareError;
+                if (prepareError?.mendosaveFatal) throw prepareError;
                 log('rendered-video', 'player preparation unavailable:', prepareError?.message || prepareError);
               }
               const rendered = await withDeliberatePlayback(() => captureRenderedVideo(
@@ -8230,7 +8230,7 @@
               const completedReloads = Math.max(0, Number(reloadCount) || 0);
               if (completedReloads < 2) {
                 const retry = new Error('получение сегментов остановилось; страница будет обновлена, загрузка продолжится автоматически');
-                retry.novaFatal = true;
+                retry.mendosaveFatal = true;
                 retry.details = {
                   reloadRequired: true,
                   reason: 'capture-stalled',
@@ -8257,14 +8257,14 @@
               });
               mseCaptured = true;
             } catch (captureError) {
-              if (captureError?.novaFatal) throw captureError;
+              if (captureError?.mendosaveFatal) throw captureError;
 
               if (!result && isMp3) {
                 throwIfDownloadCancelled();
                 const completedReloads = Math.max(0, Number(reloadCount) || 0);
                 if (completedReloads < 2) {
                   const retry = new Error('получение аудиосегментов остановилось; страница будет обновлена, загрузка продолжится автоматически');
-                  retry.novaFatal = true;
+                  retry.mendosaveFatal = true;
                   retry.details = {
                     reloadRequired: true,
                     reason: 'capture-stalled',
@@ -8290,7 +8290,7 @@
                 try {
                   await captureSequentialVideo(captureError);
                 } catch (sequentialError) {
-                  if (sequentialError?.novaFatal) throw sequentialError;
+                  if (sequentialError?.mendosaveFatal) throw sequentialError;
                   await renderedOrReload(sequentialError);
                 }
               }
@@ -8302,7 +8302,7 @@
                   reportMseProgress(pct, recoveryPhase);
                 });
               } catch (assemblyError) {
-                if (assemblyError?.novaFatal || isMp3) throw assemblyError;
+                if (assemblyError?.mendosaveFatal || isMp3) throw assemblyError;
                 if (!usedSequentialMse) {
                   try {
                     await captureSequentialVideo(assemblyError);
@@ -8310,7 +8310,7 @@
                       reportMseProgress(pct, recoveryPhase);
                     });
                   } catch (sequentialError) {
-                    if (sequentialError?.novaFatal) throw sequentialError;
+                    if (sequentialError?.mendosaveFatal) throw sequentialError;
                     await renderedOrReload(sequentialError);
                   }
                 } else {

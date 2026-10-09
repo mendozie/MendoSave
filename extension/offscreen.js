@@ -49,7 +49,7 @@ function notifyWorker(message, retries = 1) {
 }
 
 function logToWorker(tag, text) {
-  return notifyWorker({ t: 'nova-log', tag, text });
+  return notifyWorker({ t: 'mendosave-log', tag, text });
 }
 
 let busyFinalizers = 0;
@@ -61,14 +61,14 @@ function jobsActive() {
 function updateKeepAlive() {
   if (jobsActive()) {
     if (keepAliveTimer) return;
-    notifyWorker({ t: 'nova-ping' }, 0);
+    notifyWorker({ t: 'mendosave-ping' }, 0);
     keepAliveTimer = setInterval(() => {
       if (!jobsActive()) {
         clearInterval(keepAliveTimer);
         keepAliveTimer = undefined;
         return;
       }
-      notifyWorker({ t: 'nova-ping' }, 0);
+      notifyWorker({ t: 'mendosave-ping' }, 0);
     }, KEEPALIVE_INTERVAL_MS);
   } else if (keepAliveTimer) {
     clearInterval(keepAliveTimer);
@@ -80,7 +80,7 @@ function sendProgress(value, status, percent = value * 100) {
   if (!activeJob) return;
   const progress = Number.isFinite(value) ? value : 0;
   notifyWorker({
-    t: 'nova-progress',
+    t: 'mendosave-progress',
     tabId: activeJob.tabId,
     jobId: activeJob.id,
     value: Math.max(0, Math.min(1, progress)),
@@ -830,7 +830,7 @@ function appendChunk(message) {
 //
 // Its own directory, not the live-recording one: cleanupStaleLiveFiles() deletes
 // everything there that no live job claims, which would eat an active spool.
-const SPOOL_DIR = 'nvs-spool';
+const SPOOL_DIR = 'mendosave-spool';
 const SPOOL_THRESHOLD = 256 * 1024 * 1024;
 const SPOOL_FFMPEG_LIMIT = 1_000_000_000;
 
@@ -976,7 +976,7 @@ async function remuxSpooledStream(job, inputFile) {
 // ---- staging: track bytes that arrive while the capture still runs --------
 // The page ships captured parts as they appear, long before it knows whether
 // the finished track will be exactly that stream (assembly can still reorder
-// or drop parts). Nothing here is trusted: `nova-begin` adopts the staged
+// or drop parts). Nothing here is trusted: `mendosave-begin` adopts the staged
 // bytes only for the tracks the page verified byte for byte, and the rest is
 // transferred the normal way.
 const STAGING_TTL_MS = 20 * 60_000;
@@ -1455,6 +1455,7 @@ function mp3LengthMismatch(job, bytes) {
 // momentarily unavailable. When chrome.downloads cannot be reached, the
 // output is parked in OPFS and handed over on the next flush — automatic at
 // the start of every session, or on demand from the popup.
+// Durable directory from 0.1: rebranding must not orphan already prepared files.
 const RECOVERY_DIR = 'nvs-recovered';
 const RECOVERY_KEY = 'nova_recovered';
 const RECOVERY_KEEP_MS = 10 * 60_000;
@@ -1467,13 +1468,13 @@ async function recoveryDirectory() {
 }
 
 async function readRecoveryIndex() {
-  const response = await sendToWorker({ t: 'nova-recovery-read' }, { retries: 3 });
+  const response = await sendToWorker({ t: 'mendosave-recovery-read' }, { retries: 3 });
   if (!response?.ok) throw new Error(response?.error || 'Recovery index is unavailable');
   return Array.isArray(response.entries) ? response.entries : [];
 }
 
 async function writeRecoveryIndex(entries) {
-  const response = await sendToWorker({ t: 'nova-recovery-write', entries }, { retries: 3 });
+  const response = await sendToWorker({ t: 'mendosave-recovery-write', entries }, { retries: 3 });
   if (!response?.ok) throw new Error(response?.error || 'Recovery index could not be saved');
 }
 
@@ -1580,7 +1581,7 @@ async function deliverOutput(blob, filename, job) {
     }
     if (!parked) throw error;
     const failure = new Error('браузер не принял файл на сохранение (служебный процесс расширения был'
-      + ' перезапущен). Готовый файл сохранён во временном хранилище — откройте значок NVS и нажмите'
+      + ' перезапущен). Готовый файл сохранён во временном хранилище — откройте значок MendoSave и нажмите'
       + ' «Сохранить готовый файл».');
     failure.recovered = true;
     throw failure;
@@ -1788,7 +1789,7 @@ async function finalizeJob(message) {
       if (job.format === 'mp3' && job.videoId
         && ['original', 'mp3', 'm4a'].includes(job.audioFormat)) {
         sendProgress(0.07, 'Загрузка обложки…');
-        const cover = await sendToWorker({ t: 'nova-fetch-cover', videoId: job.videoId }, { retries: 3 })
+        const cover = await sendToWorker({ t: 'mendosave-fetch-cover', videoId: job.videoId }, { retries: 3 })
           .catch(() => null);
         if (cover?.ok && cover.b64) {
           try {
@@ -1940,7 +1941,7 @@ async function finalizeJob(message) {
 // stay flat no matter how long the broadcast runs. Finalize muxes both track
 // files with stream copy; recordings too large for the wasm filesystem are
 // saved as separate video/audio files instead of failing.
-const LIVE_DIR = 'nvs-live';
+const LIVE_DIR = 'mendosave-live';
 const LIVE_MAX_BYTES = 24 * 1024 * 1024 * 1024;
 const LIVE_MUX_LIMIT = 1_400_000_000;
 const LIVE_MEMFS_FALLBACK_LIMIT = 700_000_000;
@@ -2071,17 +2072,17 @@ async function saveBlob(blob, filename, job) {
   if (job?.cancelled) throw new Error('Загрузка отменена');
   const url = URL.createObjectURL(blob);
   try {
-    const response = await sendToWorker({ t: 'nova-save', url, filename },
+    const response = await sendToWorker({ t: 'mendosave-save', url, filename },
       { retries: WORKER_RETRY_DELAYS.length });
     if (!response?.ok) throw new Error(response?.error || 'не удалось сохранить файл');
     if (!Number.isInteger(response.id)) throw new Error('Browser returned no download id');
     const deadline = Date.now() + 30 * 60_000;
     for (;;) {
       if (job?.cancelled) {
-        await sendToWorker({ t: 'nova-download-cancel', id: response.id }, { retries: 3 }).catch(() => {});
+        await sendToWorker({ t: 'mendosave-download-cancel', id: response.id }, { retries: 3 }).catch(() => {});
         throw new Error('Загрузка отменена');
       }
-      const state = await sendToWorker({ t: 'nova-download-state', id: response.id }, { retries: 3 });
+      const state = await sendToWorker({ t: 'mendosave-download-state', id: response.id }, { retries: 3 });
       if (!state?.ok) throw new Error(state?.error || 'Состояние сохранения недоступно');
       if (state.state === 'complete') break;
       if (state.state === 'interrupted') throw new Error(`Сохранение прервано: ${state.error || 'ошибка браузера'}`);
@@ -2103,7 +2104,7 @@ function liveContainerExtension(mime) {
 function sendLiveProgress(job, value, status) {
   const progress = Math.max(0, Math.min(1, Number(value) || 0));
   notifyWorker({
-    t: 'nova-progress',
+    t: 'mendosave-progress',
     tabId: job.tabId,
     jobId: job.id,
     value: progress,
@@ -2263,7 +2264,7 @@ async function finalizeLiveJob(message) {
     const totalBytes = tracks.video.size + tracks.audio.size;
     if (totalBytes <= LIVE_MUX_LIMIT && !activeJob) {
       // Claim the shared processing slot synchronously: getFFmpeg() inside
-      // muxLiveTracks can await for seconds and a VOD nova-begin arriving in
+      // muxLiveTracks can await for seconds and a VOD mendosave-begin arriving in
       // that window must not clobber this job (or vice versa).
       activeJob = {
         id: job.id,
@@ -2320,7 +2321,7 @@ async function muxLiveTracks(job, tracks, baseName) {
   activeJob.lastProgressAt = Date.now();
   const files = new Set();
   let mounted = false;
-  const mountPoint = '/nvs-live-in';
+  const mountPoint = '/mendosave-live-in';
   try {
     sendProgress(0.05, 'Подготовка записи эфира…');
     let videoName;
@@ -2404,7 +2405,7 @@ async function reportError(error) {
     ? String(error.message)
     : [error?.message || String(error), error?.stack].filter(Boolean).join('\n');
   await sendToWorker({
-    t: 'nova-error',
+    t: 'mendosave-error',
     context: 'offscreen/finalize',
     error: detail,
     details: error?.details,
@@ -2415,12 +2416,12 @@ async function reportError(error) {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.t !== 'string') return false;
 
-  if (message.t === 'nova-host-probe') {
+  if (message.t === 'mendosave-host-probe') {
     sendResponse({ ok: true });
     return false;
   }
 
-  if (message.t === 'nova-save-text') {
+  if (message.t === 'mendosave-save-text') {
     const backgroundUrl = _sender?.url;
     if (_sender?.id !== chrome.runtime.id || _sender?.tab
       || (backgroundUrl && ![chrome.runtime.getURL('background.js'),
@@ -2436,16 +2437,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  const commands = new Set(['nova-begin', 'nova-stage-open', 'nova-stage', 'nova-chunk',
-    'nova-abort', 'nova-finalize', 'nova-live-begin', 'nova-live-chunk',
-    'nova-live-abort', 'nova-live-finalize']);
+  const commands = new Set(['mendosave-begin', 'mendosave-stage-open', 'mendosave-stage', 'mendosave-chunk',
+    'mendosave-abort', 'mendosave-finalize', 'mendosave-live-begin', 'mendosave-live-chunk',
+    'mendosave-live-abort', 'mendosave-live-finalize']);
   if (commands.has(message.t)) {
     const tabId = _sender?.tab?.id;
-    const owner = message.t.startsWith('nova-live-') ? liveJobs.get(message.jobId)
-      : (message.t === 'nova-stage' ? staging
-        : (message.t === 'nova-begin' && activeJob?.phase === 'receiving'
+    const owner = message.t.startsWith('mendosave-live-') ? liveJobs.get(message.jobId)
+      : (message.t === 'mendosave-stage' ? staging
+        : (message.t === 'mendosave-begin' && activeJob?.phase === 'receiving'
           && Date.now() - activeJob.lastActivity > STALE_JOB_MS ? null : activeJob));
-    const stagedOwner = ['nova-stage-open', 'nova-stage', 'nova-begin', 'nova-abort'].includes(message.t)
+    const stagedOwner = ['mendosave-stage-open', 'mendosave-stage', 'mendosave-begin', 'mendosave-abort'].includes(message.t)
       && staging && Date.now() - staging.at < STAGING_TTL_MS ? staging : null;
     if (_sender?.id !== chrome.runtime.id || !Number.isInteger(tabId)
       || (owner && owner.tabId !== tabId)
@@ -2456,38 +2457,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     message = { ...message, tabId };
-    if (['nova-chunk', 'nova-stage', 'nova-live-chunk'].includes(message.t)
+    if (['mendosave-chunk', 'mendosave-stage', 'mendosave-live-chunk'].includes(message.t)
       && (typeof message.b64 !== 'string' || !message.b64.length
         || message.b64.length > 4 * Math.ceil(4 * 1024 * 1024 / 3)
-        || !['audio', 'video', ...(message.t === 'nova-chunk' ? ['video-prefix'] : [])].includes(message.track)
+        || !['audio', 'video', ...(message.t === 'mendosave-chunk' ? ['video-prefix'] : [])].includes(message.track)
         || (message.mime != null && (typeof message.mime !== 'string' || message.mime.length > 100)))) {
       sendResponse({ ok: false, error: 'Некорректный или слишком большой фрагмент медиа.' });
       return false;
     }
   }
 
-  if (message.t === 'nova-begin') {
+  if (message.t === 'mendosave-begin') {
     sendResponse(beginJob(message));
     return false;
   }
-  if (message.t === 'nova-warmup') {
+  if (message.t === 'mendosave-warmup') {
     getFFmpeg()
       .then(() => sendResponse({ ok: true, mode: ffmpegMode }))
       .catch((error) => sendResponse({ ok: false, error: String(error?.stack || error) }));
     return true;
   }
-  if (message.t === 'nova-stage-open') {
+  if (message.t === 'mendosave-stage-open') {
     const result = openStaging(message);
     if (result.ok && staging) staging.tabId = message.tabId;
     sendResponse(result);
     return false;
   }
-  if (message.t === 'nova-stage') {
+  if (message.t === 'mendosave-stage') {
     try { sendResponse(stageChunk(message)); }
     catch (error) { sendResponse({ ok: false, error: String(error) }); }
     return false;
   }
-  if (message.t === 'nova-chunk') {
+  if (message.t === 'mendosave-chunk') {
     let result;
     try { result = appendChunk(message); }
     catch (error) { sendResponse({ ok: false, error: String(error) }); return false; }
@@ -2502,32 +2503,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse(result);
     return false;
   }
-  if (message.t === 'nova-abort') {
+  if (message.t === 'mendosave-abort') {
     sendResponse(abortJob(message));
     return false;
   }
-  if (message.t === 'nova-finalize') {
+  if (message.t === 'mendosave-finalize') {
     finalizeJob(message).then(sendResponse).catch(async (error) => sendResponse(error.cancelled
       ? { ok: false, cancelled: true, error: 'Загрузка отменена' } : await reportError(error)));
     return true;
   }
-  if (message.t === 'nova-live-begin') {
+  if (message.t === 'mendosave-live-begin') {
     evictStaleLiveJobs().catch(() => {}).then(() => sendResponse(beginLiveJob(message)));
     return true;
   }
-  if (message.t === 'nova-live-chunk') {
+  if (message.t === 'mendosave-live-chunk') {
     appendLiveChunk(message).then(sendResponse);
     return true;
   }
-  if (message.t === 'nova-live-abort') {
+  if (message.t === 'mendosave-live-abort') {
     abortLiveJob(message).then(sendResponse).catch(() => sendResponse({ ok: true }));
     return true;
   }
-  if (message.t === 'nova-live-finalize') {
+  if (message.t === 'mendosave-live-finalize') {
     finalizeLiveJob(message).then(sendResponse).catch(async (error) => sendResponse(await reportError(error)));
     return true;
   }
-  if (message.t === 'nova-flush') {
+  if (message.t === 'mendosave-flush') {
     flushRecoveredFiles()
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));

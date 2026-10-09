@@ -15,7 +15,7 @@
 //     is streamed to the offscreen document slice by slice, so a two-hour
 //     audiobook never exists in the page in one piece.
 (() => {
-  const BUTTON_CLASS = 'nova-vk-btn';
+  const BUTTON_CLASS = 'mendosave-vk-btn';
   const SLICE_BYTES = 8 * 1024 * 1024;
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
   const VIDEO_ID_RE = /\/(?:video|clip)(-?\d+)_(\d+)/;
@@ -25,13 +25,13 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'nova-log', tag: `vk/${tag}`, text }).catch(() => {});
+    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `vk/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
-    console.error('[Nova Video Saver]', error);
+    console.error('[MendoSave]', error);
     return chrome.runtime.sendMessage({
-      t: 'nova-error', context, error: String(error?.stack || error?.message || error), details,
+      t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
 
@@ -82,8 +82,17 @@
     const open = html.indexOf('{', at);
     if (open < 0) return null;
     let depth = 0;
+    let quoted = false;
+    let escaped = false;
     for (let index = open; index < html.length; index++) {
       const char = html[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') { quoted = true; continue; }
       if (char === '{') depth += 1;
       else if (char === '}') {
         depth -= 1;
@@ -156,15 +165,22 @@
       || sets.find((set) => [...set.querySelectorAll('Representation')]
         .some((rep) => /^mp4a/.test(rep.getAttribute('codecs') || '')));
     if (!audioSet) throw new Error('в манифесте DASH нет аудиодорожки');
+    if (audioSet.querySelector('ContentProtection')) throw new Error('зашифрованный DASH не поддерживается');
+    if (manifest.documentElement?.getAttribute('type') === 'dynamic') {
+      throw new Error('запись трансляции DASH пока не поддержана');
+    }
+    if (audioSet.querySelector('SegmentTemplate, SegmentList')) {
+      throw new Error('сегментированная аудиодорожка DASH пока не поддержана');
+    }
     const best = [...audioSet.querySelectorAll('Representation')]
       .map((rep) => ({
         bandwidth: Number(rep.getAttribute('bandwidth')) || 0,
-        codecs: rep.getAttribute('codecs') || '',
+        codecs: rep.getAttribute('codecs') || audioSet.getAttribute('codecs') || '',
         base: rep.querySelector('BaseURL')?.textContent?.trim() || '',
       }))
-      .filter((rep) => rep.base)
+      .filter((rep) => rep.base && /^mp4a(?:\.|$)/.test(rep.codecs))
       .sort((left, right) => right.bandwidth - left.bandwidth)[0];
-    if (!best) throw new Error('в аудиодорожке нет адреса файла');
+    if (!best) throw new Error('в манифесте DASH нет доступного файла AAC');
     return { ...best, url: new URL(best.base, files.dash_sep).toString() };
   }
 
@@ -186,7 +202,7 @@
   // `no-store` is not optional: a file the page's own player already fetched
   // sits in the cache as a no-cors entry that a CORS request cannot read, and
   // Chrome reports that as a bare `TypeError: Failed to fetch`.
-  async function fetchRange(url, from, to) {
+  async function fetchRange(url, from, to, total) {
     const response = await fetch(url, {
       credentials: 'omit',
       cache: 'no-store',
@@ -195,7 +211,31 @@
     if (response.status !== 206 && response.status !== 200) {
       throw new Error(`сервер отказал на диапазоне (HTTP ${response.status})`);
     }
-    return new Uint8Array(await response.arrayBuffer());
+    // A server may ignore Range or return a short body. Appending that body
+    // and advancing by its length can repeat the beginning or silently truncate
+    // the audio. Only accept the exact requested bytes before handing them on.
+    if (response.status === 200 && from !== 0) throw new Error('сервер проигнорировал диапазон аудиодорожки');
+    const range = response.headers.get('content-range');
+    if (range) {
+      // An exposed complete length must agree with the size used to end the
+      // download; exact start/end alone can still accept a truncated track.
+      const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(range);
+      const start = match ? Number(match[1]) : NaN;
+      const end = match ? Number(match[2]) : NaN;
+      const completeLength = match?.[3] === '*' ? null : Number(match?.[3]);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+          || start !== from || end !== to
+          || (completeLength !== null && (!Number.isSafeInteger(completeLength)
+              || completeLength !== total || completeLength <= end))) {
+        throw new Error('сервер вернул другой диапазон аудиодорожки');
+      }
+    }
+    // Own the backing buffer before species-based subarray/base64 operations:
+    // Gecko's view over a DOM-returned ArrayBuffer can retain its foreign realm.
+    const fetchedBytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(fetchedBytes);
+    if (bytes.length !== to - from + 1) throw new Error('сервер вернул неполный или неверный диапазон аудиодорожки');
+    return bytes;
   }
 
   // `Content-Range` is not a CORS-safelisted response header, so its value is
@@ -207,9 +247,10 @@
     for (const method of ['HEAD', 'GET']) {
       try {
         const response = await fetch(url, { method, credentials: 'omit', cache: 'no-store' });
-        const total = Number(response.headers.get('content-length')) || 0;
+        const length = response.headers.get('content-length');
+        const total = /^\d+$/.test(length || '') ? Number(length) : 0;
         if (method === 'GET') await response.body?.cancel().catch(() => {});
-        if (response.ok && total) return total;
+        if (response.ok && Number.isSafeInteger(total) && total > 0) return total;
       } catch (error) { /* try the next method */ }
     }
     return 0;
@@ -219,7 +260,7 @@
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await chrome.runtime.sendMessage({
-        t: 'nova-chunk', jobId, track, b64: encodeBase64(slice),
+        t: 'mendosave-chunk', jobId, track, b64: encodeBase64(slice),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
     }
@@ -228,7 +269,7 @@
   // ---- downloads -------------------------------------------------------------
 
   async function saveDirect(url, filename) {
-    const saved = await chrome.runtime.sendMessage({ t: 'nova-save', url, filename });
+    const saved = await chrome.runtime.sendMessage({ t: 'mendosave-save', url, filename });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
     return saved.id;
   }
@@ -241,7 +282,7 @@
     let misses = 0;
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const state = await chrome.runtime.sendMessage({ t: 'nova-download-state', id }).catch(() => null);
+      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id }).catch(() => null);
       if (!state?.ok) {
         // A download the browser has not registered yet is normal for a moment.
         if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
@@ -274,14 +315,14 @@
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const extension = audioFormat === 'mp3' ? '.mp3' : '.m4a';
     const filename = `VK - ${safeName(info.title)}${extension}`;
-    const ensured = await chrome.runtime.sendMessage({ t: 'nova-ensure' });
+    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'nova-register-job', jobId });
+    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
     const started = await chrome.runtime.sendMessage({
-      t: 'nova-begin',
+      t: 'mendosave-begin',
       jobId,
       tabId: registration.tabId,
       filename,
@@ -299,7 +340,7 @@
     // The mux stage has no number of its own until offscreen reports one, and a
     // long MP3 encode is exactly when the user needs to see something moving.
     const onProgress = (message) => {
-      if (message?.t !== 'nova-progress' || message.jobId !== jobId) return;
+      if (message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
       const value = Number(message.value);
       notification.stage('process', Number.isFinite(value) ? value : null, 'active',
         message.status || 'Сборка файла');
@@ -310,7 +351,7 @@
       let at = 0;
       while (at < total) {
         const end = Math.min(total - 1, at + SLICE_BYTES - 1);
-        const bytes = await fetchRange(track.url, at, end);
+        const bytes = await fetchRange(track.url, at, end, total);
         if (!bytes.length) throw new Error('сервер вернул пустой диапазон');
         await sendChunk(jobId, 'audio', bytes);
         at += bytes.length;
@@ -318,13 +359,13 @@
       }
       notification.stage('fetch', 1, 'done', 'Скачивание звука');
       notification.stage('process', null, 'active', 'Сборка файла');
-      const finalized = await chrome.runtime.sendMessage({ t: 'nova-finalize', jobId });
+      const finalized = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId });
       if (!finalized?.ok) throw new Error(finalized?.error || 'не удалось собрать файл');
       notification.stage('process', 1, 'done', 'Сборка файла');
       log('audio', `saved; bitrate=${track.bandwidth} bytes=${total} format=${audioFormat}`);
       return finalized.filename || filename;
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'nova-abort', jobId }).catch(() => {});
+      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId }).catch(() => {});
       throw error;
     } finally {
       chrome.runtime.onMessage.removeListener(onProgress);
@@ -341,11 +382,11 @@
 
   function getToast() {
     if (!toastBox) {
-      toastBox = createElement('div', 'nova-vk-toast');
-      const text = createElement('div', 'nova-vk-toast-text');
-      const bar = createElement('div', 'nova-vk-toast-bar');
+      toastBox = createElement('div', 'mendosave-vk-toast');
+      const text = createElement('div', 'mendosave-vk-toast-text');
+      const bar = createElement('div', 'mendosave-vk-toast-bar');
       bar.append(createElement('i'));
-      const stages = createElement('div', 'nova-vk-stages');
+      const stages = createElement('div', 'mendosave-vk-stages');
       toastBox.append(text, bar, stages);
       document.body.appendChild(toastBox);
       toastBox._text = text;
@@ -371,12 +412,12 @@
         toastBox._bar.hidden = true;
         toastBox._stages.replaceChildren();
         for (const definition of definitions) {
-          const row = createElement('div', 'nova-vk-stage queued');
+          const row = createElement('div', 'mendosave-vk-stage queued');
           row.dataset.stage = definition.id;
-          const head = createElement('div', 'nova-vk-stage-head');
-          head.append(createElement('span', 'nova-vk-stage-label', definition.label),
-            createElement('span', 'nova-vk-stage-value', 'ожидание'));
-          const bar = createElement('div', 'nova-vk-stage-bar');
+          const head = createElement('div', 'mendosave-vk-stage-head');
+          head.append(createElement('span', 'mendosave-vk-stage-label', definition.label),
+            createElement('span', 'mendosave-vk-stage-value', 'ожидание'));
+          const bar = createElement('div', 'mendosave-vk-stage-bar');
           bar.append(createElement('i'));
           row.append(head, bar);
           toastBox._stages.append(row);
@@ -386,10 +427,10 @@
       stage(id, fraction, state = 'active', label) {
         const row = toastBox?._stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
-        row.className = `nova-vk-stage ${state}`;
-        if (label) row.querySelector('.nova-vk-stage-label').textContent = label;
-        const value = row.querySelector('.nova-vk-stage-value');
-        const fill = row.querySelector('.nova-vk-stage-bar i');
+        row.className = `mendosave-vk-stage ${state}`;
+        if (label) row.querySelector('.mendosave-vk-stage-label').textContent = label;
+        const value = row.querySelector('.mendosave-vk-stage-value');
+        const fill = row.querySelector('.mendosave-vk-stage-bar i');
         if (Number.isFinite(fraction)) {
           const percent = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
           value.textContent = state === 'done' ? 'готово' : `${percent}%`;
@@ -481,9 +522,9 @@
     event.preventDefault();
     event.stopPropagation();
     if (menu) { closeMenu(); return; }
-    menu = createElement('div', 'nova-vk-menu');
-    const heading = createElement('div', 'nova-vk-head', `Nova Video Saver v${chrome.runtime.getManifest().version}`);
-    const loading = createElement('div', 'nova-vk-item nova-vk-muted', 'Читаю данные видео…');
+    menu = createElement('div', 'mendosave-vk-menu');
+    const heading = createElement('div', 'mendosave-vk-head', `MendoSave v${chrome.runtime.getManifest().version}`);
+    const loading = createElement('div', 'mendosave-vk-item mendosave-vk-muted', 'Читаю данные видео…');
     menu.append(heading, loading);
     document.body.appendChild(menu);
     positionMenu(button);
@@ -496,11 +537,16 @@
       const choices = buildChoices(info);
       if (!choices.length) throw new Error('у этого видео нет доступных файлов');
       for (const choice of choices) {
-        const item = createElement('div', 'nova-vk-item');
+        const item = createElement('div', 'mendosave-vk-item');
         item.setAttribute('role', 'button');
         item.tabIndex = 0;
-        item.append(createElement('span', 'nova-vk-text', choice.text));
-        if (choice.hint) item.append(createElement('span', 'nova-vk-hint', choice.hint));
+        item.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          item.click();
+        });
+        item.append(createElement('span', 'mendosave-vk-text', choice.text));
+        if (choice.hint) item.append(createElement('span', 'mendosave-vk-hint', choice.hint));
         item.addEventListener('click', () => { closeMenu(); void runChoice(info, choice); });
         menu.append(item);
       }
@@ -508,7 +554,7 @@
     } catch (error) {
       if (!menu) return;
       loading.remove();
-      menu.append(createElement('div', 'nova-vk-item nova-vk-muted',
+      menu.append(createElement('div', 'mendosave-vk-item mendosave-vk-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
       log('menu', `list failed: ${String(error?.message || error)}`);
     }
@@ -546,7 +592,7 @@
     ring.setAttribute('stroke-width', '2.2');
     const arrows = document.createElementNS(namespace, 'path');
     arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     svg.append(ring, arrows);
     return svg;
   }
@@ -573,6 +619,15 @@
       const box = host.getBoundingClientRect();
       if (box.width > 200 && box.height > 150) return host.shadowRoot;
     }
+    // VK's newer player attaches its open root to an ordinary DIV without the
+    // legacy class. Match the media-bearing, visible host instead of CSS hashes.
+    for (const host of document.querySelectorAll('*')) {
+      const root = host.shadowRoot;
+      if (!root?.querySelector('video')) continue;
+      const box = host.getBoundingClientRect();
+      if (box.width > 200 && box.height > 150 && box.bottom > 0 && box.right > 0
+        && box.top < window.innerHeight && box.left < window.innerWidth) return root;
+    }
     return null;
   }
 
@@ -588,7 +643,7 @@
     const button = document.createElement('button');
     button.className = BUTTON_CLASS;
     button.type = 'button';
-    button.title = 'Скачать видео (Nova Video Saver)';
+    button.title = 'Скачать видео (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
     button.addEventListener('click', (event) => { void openMenu(button, event); });
@@ -610,9 +665,9 @@
     const wrapper = rightMost.closest('.tooltip-wrapper') || rightMost;
     const row = wrapper.parentElement;
     if (!row) return false;
-    if (!root.querySelector('style[data-nova]')) {
+    if (!root.querySelector('style[data-mendosave]')) {
       const style = document.createElement('style');
-      style.setAttribute('data-nova', '1');
+      style.setAttribute('data-mendosave', '1');
       style.textContent = SHADOW_STYLE;
       root.append(style);
     }
@@ -631,7 +686,7 @@
     const anchor = visiblePlayerBox();
     if (!anchor || anchor.querySelector(`.${BUTTON_CLASS}`)) return;
     const button = makeButton();
-    button.classList.add('nova-vk-overlay');
+    button.classList.add('mendosave-vk-overlay');
     if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
     anchor.appendChild(button);
   }

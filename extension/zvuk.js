@@ -19,7 +19,7 @@
 // `preview` — a 30-second excerpt. That is the account's entitlement, not a
 // failure, so the menu says so instead of pretending otherwise.
 (() => {
-  const BUTTON_CLASS = 'nova-zvuk-btn';
+  const BUTTON_CLASS = 'mendosave-zvuk-btn';
   const GQL_URL = '/api/v1/graphql';
   const TRACK_HREF = /^\/track\/(\d+)/;
   // CSS-modules class names: `ContentItem_wrapper__dQusH`. The hash changes per
@@ -41,13 +41,13 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'nova-log', tag: `zvuk/${tag}`, text }).catch(() => {});
+    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `zvuk/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
-    console.error('[Nova Video Saver]', error);
+    console.error('[MendoSave]', error);
     return chrome.runtime.sendMessage({
-      t: 'nova-error', context, error: String(error?.stack || error?.message || error), details,
+      t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
 
@@ -137,12 +137,12 @@
     });
     const stream = (data.mediaContents || [])[0]?.stream;
     if (!stream) throw new Error('Звук не отдал ссылку на этот трек');
-    const url = stream.high || stream.mid;
+    const url = stream.high || stream.mid || stream.preview;
     if (!url) throw new Error('для этого трека нет доступного файла');
     // Without a subscription the gateway substitutes the excerpt into `mid`;
     // `high` stays null. Saying "готово" over a 30-second file would be a lie.
-    const isPreview = !stream.high && Boolean(stream.preview) && stream.mid === stream.preview;
-    return { url, isPreview, bitrate: stream.high ? 320 : 128 };
+    const isPreview = Boolean(stream.preview) && url === stream.preview;
+    return { url, isPreview, bitrate: isPreview ? 0 : (stream.high ? 320 : 128) };
   }
 
   // ---- page scan -------------------------------------------------------------
@@ -187,7 +187,7 @@
   }
 
   async function saveDirect(url, filename) {
-    const saved = await chrome.runtime.sendMessage({ t: 'nova-save', url, filename });
+    const saved = await chrome.runtime.sendMessage({ t: 'mendosave-save', url, filename });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
     return saved.id;
   }
@@ -198,7 +198,7 @@
     let misses = 0;
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const state = await chrome.runtime.sendMessage({ t: 'nova-download-state', id }).catch(() => null);
+      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id }).catch(() => null);
       if (!state?.ok) {
         if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
         continue;
@@ -217,7 +217,8 @@
 
   async function downloadOne(track, notification, stage) {
     const stream = await loadStream(track.id);
-    const filename = fileNameFor(track);
+    const filename = stream.isPreview
+      ? fileNameFor(track).replace(/\.mp3$/, ' [фрагмент].mp3') : fileNameFor(track);
     const id = await saveDirect(stream.url, filename);
     await followBrowserDownload(id, notification, stage);
     log('track', `saved ${track.id}; bitrate=${stream.bitrate} preview=${stream.isPreview}`);
@@ -234,7 +235,7 @@
       const result = await downloadOne(track, notification, 'file');
       notification.stage('file', 1, 'done', 'Скачивание файла');
       notification.set(result.isPreview
-        ? `Готово (фрагмент 30 с — нет подписки): ${result.filename}`
+        ? `Готово (доступный фрагмент): ${result.filename}`
         : `Готово: ${result.filename}`, 1);
       notification.hide(result.isPreview ? 8000 : 4000);
     } catch (error) {
@@ -276,7 +277,7 @@
       notification.stage('list', 1, 'done', 'Треки');
       notification.stage('file', 1, 'done', 'Текущий файл');
       const parts = [`Готово: ${done - failed} из ${tracks.length}`];
-      if (previews) parts.push(`фрагментов 30 с: ${previews}`);
+      if (previews) parts.push(`фрагментов: ${previews}`);
       if (failed) parts.push(`не удалось: ${failed}`);
       notification.set(parts.join(' · '), 1);
       notification.hide(9000);
@@ -295,11 +296,11 @@
 
   function getToast() {
     if (!toastBox) {
-      toastBox = createElement('div', 'nova-zvuk-toast');
-      const text = createElement('div', 'nova-zvuk-toast-text');
-      const bar = createElement('div', 'nova-zvuk-toast-bar');
+      toastBox = createElement('div', 'mendosave-zvuk-toast');
+      const text = createElement('div', 'mendosave-zvuk-toast-text');
+      const bar = createElement('div', 'mendosave-zvuk-toast-bar');
       bar.append(createElement('i'));
-      const stages = createElement('div', 'nova-zvuk-stages');
+      const stages = createElement('div', 'mendosave-zvuk-stages');
       toastBox.append(text, bar, stages);
       document.body.appendChild(toastBox);
       toastBox._text = text;
@@ -325,12 +326,12 @@
         toastBox._bar.hidden = true;
         toastBox._stages.replaceChildren();
         for (const definition of definitions) {
-          const row = createElement('div', 'nova-zvuk-stage queued');
+          const row = createElement('div', 'mendosave-zvuk-stage queued');
           row.dataset.stage = definition.id;
-          const head = createElement('div', 'nova-zvuk-stage-head');
-          head.append(createElement('span', 'nova-zvuk-stage-label', definition.label),
-            createElement('span', 'nova-zvuk-stage-value', 'ожидание'));
-          const bar = createElement('div', 'nova-zvuk-stage-bar');
+          const head = createElement('div', 'mendosave-zvuk-stage-head');
+          head.append(createElement('span', 'mendosave-zvuk-stage-label', definition.label),
+            createElement('span', 'mendosave-zvuk-stage-value', 'ожидание'));
+          const bar = createElement('div', 'mendosave-zvuk-stage-bar');
           bar.append(createElement('i'));
           row.append(head, bar);
           toastBox._stages.append(row);
@@ -340,10 +341,10 @@
       stage(id, fraction, state = 'active', label) {
         const row = toastBox?._stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
-        row.className = `nova-zvuk-stage ${state}`;
-        if (label) row.querySelector('.nova-zvuk-stage-label').textContent = label;
-        const value = row.querySelector('.nova-zvuk-stage-value');
-        const fill = row.querySelector('.nova-zvuk-stage-bar i');
+        row.className = `mendosave-zvuk-stage ${state}`;
+        if (label) row.querySelector('.mendosave-zvuk-stage-label').textContent = label;
+        const value = row.querySelector('.mendosave-zvuk-stage-value');
+        const fill = row.querySelector('.mendosave-zvuk-stage-bar i');
         if (Number.isFinite(fraction)) {
           const percent = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
           value.textContent = state === 'done' ? 'готово' : `${percent}%`;
@@ -368,6 +369,13 @@
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
+    document.removeEventListener('keydown', onMenuKeydown, true);
+  }
+
+  function onMenuKeydown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeMenu();
   }
 
   function onOutsideClick(event) {
@@ -378,11 +386,16 @@
   }
 
   function addItem(text, hint, onClick) {
-    const item = createElement('div', 'nova-zvuk-item');
+    const item = createElement('div', 'mendosave-zvuk-item');
     item.setAttribute('role', 'button');
     item.tabIndex = 0;
-    item.append(createElement('span', 'nova-zvuk-text', text));
-    if (hint) item.append(createElement('span', 'nova-zvuk-hint', hint));
+    item.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      if (!event.repeat) item.click();
+    });
+    item.append(createElement('span', 'mendosave-zvuk-text', text));
+    if (hint) item.append(createElement('span', 'mendosave-zvuk-hint', hint));
     item.addEventListener('click', () => { closeMenu(); onClick(); });
     menu.append(item);
     return item;
@@ -395,14 +408,15 @@
     event.preventDefault();
     event.stopPropagation();
     if (menu) { closeMenu(); return; }
-    menu = createElement('div', 'nova-zvuk-menu');
-    menu.append(createElement('div', 'nova-zvuk-head',
-      `Nova Video Saver v${chrome.runtime.getManifest().version}`));
-    const loading = createElement('div', 'nova-zvuk-item nova-zvuk-muted', 'Читаю данные трека…');
+    menu = createElement('div', 'mendosave-zvuk-menu');
+    menu.append(createElement('div', 'mendosave-zvuk-head',
+      `MendoSave v${chrome.runtime.getManifest().version}`));
+    const loading = createElement('div', 'mendosave-zvuk-item mendosave-zvuk-muted', 'Читаю данные трека…');
     menu.append(loading);
     document.body.appendChild(menu);
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
+    document.addEventListener('keydown', onMenuKeydown, true);
 
     try {
       const ids = trackIdsOnPage();
@@ -422,13 +436,13 @@
       if (rest.length > 1) {
         addItem(`Скачать все треки ${pageLabel()}`, `${rest.length} шт.`, () => void runAll(rest));
       }
-      menu.append(createElement('div', 'nova-zvuk-menu-note',
-        'MP3 320 кбит/с при активной подписке. Без неё Звук отдаёт фрагмент 30 секунд.'));
+      menu.append(createElement('div', 'mendosave-zvuk-menu-note',
+        'Сохраняется доступный MP3. Если Звук отдаёт только фрагмент, это отмечается в имени файла.'));
       positionMenu(button);
     } catch (error) {
       if (!menu) return;
       loading.remove();
-      menu.append(createElement('div', 'nova-zvuk-item nova-zvuk-muted',
+      menu.append(createElement('div', 'mendosave-zvuk-item mendosave-zvuk-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
       log('menu', `list failed: ${String(error?.message || error)}`);
     }
@@ -463,17 +477,17 @@
     ring.setAttribute('stroke-width', '2.2');
     const arrows = document.createElementNS(namespace, 'path');
     arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     svg.append(ring, arrows);
     return svg;
   }
 
   function makeButton(trackId) {
     const button = document.createElement('button');
-    button.className = `${BUTTON_CLASS} nova-zvuk-row-btn`;
+    button.className = `${BUTTON_CLASS} mendosave-zvuk-row-btn`;
     button.type = 'button';
-    button.dataset.novaTrack = trackId;
-    button.title = 'Скачать трек (Nova Video Saver)';
+    button.dataset.mendosaveTrack = trackId;
+    button.title = 'Скачать трек (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
     button.addEventListener('click', (event) => { void openMenu(button, trackId, event); });
@@ -494,7 +508,7 @@
     // A virtualised list reuses a row for a different track, so a button left
     // over from the previous one would download the wrong file.
     if (existing) {
-      if (existing.dataset.novaTrack === trackId) return;
+      if (existing.dataset.mendosaveTrack === trackId) return;
       existing.remove();
     }
     const duration = [...controls.children]

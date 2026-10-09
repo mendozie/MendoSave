@@ -6,7 +6,7 @@
 //   video.playAddr      — the clean MP4 (no watermark; `downloadAddr` is the
 //                         branded render, the same distinction as Coub's G26),
 //   video.bitrateInfo[] — the rungs, each with its own byte size,
-//   music.playUrl       — the sound as a separate MP4/AAC file.
+//   music.playUrl       — the sound as a separate file (MP3 or MP4/AAC).
 // A feed page has no itemStruct of its own, so the permalink is fetched
 // same-origin and parsed the same way. No API key, no signing, no GraphQL.
 //
@@ -14,11 +14,10 @@
 // (v16-webapp-prime.*.tiktok.com), so fetch's default `same-origin`
 // credentials mode drops the cookies and the CDN answers 403 with a 505-byte
 // body. Measured: the same request with credentials included returns 200 and
-// honours Range. Hence two routes below — the browser's own downloader first
-// (it carries the cookie jar and copies nothing through the page), and the
-// cookie-bearing page fetch as the fallback when the CDN refuses it.
+// honours Range. Original files use a cookie-bearing page fetch and a Blob;
+// MP3 conversion streams the file into the extension media processor.
 (() => {
-  const BUTTON_CLASS = 'nova-tiktok-btn';
+  const BUTTON_CLASS = 'mendosave-tiktok-btn';
   const VIDEO_HREF = /\/video\/(\d+)/;
   const SLICE_BYTES = 4 * 1024 * 1024;
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
@@ -37,13 +36,13 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'nova-log', tag: `tiktok/${tag}`, text }).catch(() => {});
+    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `tiktok/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
-    console.error('[Nova Video Saver]', error);
+    console.error('[MendoSave]', error);
     return chrome.runtime.sendMessage({
-      t: 'nova-error', context, error: String(error?.stack || error?.message || error), details,
+      t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
 
@@ -97,11 +96,9 @@
     return detail.itemInfo?.itemStruct || null;
   }
 
-  // `normal_540_0`, `adapt_lower_720_1` — the middle number is the rung, and it
-  // is the SHORT side, which is how every other adapter here names a rung
-  // (G25: on vertical video the reported `height` is the long one). Measured:
-  // four rungs of one clip all carry `PlayAddr.Height = 960` while their gears
-  // read 540, so keying on `Height` labelled the whole menu "960p".
+  // Gear names are nominal tiers. Prefer the actual encoded dimensions: the
+  // public sample's normal_540_0 is 576×1024. Use the gear only if dimensions
+  // are absent, and label a vertical video by its short side.
   function heightFromGear(gear) {
     const match = /_(\d{3,4})_/.exec(String(gear || ''));
     return match ? Number(match[1]) : 0;
@@ -120,8 +117,10 @@
       if (!urls.length) continue;
       rungs.push({
         gear: entry.GearName || '',
-        height: heightFromGear(entry.GearName)
-          || shortSide(entry.PlayAddr?.Width, entry.PlayAddr?.Height)
+        width: Number(entry.PlayAddr?.Width) || Number(video.width) || 0,
+        pixelHeight: Number(entry.PlayAddr?.Height) || Number(video.height) || 0,
+        height: shortSide(entry.PlayAddr?.Width, entry.PlayAddr?.Height)
+          || heightFromGear(entry.GearName)
           || shortSide(video.width, video.height),
         bitrate: Number(entry.Bitrate) || 0,
         size: Number(entry.PlayAddr?.DataSize) || 0,
@@ -132,7 +131,8 @@
     // safety net for an item whose bitrateInfo came back empty.
     if (!rungs.length && video.playAddr) {
       rungs.push({
-        gear: 'play', height: shortSide(video.width, video.height), bitrate: Number(video.bitrate) || 0,
+        gear: 'play', width: Number(video.width) || 0, pixelHeight: Number(video.height) || 0,
+        height: shortSide(video.width, video.height), bitrate: Number(video.bitrate) || 0,
         size: Number(video.size) || 0, urls: [video.playAddr],
       });
     }
@@ -168,6 +168,7 @@
       rungs: rungsOf(item),
       music: {
         url: item.music?.playUrl || '',
+        duration: Number(item.music?.duration) || 0,
         title: item.music?.title || '',
         author: item.music?.authorName || '',
       },
@@ -187,7 +188,7 @@
       if (inline) {
         try {
           const item = itemFromUniversal(JSON.parse(inline.textContent));
-          if (item) {
+          if (item && String(item.id) === id) {
             const described = describe(item);
             itemCache.set(id, described);
             return described;
@@ -200,6 +201,7 @@
     if (!response.ok) throw new Error(`страница видео не открылась (HTTP ${response.status})`);
     const item = itemFromUniversal(parseUniversalData(await response.text()));
     if (!item) throw new Error('в странице нет данных видео (TikTok мог потребовать вход)');
+    if (String(item.id) !== id) throw new Error('TikTok вернул данные другого видео; обновите страницу');
     const described = describe(item);
     itemCache.set(id, described);
     return described;
@@ -224,7 +226,7 @@
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await chrome.runtime.sendMessage({
-        t: 'nova-chunk', jobId, track, b64: encodeBase64(slice),
+        t: 'mendosave-chunk', jobId, track, b64: encodeBase64(slice),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
     }
@@ -234,7 +236,7 @@
   // different origin, and without the cookies it answers 403. `no-store` on top
   // of that, because the page's own player has already pulled the same URL in
   // no-cors mode and that cache entry is unreadable to a CORS request (G5/I3).
-  async function fetchRange(url, from, to) {
+  async function fetchRange(url, from, to, total) {
     const response = await fetch(url, {
       credentials: 'include',
       cache: 'no-store',
@@ -243,7 +245,28 @@
     if (response.status !== 206 && response.status !== 200) {
       throw new Error(`сервер отказал на диапазоне (HTTP ${response.status})`);
     }
-    return new Uint8Array(await response.arrayBuffer());
+    const fetchedBytes = new Uint8Array(await response.arrayBuffer());
+    // Own the backing buffer: Gecko Xray network views deny the constructor
+    // lookup performed by subarray during chunk transfer.
+    const bytes = new Uint8Array(fetchedBytes);
+    if (bytes.length !== to - from + 1
+      || (response.status === 200 && (from !== 0 || to !== total - 1))) {
+      throw new Error('сервер вернул неверный размер диапазона');
+    }
+    // Content-Range is not CORS-safelisted. When the CDN exposes it, verify
+    // identity of the slice and consistency with the separately probed file.
+    // When it is inaccessible, the exact byte-count check above still applies.
+    const contentRange = response.headers?.get?.('content-range');
+    if (contentRange !== null && contentRange !== undefined) {
+      const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/i.exec(contentRange.trim());
+      const values = match ? match.slice(1).map(Number) : [];
+      if (response.status !== 206 || values.length !== 3 || !values.every(Number.isSafeInteger)
+        || values[0] !== from || values[1] !== to || values[2] !== total
+        || values[0] > values[1] || values[1] >= values[2]) {
+        throw new Error('сервер вернул неверный Content-Range');
+      }
+    }
+    return bytes;
   }
 
   // `Content-Range` is not CORS-safelisted, so it reads as null even on a good
@@ -251,20 +274,21 @@
   async function probeSize(url) {
     const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
     const total = Number(response.headers.get('content-length')) || 0;
+    const mime = (response.headers.get('content-type') || '').split(';')[0].toLowerCase();
     await response.body?.cancel().catch(() => {});
     if (!response.ok) throw new Error(`файл недоступен (HTTP ${response.status})`);
-    return total;
+    return { total, mime };
   }
 
   async function beginJob(jobId, filename, options) {
-    const ensured = await chrome.runtime.sendMessage({ t: 'nova-ensure' });
+    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'nova-register-job', jobId });
+    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
     const started = await chrome.runtime.sendMessage({
-      t: 'nova-begin', jobId, tabId: registration.tabId, filename, ...options,
+      t: 'mendosave-begin', jobId, tabId: registration.tabId, filename, ...options,
     });
     if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
   }
@@ -275,7 +299,7 @@
     let at = 0;
     while (at < total) {
       const end = Math.min(total - 1, at + SLICE_BYTES - 1);
-      const bytes = await fetchRange(url, at, end);
+      const bytes = await fetchRange(url, at, end, total);
       if (!bytes.length) throw new Error('сервер вернул пустой диапазон');
       await sendChunk(jobId, track, bytes);
       at += bytes.length;
@@ -360,14 +384,20 @@
       || safeName(info.base);
   }
 
-  // M4A is what the CDN already serves, so it is saved as it arrives. Only MP3
-  // needs the offscreen document, because only MP3 is a re-encode.
+  // The original sound may be MP3 or MP4/AAC. Preserve its bytes and container
+  // instead of assuming every music.playUrl is M4A.
   async function downloadSoundOriginal(info, notification) {
-    const filename = `${soundName(info)}.m4a`;
     const file = await fetchWholeFile(info.music.url, notification, 'file', 'Скачивание звука');
-    saveBlob(file.chunks, file.type || 'audio/mp4', filename);
+    const head = file.chunks[0] || [];
+    let format;
+    if (file.type.includes('audio/mpeg') || (head[0] === 73 && head[1] === 68 && head[2] === 51)) format = 'mp3';
+    else if (file.type.includes('audio/mp4') || file.type.includes('video/mp4')) format = 'm4a';
+    else if (file.type.includes('audio/aac')) format = 'aac';
+    else throw new Error('TikTok отдал неизвестный формат звука; сохранение отменено');
+    const filename = `${soundName(info)}.${format}`;
+    saveBlob(file.chunks, file.type, filename);
     notification.stage('file', 1, 'done', 'Скачивание звука');
-    log('sound', `saved ${info.id}; bytes=${file.bytes} format=m4a`);
+    log('sound', `saved ${info.id}; bytes=${file.bytes} format=${format}`);
     return filename;
   }
 
@@ -375,7 +405,7 @@
     if (!info.music.url) throw new Error('у этого видео нет отдельной звуковой дорожки');
     if (audioFormat !== 'mp3') return downloadSoundOriginal(info, notification);
     notification.stage('file', null, 'active', 'Читаю размер дорожки');
-    const total = await probeSize(info.music.url);
+    const { total, mime } = await probeSize(info.music.url);
     if (!total) throw new Error('сервер не сообщил размер дорожки');
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const filename = `${soundName(info)}.mp3`;
@@ -383,13 +413,13 @@
       format: 'mp3',
       audioFormat,
       audioQuality: 'best',
-      audioMime: 'audio/mp4',
+      audioMime: mime || 'audio/mpeg',
       audioSize: total,
       videoSize: 0,
-      duration: info.duration,
+      duration: info.music.duration,
     });
     const onProgress = (message) => {
-      if (message?.t !== 'nova-progress' || message.jobId !== jobId) return;
+      if (message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
       const value = Number(message.value);
       notification.stage('process', Number.isFinite(value) ? value : null, 'active',
         message.status || 'Сборка файла');
@@ -401,12 +431,12 @@
       });
       notification.stage('file', 1, 'done', 'Скачивание звука');
       notification.stage('process', null, 'active', 'Сборка файла');
-      const finalized = await chrome.runtime.sendMessage({ t: 'nova-finalize', jobId });
+      const finalized = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId });
       if (!finalized?.ok) throw new Error(finalized?.error || 'не удалось собрать файл');
       notification.stage('process', 1, 'done', 'Сборка файла');
       return finalized.filename || filename;
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'nova-abort', jobId }).catch(() => {});
+      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId }).catch(() => {});
       throw error;
     } finally {
       chrome.runtime.onMessage.removeListener(onProgress);
@@ -418,7 +448,7 @@
     busy = true;
     const notification = getToast();
     try {
-      // Only the MP3 branch has anything to assemble; video and M4A are saved
+      // Only the MP3 branch has anything to assemble; video and original sound are saved
       // exactly as the CDN sent them, so an empty «Сборка файла» row would sit
       // there at «ожидание» forever.
       const stages = [{
@@ -452,11 +482,11 @@
 
   function getToast() {
     if (!toastBox) {
-      toastBox = createElement('div', 'nova-tiktok-toast');
-      const text = createElement('div', 'nova-tiktok-toast-text');
-      const bar = createElement('div', 'nova-tiktok-toast-bar');
+      toastBox = createElement('div', 'mendosave-tiktok-toast');
+      const text = createElement('div', 'mendosave-tiktok-toast-text');
+      const bar = createElement('div', 'mendosave-tiktok-toast-bar');
       bar.append(createElement('i'));
-      const stages = createElement('div', 'nova-tiktok-stages');
+      const stages = createElement('div', 'mendosave-tiktok-stages');
       toastBox.append(text, bar, stages);
       document.body.appendChild(toastBox);
       toastBox._text = text;
@@ -482,12 +512,12 @@
         toastBox._bar.hidden = true;
         toastBox._stages.replaceChildren();
         for (const definition of definitions) {
-          const row = createElement('div', 'nova-tiktok-stage queued');
+          const row = createElement('div', 'mendosave-tiktok-stage queued');
           row.dataset.stage = definition.id;
-          const head = createElement('div', 'nova-tiktok-stage-head');
-          head.append(createElement('span', 'nova-tiktok-stage-label', definition.label),
-            createElement('span', 'nova-tiktok-stage-value', 'ожидание'));
-          const bar = createElement('div', 'nova-tiktok-stage-bar');
+          const head = createElement('div', 'mendosave-tiktok-stage-head');
+          head.append(createElement('span', 'mendosave-tiktok-stage-label', definition.label),
+            createElement('span', 'mendosave-tiktok-stage-value', 'ожидание'));
+          const bar = createElement('div', 'mendosave-tiktok-stage-bar');
           bar.append(createElement('i'));
           row.append(head, bar);
           toastBox._stages.append(row);
@@ -497,10 +527,10 @@
       stage(id, fraction, state = 'active', label) {
         const row = toastBox?._stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
-        row.className = `nova-tiktok-stage ${state}`;
-        if (label) row.querySelector('.nova-tiktok-stage-label').textContent = label;
-        const value = row.querySelector('.nova-tiktok-stage-value');
-        const fill = row.querySelector('.nova-tiktok-stage-bar i');
+        row.className = `mendosave-tiktok-stage ${state}`;
+        if (label) row.querySelector('.mendosave-tiktok-stage-label').textContent = label;
+        const value = row.querySelector('.mendosave-tiktok-stage-value');
+        const fill = row.querySelector('.mendosave-tiktok-stage-bar i');
         if (Number.isFinite(fraction)) {
           const percent = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
           value.textContent = state === 'done' ? 'готово' : `${percent}%`;
@@ -525,6 +555,13 @@
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
+    document.removeEventListener('keydown', onMenuKeydown, true);
+  }
+
+  function onMenuKeydown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeMenu();
   }
 
   function onOutsideClick(event) {
@@ -535,11 +572,16 @@
   }
 
   function addItem(text, hint, onClick) {
-    const item = createElement('div', 'nova-tiktok-item');
+    const item = createElement('div', 'mendosave-tiktok-item');
     item.setAttribute('role', 'button');
     item.tabIndex = 0;
-    item.append(createElement('span', 'nova-tiktok-text', text));
-    if (hint) item.append(createElement('span', 'nova-tiktok-hint', hint));
+    item.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      if (!event.repeat) item.click();
+    });
+    item.append(createElement('span', 'mendosave-tiktok-text', text));
+    if (hint) item.append(createElement('span', 'mendosave-tiktok-hint', hint));
     item.addEventListener('click', () => { closeMenu(); onClick(); });
     menu.append(item);
     return item;
@@ -577,20 +619,21 @@
     event.preventDefault();
     event.stopPropagation();
     if (menu) { closeMenu(); return; }
-    menu = createElement('div', 'nova-tiktok-menu');
-    menu.append(createElement('div', 'nova-tiktok-head',
-      `Nova Video Saver v${chrome.runtime.getManifest().version}`));
-    const loading = createElement('div', 'nova-tiktok-item nova-tiktok-muted', 'Читаю данные видео…');
+    menu = createElement('div', 'mendosave-tiktok-menu');
+    menu.append(createElement('div', 'mendosave-tiktok-head',
+      `MendoSave v${chrome.runtime.getManifest().version}`));
+    const loading = createElement('div', 'mendosave-tiktok-item mendosave-tiktok-muted', 'Читаю данные видео…');
     menu.append(loading);
     document.body.appendChild(menu);
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
+    document.addEventListener('keydown', onMenuKeydown, true);
 
     try {
       const info = await loadItem(entry.id, entry.href);
       if (!menu) return;
       loading.remove();
-      menu.append(createElement('div', 'nova-tiktok-menu-note',
+      menu.append(createElement('div', 'mendosave-tiktok-menu-note',
         `${info.author}${info.title && info.title !== info.id ? ` — ${info.title}` : ''}`));
 
       for (const rung of info.rungs) {
@@ -598,14 +641,15 @@
           `Видео · ${rung.label}`,
           // The size leads the hint: the rungs are ordered by bitrate, so the
           // resolution alone does not tell the viewer which file is bigger.
-          [formatBytes(rung.size), rung.best ? 'лучшее' : '', 'без watermark']
+          [rung.width && rung.pixelHeight ? `${rung.width}×${rung.pixelHeight}` : '',
+            formatBytes(rung.size), rung.best ? 'макс. битрейт' : '', 'исходный поток']
             .filter(Boolean).join(' · '),
           () => void runChoice(entry, { kind: 'video', rung }),
         );
       }
       if (info.music.url) {
-        addItem('Только звук · M4A', 'без перекодирования',
-          () => void runChoice(entry, { kind: 'sound', audioFormat: 'm4a' }));
+        addItem('Только звук · исходный файл', 'без перекодирования',
+          () => void runChoice(entry, { kind: 'sound', audioFormat: 'original' }));
         addItem('Только звук · MP3', 'перекодирование',
           () => void runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }));
       }
@@ -613,7 +657,7 @@
     } catch (error) {
       if (!menu) return;
       loading.remove();
-      menu.append(createElement('div', 'nova-tiktok-item nova-tiktok-muted',
+      menu.append(createElement('div', 'mendosave-tiktok-item mendosave-tiktok-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
       log('menu', `list failed: ${String(error?.message || error)}`);
     }
@@ -646,7 +690,7 @@
     ring.setAttribute('stroke-width', '2.2');
     const arrows = document.createElementNS(namespace, 'path');
     arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     svg.append(ring, arrows);
     return svg;
   }
@@ -662,14 +706,14 @@
     // The feed reuses a column for the next reel as it scrolls, so a button
     // still carrying the previous id would download the wrong video.
     if (existing) {
-      if (existing.dataset.novaVideo === entry.id) return;
+      if (existing.dataset.mendosaveVideo === entry.id) return;
       existing.remove();
     }
     const button = document.createElement('button');
-    button.className = `${BUTTON_CLASS} nova-tiktok-rail-btn`;
+    button.className = `${BUTTON_CLASS} mendosave-tiktok-rail-btn`;
     button.type = 'button';
-    button.dataset.novaVideo = entry.id;
-    button.title = 'Скачать видео (Nova Video Saver)';
+    button.dataset.mendosaveVideo = entry.id;
+    button.title = 'Скачать видео (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
     button.addEventListener('click', (event) => { void openMenu(button, entry, event); });

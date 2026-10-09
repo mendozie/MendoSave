@@ -8,8 +8,8 @@
 // VOD is HLS with MPEG-TS segments, which the shared offscreen muxer already
 // accepts as one pre-muxed input (`muxed: true`, the Rutube path).
 (() => {
-  const BUTTON_ID = 'nvs-twitch-record';
-  const MENU_ID = 'nvs-twitch-menu';
+  const BUTTON_ID = 'mendosave-twitch-record';
+  const MENU_ID = 'mendosave-twitch-menu';
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const GQL_URL = 'https://gql.twitch.tv/gql';
   // Twitch's own web client id: the site itself sends it from the browser, and
@@ -145,7 +145,7 @@
     master.searchParams.set('token', token.value);
     const response = await fetch(master.href, { credentials: 'omit' });
     if (!response.ok) throw new Error(`плейлист недоступен (HTTP ${response.status})`);
-    const qualities = parseMasterPlaylist(await response.text());
+    const qualities = parseMasterPlaylist(await response.text(), response.url || master.href);
     if (!qualities.length) throw new Error('в плейлисте нет ни одной ступени качества');
     return {
       kind: 'vod',
@@ -159,7 +159,7 @@
   // Master playlist: every #EXT-X-STREAM-INF line is followed by its URL. The
   // step is named by the short side, the same rule the Rutube adapter uses, so
   // a vertical clip is not labelled by its long side.
-  function parseMasterPlaylist(text) {
+  function parseMasterPlaylist(text, baseUrl) {
     const lines = text.split(/\r?\n/);
     const variants = [];
     for (let index = 0; index < lines.length; index++) {
@@ -171,12 +171,25 @@
       const name = /VIDEO="([^"]+)"/.exec(line) || /NAME="([^"]+)"/.exec(line);
       const bandwidth = Number(/BANDWIDTH=(\d+)/.exec(line)?.[1]) || 0;
       const height = resolution ? Math.min(Number(resolution[1]), Number(resolution[2])) : 0;
+      const frameRate = Number(/\bFRAME-RATE=(\d+(?:\.\d+)?)(?:,|$)/.exec(line)?.[1]) || 0;
       variants.push({
-        label: height ? `${height}p` : (name?.[1] || 'auto'),
+        label: height ? `${height}p${frameRate ? ` · ${frameRate} fps` : ''}` : (name?.[1] || 'auto'),
         height,
+        frameRate,
+        sourceName: name?.[1] || '',
         bandwidth,
-        url,
+        url: new URL(url, baseUrl).href,
       });
+    }
+    const labels = new Map();
+    for (const variant of variants) labels.set(variant.label, (labels.get(variant.label) || 0) + 1);
+    for (const variant of variants) {
+      if (labels.get(variant.label) < 2) continue;
+      // VIDEO names are source tier identifiers, not measured FPS. Twitch can
+      // name tiers 720p60/720p30 while declaring the same FRAME-RATE for both.
+      const details = [variant.sourceName ? `вариант ${variant.sourceName}` : '',
+        variant.bandwidth ? `${(variant.bandwidth / 1e6).toFixed(2)} Мбит/с` : ''].filter(Boolean);
+      if (details.length) variant.label += ` · ${details.join(' · ')}`;
     }
     return variants.sort((left, right) => (right.height - left.height) || (right.bandwidth - left.bandwidth));
   }
@@ -185,11 +198,19 @@
     const response = await fetch(playlistUrl, { credentials: 'omit' });
     if (!response.ok) throw new Error(`медиаплейлист недоступен (HTTP ${response.status})`);
     const text = await response.text();
+    if (!/^#EXT-X-ENDLIST\s*$/m.test(text)) {
+      throw new Error('VOD ещё не завершён; дождитесь готовой записи');
+    }
     const base = new URL(playlistUrl);
     const segments = [];
     let duration = 0;
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim();
+      if (line.startsWith('#EXT-X-MAP:')) throw new Error('VOD в fMP4 пока не поддерживается');
+      if (line.startsWith('#EXT-X-BYTERANGE:')) throw new Error('VOD с диапазонами bytes пока не поддерживается');
+      if (line.startsWith('#EXT-X-KEY:') && !/\bMETHOD=NONE(?:,|$)/.test(line)) {
+        throw new Error('этот VOD зашифрован; такой плейлист не поддерживается');
+      }
       if (line.startsWith('#EXTINF')) {
         duration += Number.parseFloat(line.slice(8)) || 0;
         continue;
@@ -207,7 +228,10 @@
     try {
       const response = await fetch(url, { credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      const fetchedBytes = new Uint8Array(await response.arrayBuffer());
+      // A Gecko Xray view cannot safely perform the species lookup in subarray.
+      // Copy once at the network boundary into an extension-owned buffer.
+      const bytes = new Uint8Array(fetchedBytes);
       if (!bytes.length) throw new Error('пустой сегмент');
       return bytes;
     } catch (error) {
@@ -237,7 +261,7 @@
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await chrome.runtime.sendMessage({
-        t: 'nova-chunk', jobId, track: 'video', b64: encodeBase64(chunk),
+        t: 'mendosave-chunk', jobId, track: 'video', b64: encodeBase64(chunk),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
     }
@@ -251,14 +275,14 @@
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const filename = `Twitch - ${safeName(info.channel)} - ${safeName(info.title)} [${quality.label}].mp4`;
 
-    const ensured = await chrome.runtime.sendMessage({ t: 'nova-ensure' });
+    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'nova-register-job', jobId });
+    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
     const started = await chrome.runtime.sendMessage({
-      t: 'nova-begin',
+      t: 'mendosave-begin',
       jobId,
       tabId: registration.tabId,
       filename,
@@ -274,36 +298,24 @@
     if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
 
     try {
-      // Bounded concurrency with ordered handover: pieces are fetched ahead but
-      // may only be sent in playlist order.
-      const pending = new Map();
-      let nextToFetch = 0;
-      let nextToSend = 0;
-      const flush = async () => {
-        while (pending.has(nextToSend)) {
-          const bytes = pending.get(nextToSend);
-          pending.delete(nextToSend);
-          await sendChunks(jobId, bytes);
-          nextToSend += 1;
-          toast(`NVS: скачано ${nextToSend} из ${segments.length} сегментов`, true);
+      // Bound retained bytes as well as concurrent requests. A stalled head or
+      // a slow processor must not let the other workers collect an entire VOD.
+      for (let start = 0; start < segments.length; start += SEGMENT_CONCURRENCY) {
+        const batch = await Promise.allSettled(segments.slice(start, start + SEGMENT_CONCURRENCY)
+          .map((url) => fetchSegment(url)));
+        const failed = batch.find((entry) => entry.status === 'rejected');
+        if (failed) throw failed.reason;
+        for (let offset = 0; offset < batch.length; offset++) {
+          await sendChunks(jobId, batch[offset].value);
+          batch[offset].value = null;
+          toast(`MendoSave: скачано ${start + offset + 1} из ${segments.length} сегментов`, true);
         }
-      };
-      const worker = async () => {
-        while (nextToFetch < segments.length) {
-          const index = nextToFetch++;
-          pending.set(index, await fetchSegment(segments[index]));
-          if (index === nextToSend) await flush();
-        }
-      };
-      await Promise.all(Array.from(
-        { length: Math.min(SEGMENT_CONCURRENCY, segments.length) }, worker,
-      ));
-      await flush();
-      const result = await chrome.runtime.sendMessage({ t: 'nova-finalize', jobId });
+      }
+      const result = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId });
       if (!result?.ok) throw new Error(result?.error || 'не удалось собрать файл');
       return result.filename || filename;
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'nova-abort', jobId }).catch(() => {});
+      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId }).catch(() => {});
       throw error;
     }
   }
@@ -313,19 +325,31 @@
   async function downloadClip(info, quality) {
     const filename = `Twitch - ${safeName(info.channel)} - ${safeName(info.title)} [${quality.label}].mp4`;
     const saved = await chrome.runtime.sendMessage({
-      t: 'nova-save', url: quality.url, filename,
+      t: 'mendosave-save', url: quality.url, filename,
     });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
+    let misses = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id: saved.id }).catch(() => null);
+      if (!state?.ok) {
+        if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
+        continue;
+      }
+      misses = 0;
+      if (state.state === 'complete') break;
+      if (state.state === 'interrupted') throw new Error(`браузер прервал загрузку (${state.error || 'причина не указана'})`);
+    }
     return filename;
   }
 
   // ---- UI ------------------------------------------------------------------
 
   function toast(message, sticky = false) {
-    let box = document.getElementById('nvs-twitch-toast');
+    let box = document.getElementById('mendosave-twitch-toast');
     if (!box) {
       box = document.createElement('div');
-      box.id = 'nvs-twitch-toast';
+      box.id = 'mendosave-twitch-toast';
       document.body.append(box);
     }
     box.textContent = message;
@@ -335,8 +359,15 @@
   }
 
   function closeMenu() {
+    document.removeEventListener('keydown', onMenuKeydown, true);
     menu?.remove();
     menu = null;
+  }
+
+  function onMenuKeydown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeMenu();
   }
 
   function openMenu(button, info) {
@@ -344,13 +375,13 @@
     menu = document.createElement('div');
     menu.id = MENU_ID;
     const header = document.createElement('div');
-    header.className = 'nvs-twitch-menu-title';
+    header.className = 'mendosave-twitch-menu-title';
     header.textContent = info.kind === 'clip' ? 'Скачать клип' : 'Скачать запись';
     menu.append(header);
     for (const quality of info.qualities) {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'nvs-twitch-menu-item';
+      item.className = 'mendosave-twitch-menu-item';
       item.textContent = quality.label;
       item.addEventListener('click', () => {
         closeMenu();
@@ -359,6 +390,7 @@
       menu.append(item);
     }
     document.body.append(menu);
+    document.addEventListener('keydown', onMenuKeydown, true);
     const box = button.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - menu.offsetWidth - 8))}px`;
     menu.style.top = `${Math.max(8, box.top - menu.offsetHeight - 8)}px`;
@@ -375,13 +407,13 @@
     if (busy) return;
     busy = true;
     try {
-      toast(`NVS: скачиваю ${quality.label}…`, true);
+      toast(`MendoSave: скачиваю ${quality.label}…`, true);
       const filename = info.kind === 'clip'
         ? await downloadClip(info, quality)
         : await downloadVod(info, quality);
-      toast(`NVS: готово — ${filename}`);
+      toast(`MendoSave: готово — ${filename}`);
     } catch (error) {
-      toast(`NVS: ${String(error?.message || error)}`);
+      toast(`MendoSave: ${String(error?.message || error)}`);
     } finally {
       busy = false;
     }
@@ -395,19 +427,19 @@
       return;
     }
     if (page.kind !== 'clip' && page.kind !== 'vod') {
-      toast('NVS: на этой странице нечего скачивать');
+      toast('MendoSave: на этой странице нечего скачивать');
       return;
     }
     if (busy) return;
     busy = true;
     try {
-      toast('NVS: читаю данные…', true);
+      toast('MendoSave: читаю данные…', true);
       const info = page.kind === 'clip' ? await loadClip(page.slug) : await loadVod(page.id);
       toast('');
-      document.getElementById('nvs-twitch-toast')?.classList.remove('show');
+      document.getElementById('mendosave-twitch-toast')?.classList.remove('show');
       openMenu(button, info);
     } catch (error) {
-      toast(`NVS: ${String(error?.message || error)}`);
+      toast(`MendoSave: ${String(error?.message || error)}`);
     } finally {
       busy = false;
     }
@@ -460,7 +492,13 @@
     if (recorder) return;
     const media = findPlayerVideo();
     if (!media) {
-      toast('NVS: плеер не найден');
+      toast('MendoSave: плеер не найден');
+      return;
+    }
+    // An offline player can leave play() pending indefinitely. Check that a
+    // current frame exists before trying to resume or capture its stream.
+    if (!(media.readyState >= 2) || media.error || media.ended) {
+      toast('MendoSave: видеокадр пока недоступен, дождитесь начала трансляции');
       return;
     }
     if (media.paused) {
@@ -470,11 +508,11 @@
     try {
       stream = media.captureStream();
     } catch (error) {
-      toast(`NVS: не удалось захватить поток (${error?.message || error})`);
+      toast(`MendoSave: не удалось захватить поток (${error?.message || error})`);
       return;
     }
     if (!stream.getVideoTracks().length) {
-      toast('NVS: видеопоток пока недоступен, попробуйте через пару секунд');
+      toast('MendoSave: видеопоток пока недоступен, попробуйте через пару секунд');
       return;
     }
     recorderMime = pickMimeType() || 'video/webm';
@@ -490,7 +528,7 @@
       });
     } catch (error) {
       recorder = null;
-      toast(`NVS: MediaRecorder недоступен (${error?.message || error})`);
+      toast(`MendoSave: MediaRecorder недоступен (${error?.message || error})`);
       return;
     }
     recorder.ondataavailable = (event) => {
@@ -522,7 +560,7 @@
       updateBadge();
     }, 1000);
     setButtonState(true);
-    toast(`NVS: запись начата (${recordingChannel})`);
+    toast(`MendoSave: запись начата (${recordingChannel})`);
   }
 
   function stopRecording(reason) {
@@ -543,7 +581,7 @@
     const blob = new Blob(parts, { type: active?.mimeType || recorderMime });
     parts = [];
     if (blob.size < 100_000) {
-      toast('NVS: запись слишком короткая, файл не сохранён');
+      toast('MendoSave: запись слишком короткая, файл не сохранён');
       return;
     }
     const stamp = new Date(startedAt).toLocaleString('sv').replace(/:/g, '-').replace(' ', '_');
@@ -557,7 +595,7 @@
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 120_000);
-    toast(`NVS: сохраняю ${filename}${stopReason ? ` (${stopReason})` : ''}`);
+    toast(`MendoSave: сохраняю ${filename}${stopReason ? ` (${stopReason})` : ''}`);
   }
 
   // ---- button --------------------------------------------------------------
@@ -569,7 +607,7 @@
     svg.setAttribute('viewBox', '0 0 36 36');
     svg.setAttribute('aria-hidden', 'true');
     const ring = document.createElementNS(SVG_NS, 'circle');
-    ring.setAttribute('class', 'nvs-ring');
+    ring.setAttribute('class', 'mendosave-ring');
     ring.setAttribute('cx', '18');
     ring.setAttribute('cy', '18');
     ring.setAttribute('r', '16');
@@ -577,11 +615,11 @@
     ring.setAttribute('stroke', 'currentColor');
     ring.setAttribute('stroke-width', '2.4');
     const arrows = document.createElementNS(SVG_NS, 'path');
-    arrows.setAttribute('class', 'nvs-arrows');
+    arrows.setAttribute('class', 'mendosave-arrows');
     arrows.setAttribute('fill', 'currentColor');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     const dot = document.createElementNS(SVG_NS, 'circle');
-    dot.setAttribute('class', 'nvs-rec-dot');
+    dot.setAttribute('class', 'mendosave-rec-dot');
     dot.setAttribute('cx', '18');
     dot.setAttribute('cy', '18');
     dot.setAttribute('r', '7');
@@ -596,26 +634,26 @@
     button.classList.toggle('recording', recording);
     const live = pageKind().kind === 'live';
     button.title = recording
-      ? 'Остановить запись и сохранить файл (NVS)'
-      : (live ? 'Записать трансляцию (Nova Video Saver)' : 'Скачать видео (Nova Video Saver)');
+      ? 'Остановить запись и сохранить файл (MendoSave)'
+      : (live ? 'Записать трансляцию (MendoSave)' : 'Скачать видео (MendoSave)');
     button.setAttribute('aria-label', button.title);
-    const badge = button.querySelector('.nvs-rec-time');
+    const badge = button.querySelector('.mendosave-rec-time');
     if (badge && !recording) badge.textContent = '';
   }
 
   function updateBadge() {
-    const badge = document.querySelector(`#${BUTTON_ID} .nvs-rec-time`);
+    const badge = document.querySelector(`#${BUTTON_ID} .mendosave-rec-time`);
     if (badge && recorder) badge.textContent = formatElapsed(Date.now() - startedAt);
   }
 
   function createButton() {
     const button = document.createElement('button');
     button.id = BUTTON_ID;
-    button.className = 'nvs-twitch-btn';
+    button.className = 'mendosave-twitch-btn';
     button.type = 'button';
     button.append(createIcon());
     const badge = document.createElement('span');
-    badge.className = 'nvs-rec-time';
+    badge.className = 'mendosave-rec-time';
     button.append(badge);
     button.addEventListener('click', () => { void onButtonClick(button); });
     return button;
@@ -676,7 +714,7 @@
   };
 
   function qualityLog(text) {
-    chrome.runtime.sendMessage({ t: 'nova-log', tag: 'twitch/quality', text }).catch(() => {});
+    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: 'twitch/quality', text }).catch(() => {});
   }
 
   function readStoredQuality() {
@@ -698,11 +736,11 @@
   // flashing over the stream. `opacity` and not `visibility`/`display`, because
   // the element still has to be laid out for React to treat the click as real.
   function hideMenuChrome(hidden) {
-    let style = document.getElementById('nvs-twitch-quiet-menu');
+    let style = document.getElementById('mendosave-twitch-quiet-menu');
     if (!hidden) { style?.remove(); return; }
     if (style) return;
     style = document.createElement('style');
-    style.id = 'nvs-twitch-quiet-menu';
+    style.id = 'mendosave-twitch-quiet-menu';
     style.textContent = `${MENU_ROOT} { opacity: 0 !important; }`;
     (document.head || document.documentElement).append(style);
   }
@@ -751,7 +789,7 @@
   function desiredHeight(available) {
     const settings = quality.settings;
     const wanted = settings?.twitchQuality ?? 'auto';
-    return globalThis.NovaSettings.resolveHeight(wanted, available);
+    return globalThis.MendoSaveSettings.resolveHeight(wanted, available);
   }
 
   // Returns 'skipped' when the page was not ready to be asked at all, so a slow
@@ -863,7 +901,7 @@
   }
 
   (async () => {
-    const api = globalThis.NovaSettings;
+    const api = globalThis.MendoSaveSettings;
     if (!api) return;
     quality.settings = await api.load();
     // 'Максимальное' is the one preference that needs no menu and no player:

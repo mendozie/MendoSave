@@ -3,7 +3,7 @@
 // Segments are ordinary GETs, and the assembled MPEG-TS goes to the shared
 // offscreen muxer as a single already-muxed input.
 (() => {
-  const BUTTON_ID = 'nova-rutube-btn';
+  const BUTTON_ID = 'mendosave-rutube-btn';
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
   const SEGMENT_CONCURRENCY = 6;
   const ID_PATTERN = /[0-9a-f]{32}/i;
@@ -13,13 +13,13 @@
   let toast;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'nova-log', tag: `rutube/${tag}`, text }).catch(() => {});
+    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `rutube/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
-    console.error('[Nova Video Saver]', error);
+    console.error('[MendoSave]', error);
     return chrome.runtime.sendMessage({
-      t: 'nova-error', context, error: String(error?.stack || error?.message || error), details,
+      t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
 
@@ -103,6 +103,19 @@
   }
 
   function parseMediaPlaylist(text, baseUrl) {
+    if (!/^#EXTM3U(?:\r?\n|$)/.test(text.trim())) throw new Error('ответ не является HLS-плейлистом');
+    if (!/^#EXT-X-ENDLIST\s*$/m.test(text)) {
+      throw new Error('плейлист не завершён: запись трансляции пока не поддержана');
+    }
+    for (const raw of text.split('\n')) {
+      const line = raw.trim();
+      if (line.startsWith('#EXT-X-KEY:') && parseAttributes(line).METHOD !== 'NONE') {
+        throw new Error('зашифрованный HLS не поддерживается');
+      }
+      if (/^#EXT-X-(?:MAP|BYTERANGE):/.test(line)) {
+        throw new Error('этот тип HLS пока не поддерживается (init segment или byte range)');
+      }
+    }
     const segments = [];
     for (const raw of text.split('\n')) {
       const line = raw.trim();
@@ -124,7 +137,11 @@
     try {
       const response = await fetch(url, { credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      // In Gecko a view over a DOM-returned ArrayBuffer can stay in its foreign
+      // realm. Its subarray() then fails when species reads `constructor`.
+      // Copy once into an owned buffer before any slicing/base64 transfer.
+      const fetchedBytes = new Uint8Array(await response.arrayBuffer());
+      const bytes = new Uint8Array(fetchedBytes);
       if (!bytes.length) throw new Error('пустой сегмент');
       return bytes;
     } catch (error) {
@@ -190,14 +207,14 @@
   }
 
   async function beginJob(job, expectedBytes) {
-    const ensured = await chrome.runtime.sendMessage({ t: 'nova-ensure' });
+    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'nova-register-job', jobId: job.jobId });
+    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId: job.jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
     const started = await chrome.runtime.sendMessage({
-      t: 'nova-begin',
+      t: 'mendosave-begin',
       jobId: job.jobId,
       tabId: registration.tabId,
       filename: job.filename,
@@ -220,7 +237,7 @@
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await chrome.runtime.sendMessage({
-        t: 'nova-chunk', jobId, track: 'video', b64: encodeBase64(chunk),
+        t: 'mendosave-chunk', jobId, track: 'video', b64: encodeBase64(chunk),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
     }
@@ -242,7 +259,7 @@
     ring.setAttribute('stroke-width', '2.2');
     const arrows = document.createElementNS(namespace, 'path');
     arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     svg.append(ring, arrows);
     return svg;
   }
@@ -250,14 +267,14 @@
   function getToast() {
     if (!toast) {
       toast = document.createElement('div');
-      toast.className = 'nova-rt-toast';
+      toast.className = 'mendosave-rt-toast';
       document.body.appendChild(toast);
     }
     toast.hidden = false;
     return {
       set(text, progress) {
         toast.textContent = text;
-        toast.style.setProperty('--nova-rt-progress', `${Math.round((progress || 0) * 100)}%`);
+        toast.style.setProperty('--mendosave-rt-progress', `${Math.round((progress || 0) * 100)}%`);
       },
       hide(delay) { setTimeout(() => { if (toast) toast.hidden = true; }, delay || 0); },
     };
@@ -278,13 +295,14 @@
     event.stopPropagation();
     if (menu) { closeMenu(); return; }
     menu = document.createElement('div');
-    menu.className = 'nova-rt-menu';
+    const openedMenu = menu;
+    menu.className = 'mendosave-rt-menu';
     const heading = document.createElement('div');
-    heading.className = 'nova-rt-head';
-    heading.textContent = `Nova Video Saver v${chrome.runtime.getManifest().version}`;
+    heading.className = 'mendosave-rt-head';
+    heading.textContent = `MendoSave v${chrome.runtime.getManifest().version}`;
     menu.append(heading);
     const loading = document.createElement('div');
-    loading.className = 'nova-rt-item nova-rt-muted';
+    loading.className = 'mendosave-rt-item mendosave-rt-muted';
     loading.textContent = 'Читаю список качеств…';
     menu.append(loading);
     document.body.appendChild(menu);
@@ -295,12 +313,14 @@
       const videoId = videoIdFromPage();
       if (!videoId) throw new Error('не удалось определить идентификатор видео');
       const options = await fetchPlayOptions(videoId);
+      if (menu !== openedMenu) return;
       const master = await fetchText(options.master);
+      if (menu !== openedMenu) return;
       const variants = parseMasterPlaylist(master, options.master);
       loading.remove();
       if (options.isLive) {
         const live = document.createElement('div');
-        live.className = 'nova-rt-item nova-rt-muted';
+        live.className = 'mendosave-rt-item mendosave-rt-muted';
         live.textContent = 'Идёт трансляция — запись эфира пока не поддержана';
         menu.append(live);
         return;
@@ -308,9 +328,14 @@
       if (!variants.length) throw new Error('Rutube не предложил ни одного качества');
       for (const variant of variants) {
         const item = document.createElement('div');
-        item.className = 'nova-rt-item';
+        item.className = 'mendosave-rt-item';
         item.setAttribute('role', 'button');
         item.tabIndex = 0;
+        item.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          item.click();
+        });
         const size = variant.bandwidth && options.durationSeconds
           ? ` · ~${Math.round((variant.bandwidth / 8) * options.durationSeconds / 1e6)} МБ` : '';
         item.textContent = `${variant.height}p MP4${size}`;
@@ -321,9 +346,10 @@
         menu.append(item);
       }
     } catch (error) {
+      if (menu !== openedMenu) return;
       loading.remove();
       const failed = document.createElement('div');
-      failed.className = 'nova-rt-item nova-rt-muted';
+      failed.className = 'mendosave-rt-item mendosave-rt-muted';
       failed.textContent = `Ошибка: ${String(error?.message || error).slice(0, 90)}`;
       menu.append(failed);
       log('menu', `quality list failed: ${String(error?.message || error)}`);
@@ -348,6 +374,7 @@
     if (downloadInProgress) return;
     downloadInProgress = true;
     const notification = getToast();
+    let job;
     try {
       notification.set(`Готовлю ${variant.height}p…`, 0.02);
       let segments = null;
@@ -364,7 +391,7 @@
         + ` mirrors=${variant.mirrors.length} estimateBytes=${Math.round(estimate)}`);
 
       const filename = `${safeFilename(options.title)} [${variant.height}p].mp4`;
-      const job = {
+      job = {
         jobId: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
         filename,
         duration: options.durationSeconds,
@@ -372,25 +399,21 @@
       await beginJob(job, estimate);
 
       let sentBytes = 0;
-      try {
-        await streamSegments(segments, async (bytes) => {
-          await sendBytes(job.jobId, bytes);
-          sentBytes += bytes.length;
-        }, (fraction) => {
-          notification.set(`Скачивание ${Math.round(fraction * 100)}%`, fraction * 0.92);
-        });
-      } catch (error) {
-        await chrome.runtime.sendMessage({ t: 'nova-abort', jobId: job.jobId }).catch(() => {});
-        throw error;
-      }
+      await streamSegments(segments, async (bytes) => {
+        await sendBytes(job.jobId, bytes);
+        sentBytes += bytes.length;
+      }, (fraction) => {
+        notification.set(`Скачивание ${Math.round(fraction * 100)}%`, fraction * 0.92);
+      });
       log('download', `segments streamed; bytes=${sentBytes}`);
 
       notification.set('Сборка файла…', 0.94);
-      const result = await chrome.runtime.sendMessage({ t: 'nova-finalize', jobId: job.jobId });
+      const result = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId: job.jobId });
       if (!result?.ok) throw new Error(result?.error || 'не удалось собрать файл');
       notification.set(`Готово: ${result.filename || filename}`, 1);
       notification.hide(5000);
     } catch (error) {
+      if (job) await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(9000);
       await reportError('rutube/download', error, { height: variant?.height, page: location.href });
@@ -404,8 +427,17 @@
   // part before the hash and every lookup tolerates the element being absent.
 
   function shortsActionColumn() {
-    const wrappers = [...document.querySelectorAll('[class*="controlsWrapper"]')]
-      .filter((element) => element.getBoundingClientRect().width > 0);
+    const visible = (element) => {
+      const box = element.getBoundingClientRect();
+      return box.width > 0 && box.height > 0 && box.right > 0 && box.bottom > 0
+        && box.left < window.innerWidth && box.top < window.innerHeight;
+    };
+    // The current SPA puts native actions directly in this overlay, without
+    // the older wrapper/counter structure. Ignore neighbouring offscreen cards.
+    const overlays = [...document.querySelectorAll('[class*="shortsControlsOverlay"]')]
+      .filter((element) => visible(element) && element.querySelector('button'));
+    const wrappers = overlays.length ? overlays
+      : [...document.querySelectorAll('[class*="controlsWrapper"]')].filter(visible);
     // The carousel keeps a wrapper per card; the visible one nearest the centre
     // of the viewport belongs to the reel actually being watched.
     const centre = window.innerHeight / 2;
@@ -417,6 +449,7 @@
       return distance(left) - distance(right);
     })[0];
     if (!active) return null;
+    if (overlays.length) return active;
     // Middle child holds the like/comment counters; first child is the arrow.
     return [...active.children].find((child) => /\d/.test(child.textContent || '')) || null;
   }
@@ -445,20 +478,20 @@
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.title = 'NVS (Nova Video Saver)';
+    button.title = 'MendoSave - скачать';
     button.setAttribute('aria-label', button.title);
     button.addEventListener('click', openMenu);
 
     if (isShorts()) {
       const column = shortsActionColumn();
       if (!column) return;
-      button.className = 'nova-rt-btn nova-rt-shorts';
+      button.className = 'mendosave-rt-btn mendosave-rt-shorts';
       const circle = document.createElement('span');
-      circle.className = 'nova-rt-circle';
+      circle.className = 'mendosave-rt-circle';
       circle.append(createIcon());
       const label = document.createElement('span');
-      label.className = 'nova-rt-label';
-      label.textContent = 'NVS';
+      label.className = 'mendosave-rt-label';
+      label.textContent = 'MendoSave';
       button.append(circle, label);
       column.prepend(button);
       return;
@@ -466,7 +499,7 @@
 
     const root = playerRoot();
     if (!root) return;
-    button.className = 'nova-rt-btn nova-rt-overlay';
+    button.className = 'mendosave-rt-btn mendosave-rt-overlay';
     button.append(createIcon());
     if (getComputedStyle(root).position === 'static') root.style.position = 'relative';
     root.appendChild(button);

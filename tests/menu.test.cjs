@@ -4,7 +4,7 @@ const { parseHTML } = require('linkedom');
 
 test('menu controls support keyboard selection, navigation and Escape', () => {
   const { bind } = require('../extension/menu.js');
-  const { document, window } = parseHTML('<div id="menu"><div class="nova-menu-item">Video</div><div class="nova-menu-item disabled">Unavailable</div><div class="nova-menu-radio sel">Original</div></div>');
+  const { document, window } = parseHTML('<div id="menu"><div class="mendosave-menu-item">Video</div><div class="mendosave-menu-item disabled">Unavailable</div><div class="mendosave-menu-radio sel">Original</div></div>');
   const menu = document.getElementById('menu');
   let focused, selected = 0, closed = 0;
   for (const control of menu.children) control.focus = () => { focused = control; };

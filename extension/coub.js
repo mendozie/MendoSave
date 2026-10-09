@@ -11,8 +11,8 @@
 // keeps the saved file clean. Video-only and audio-only saves never enter the
 // extension at all: the URL goes straight to chrome.downloads.
 (() => {
-  const BUTTON_CLASS = 'nova-coub-btn';
-  const MENU_ID = 'nova-coub-menu';
+  const BUTTON_CLASS = 'mendosave-coub-btn';
+  const MENU_ID = 'mendosave-coub-menu';
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
   // ffmpeg.wasm assembles in memory. A long soundtrack over a short loop can
   // multiply the video by fifty; refuse honestly rather than die half way.
@@ -23,13 +23,13 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'nova-log', tag: `coub/${tag}`, text }).catch(() => {});
+    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `coub/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
-    console.error('[Nova Video Saver]', error);
+    console.error('[MendoSave]', error);
     return chrome.runtime.sendMessage({
-      t: 'nova-error', context, error: String(error?.stack || error?.message || error), details,
+      t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
 
@@ -161,8 +161,8 @@
         }
         // A resumed transfer that came up short is a failure, not a result: without
         // this the muxer would happily assemble a truncated track.
-        if (declaredSize && received < declaredSize) {
-          throw new Error(`получено ${received} из ${declaredSize} байт`);
+        if ((declaredSize || total) && received !== (declaredSize || total)) {
+          throw new Error(`получено ${received} из ${declaredSize || total} байт`);
         }
         const merged = new Uint8Array(received);
         let offset = 0;
@@ -192,6 +192,7 @@
   // finished file is checked against — an estimate from the byte size would be
   // wrong for every VBR soundtrack, and Coub's are VBR.
   const MPEG_BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+  const MPEG_LOW_BITRATES = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
   const MPEG_RATES = [44100, 48000, 32000, 0];
 
   function mpegDurationSeconds(bytes) {
@@ -208,16 +209,22 @@
         offset += 1;
         continue;
       }
-      const bitrate = MPEG_BITRATES[(bytes[offset + 2] >> 4) & 0x0F];
-      const rate = MPEG_RATES[(bytes[offset + 2] >> 2) & 0x03];
+      const version = (bytes[offset + 1] >> 3) & 3;
+      const layer = (bytes[offset + 1] >> 1) & 3;
+      if (version === 1 || layer !== 1) { offset += 1; continue; }
+      const mpeg1 = version === 3;
+      const bitrate = (mpeg1 ? MPEG_BITRATES : MPEG_LOW_BITRATES)[(bytes[offset + 2] >> 4) & 0x0F];
+      const rate = MPEG_RATES[(bytes[offset + 2] >> 2) & 0x03] / (mpeg1 ? 1 : (version === 2 ? 2 : 4));
       if (!bitrate || !rate) {
         offset += 1;
         continue;
       }
       const padding = (bytes[offset + 2] >> 1) & 1;
-      seconds += 1152 / rate;
+      const frameBytes = Math.floor(((mpeg1 ? 144000 : 72000) * bitrate) / rate) + padding;
+      if (offset + frameBytes > bytes.length) return 0;
+      seconds += (mpeg1 ? 1152 : 576) / rate;
       frames += 1;
-      offset += Math.floor((144000 * bitrate) / rate) + padding;
+      offset += frameBytes;
     }
     return frames ? seconds : 0;
   }
@@ -241,7 +248,7 @@
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await chrome.runtime.sendMessage({
-        t: 'nova-chunk', jobId, track, b64: encodeBase64(chunk),
+        t: 'mendosave-chunk', jobId, track, b64: encodeBase64(chunk),
       });
       if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${track})`);
       onProgress?.(Math.min(offset + chunk.length, bytes.length) / bytes.length);
@@ -249,14 +256,14 @@
   }
 
   async function muxViaOffscreen(job, tracks, onStage) {
-    const ensured = await chrome.runtime.sendMessage({ t: 'nova-ensure' });
+    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'nova-register-job', jobId: job.jobId });
+    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId: job.jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
     const started = await chrome.runtime.sendMessage({
-      t: 'nova-begin',
+      t: 'mendosave-begin',
       jobId: job.jobId,
       tabId: registration.tabId,
       filename: job.filename,
@@ -286,9 +293,9 @@
         report();
       });
       onStage?.('transfer', 1);
-      return await chrome.runtime.sendMessage({ t: 'nova-finalize', jobId: job.jobId });
+      return await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId: job.jobId });
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'nova-abort', jobId: job.jobId }).catch(() => {});
+      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
       throw error;
     }
   }
@@ -302,8 +309,20 @@
   }
 
   async function saveDirect(url, filename) {
-    const saved = await chrome.runtime.sendMessage({ t: 'nova-save', url, filename });
+    const saved = await chrome.runtime.sendMessage({ t: 'mendosave-save', url, filename });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
+    let misses = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id: saved.id }).catch(() => null);
+      if (!state?.ok) {
+        if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
+        continue;
+      }
+      misses = 0;
+      if (state.state === 'complete') break;
+      if (state.state === 'interrupted') throw new Error(`браузер прервал загрузку (${state.error || 'причина не указана'})`);
+    }
     return filename;
   }
 
@@ -362,7 +381,7 @@
     // The offscreen document reports the ffmpeg stage on its own channel, via
     // the service worker. Other tabs' jobs reach this listener too.
     const onProgress = (message) => {
-      if (message?.t !== 'nova-progress' || message.jobId !== jobId) return;
+      if (message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
       const value = Math.max(0, Math.min(1, message.value || 0));
       notification.set(message.status || 'Сборка…', 0.65 + value * 0.33);
     };
@@ -407,7 +426,7 @@
     ring.setAttribute('stroke-width', '2.2');
     const arrows = document.createElementNS(namespace, 'path');
     arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M10.8 5.53h14.4L18 18z M10.8 18h14.4L18 30.47z');
+    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     svg.append(ring, arrows);
     return svg;
   }
@@ -415,14 +434,14 @@
   function getToast() {
     if (!toastBox) {
       toastBox = document.createElement('div');
-      toastBox.className = 'nova-coub-toast';
+      toastBox.className = 'mendosave-coub-toast';
       document.body.appendChild(toastBox);
     }
     toastBox.hidden = false;
     return {
       set(text, progress) {
         toastBox.textContent = text;
-        toastBox.style.setProperty('--nova-coub-progress', `${Math.round((progress || 0) * 100)}%`);
+        toastBox.style.setProperty('--mendosave-coub-progress', `${Math.round((progress || 0) * 100)}%`);
       },
       hide(delay) { setTimeout(() => { if (toastBox) toastBox.hidden = true; }, delay || 0); },
     };
@@ -432,6 +451,13 @@
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
+    document.removeEventListener('keydown', onMenuKeydown, true);
+  }
+
+  function onMenuKeydown(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    closeMenu();
   }
 
   function onOutsideClick(event) {
@@ -448,8 +474,9 @@
       if (looped) {
         choices.push({
           kind: 'sound', loop: true, video,
-          text: `Со звуком · ${label}`,
-          hint: 'видео по кругу до конца звука',
+          text: `Со звуком · ${label} · ${video.key}`,
+          hint: [formatBytes(video.bytes) ? `видео ${formatBytes(video.bytes)}` : '',
+            'по кругу до конца звука'].filter(Boolean).join(' · '),
         });
       }
     }
@@ -464,7 +491,7 @@
       const label = video.width ? `${video.width}×${video.height}` : video.key;
       choices.push({
         kind: 'video', video,
-        text: `Видео без звука · ${label}`,
+        text: `Видео без звука · ${label} · ${video.key}`,
         hint: `исходный файл · ${formatBytes(video.bytes)}`,
       });
     }
@@ -483,17 +510,18 @@
     event.stopPropagation();
     if (menu) { closeMenu(); return; }
     menu = document.createElement('div');
-    menu.className = 'nova-coub-menu';
+    menu.className = 'mendosave-coub-menu';
     const heading = document.createElement('div');
-    heading.className = 'nova-coub-head';
-    heading.textContent = `Nova Video Saver v${chrome.runtime.getManifest().version}`;
+    heading.className = 'mendosave-coub-head';
+    heading.textContent = `MendoSave v${chrome.runtime.getManifest().version}`;
     const loading = document.createElement('div');
-    loading.className = 'nova-coub-item nova-coub-muted';
+    loading.className = 'mendosave-coub-item mendosave-coub-muted';
     loading.textContent = 'Читаю данные коуба…';
     menu.append(heading, loading);
     document.body.appendChild(menu);
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
+    document.addEventListener('keydown', onMenuKeydown, true);
 
     try {
       const permalink = permalinkFor(button);
@@ -505,11 +533,16 @@
       if (!choices.length) throw new Error('у этого коуба нет файлов для скачивания');
       for (const choice of choices) {
         const item = document.createElement('div');
-        item.className = 'nova-coub-item';
+        item.className = 'mendosave-coub-item';
         item.setAttribute('role', 'button');
         item.tabIndex = 0;
-        item.append(createElement('span', 'nova-coub-text', choice.text));
-        if (choice.hint) item.append(createElement('span', 'nova-coub-hint', choice.hint));
+        item.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          if (!event.repeat) item.click();
+        });
+        item.append(createElement('span', 'mendosave-coub-text', choice.text));
+        if (choice.hint) item.append(createElement('span', 'mendosave-coub-hint', choice.hint));
         item.addEventListener('click', () => {
           closeMenu();
           void runChoice(info, choice);
@@ -520,7 +553,7 @@
     } catch (error) {
       if (!menu) return;
       loading.remove();
-      menu.append(createElement('div', 'nova-coub-item nova-coub-muted',
+      menu.append(createElement('div', 'mendosave-coub-item mendosave-coub-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
       log('menu', `list failed: ${String(error?.message || error)}`);
     }
@@ -556,7 +589,7 @@
       const button = document.createElement('button');
       button.className = BUTTON_CLASS;
       button.type = 'button';
-      button.title = 'Скачать коуб (Nova Video Saver)';
+      button.title = 'Скачать коуб (MendoSave)';
       button.setAttribute('aria-label', button.title);
       button.append(createIcon());
       button.addEventListener('click', (event) => { void openMenu(button, event); });
