@@ -1971,6 +1971,13 @@ const LIVE_STALE_MS = 10 * 60_000;
 async function evictStaleLiveJobs() {
   for (const [jobId, job] of [...liveJobs]) {
     if (Date.now() - job.lastActivity <= LIVE_STALE_MS) continue;
+    // A bound recorder can legitimately stop producing frames temporarily.
+    // Its port owns teardown; never discard the accepted raw recording here.
+    if (job.rawRecording && job.port) continue;
+    if (job.rawRecording) {
+      finalizeLiveJob({ jobId, interrupted: true }).catch(reportError);
+      continue;
+    }
     // The recording tab is gone (closed/crashed) and can never abort its job;
     // release the slot so future recordings are not blocked until restart.
     liveJobs.delete(jobId);
@@ -1984,6 +1991,17 @@ function beginLiveJob(message) {
     return { ok: false, error: 'идентификатор записи отсутствует' };
   }
   if (!Number.isInteger(message.tabId)) return { ok: false, error: 'вкладка записи не определена' };
+  if (message.rawRecording !== undefined && typeof message.rawRecording !== 'boolean') {
+    return { ok: false, error: 'некорректный режим записи' };
+  }
+  if (message.rawRecording && (typeof message.filename !== 'string'
+    || !message.filename.length || message.filename.length > 250
+    || /[\\/]/.test(message.filename) || [...message.filename].some((char) => char.codePointAt(0) < 32)
+    || !/\.webm$/i.test(message.filename)
+    || typeof message.mime !== 'string' || message.mime.length > 100
+    || !/^video\/webm(?:\s*;\s*codecs=[a-z0-9.,-]+)?$/i.test(message.mime))) {
+    return { ok: false, error: 'некорректные имя или формат записи' };
+  }
   if (liveJobs.has(message.jobId)) return { ok: false, error: 'эта запись уже начата' };
   if (liveJobs.size >= 2) return { ok: false, error: 'слишком много одновременных записей эфира' };
   liveJobs.set(message.jobId, {
@@ -1991,14 +2009,20 @@ function beginLiveJob(message) {
     tabId: message.tabId,
     startedAt: Date.now(),
     lastActivity: Date.now(),
+    rawRecording: Boolean(message.rawRecording),
+    filename: message.rawRecording ? message.filename : undefined,
+    rawMime: message.rawRecording ? message.mime : undefined,
+    frameId: message.frameId,
+    documentId: message.documentId,
+    port: null,
     files: {},
     writers: {},
     writeChain: {},
-    mimes: {},
+    mimes: message.rawRecording ? { video: message.mime } : {},
     bytes: { video: 0, audio: 0 },
   });
   updateKeepAlive();
-  getFFmpeg().catch(() => {});
+  if (!message.rawRecording) getFFmpeg().catch(() => {});
   return { ok: true };
 }
 
@@ -2014,6 +2038,10 @@ async function liveWriter(job, track) {
 function appendLiveChunk(message) {
   const job = liveJobs.get(message.jobId);
   if (!job) return Promise.resolve({ ok: false, error: 'запись эфира не найдена' });
+  if (job.rawRecording && (!job.port || message.track !== 'video'
+    || (message.mime != null && message.mime !== job.rawMime))) {
+    return Promise.resolve({ ok: false, error: 'некорректный фрагмент записи' });
+  }
   const track = message.track === 'audio' ? 'audio' : 'video';
   if (message.mime && !job.mimes[track]) job.mimes[track] = String(message.mime);
   let bytes;
@@ -2039,6 +2067,9 @@ function appendLiveChunk(message) {
 }
 
 async function closeLiveWriters(job) {
+  // A chunk can be queued before liveWriter has created the writer. Await the
+  // whole write chain first so disconnect cannot close an empty registry.
+  await Promise.all(Object.values(job.writeChain).map((chain) => chain.catch(() => {})));
   for (const track of Object.keys(job.writers)) {
     await job.writeChain[track]?.catch(() => {});
     await job.writers[track].close().catch(() => {});
@@ -2076,7 +2107,9 @@ async function saveBlob(blob, filename, job) {
       { retries: WORKER_RETRY_DELAYS.length });
     if (!response?.ok) throw new Error(response?.error || 'не удалось сохранить файл');
     if (!Number.isInteger(response.id)) throw new Error('Browser returned no download id');
-    const deadline = Date.now() + 30 * 60_000;
+    // Once accepted, the browser owns the download lifetime. A user pause or
+    // slow disk can outlast any elapsed deadline. Retain the ready bytes and
+    // Blob URL while the browser reports an active download.
     for (;;) {
       if (job?.cancelled) {
         await sendToWorker({ t: 'mendosave-download-cancel', id: response.id }, { retries: 3 }).catch(() => {});
@@ -2086,7 +2119,6 @@ async function saveBlob(blob, filename, job) {
       if (!state?.ok) throw new Error(state?.error || 'Состояние сохранения недоступно');
       if (state.state === 'complete') break;
       if (state.state === 'interrupted') throw new Error(`Сохранение прервано: ${state.error || 'ошибка браузера'}`);
-      if (Date.now() > deadline) throw new Error('Браузер не завершил сохранение за 30 минут');
       await wait(250);
     }
     return response.id;
@@ -2219,6 +2251,283 @@ async function muxLiveWithMediabunny(job, tracks, baseName) {
   return filename;
 }
 
+// Keep complete EBML blocks even when the last MediaRecorder transfer ends in
+// a block payload. The vendor otherwise discards its entire terminal Cluster.
+// RFC 8794 sizes and RFC 9559 Cluster boundaries; never scan encoded payloads
+// for magic bytes. Header reads are bounded, and media stays in Blob slices.
+async function completeRecordingPrefix(file, touch) {
+  const segmentChildren = new Set([0x114d9b74, 0x1549a966, 0x1654ae6b, 0x1f43b675,
+    0x1c53bb6b, 0x1941a469, 0x1043a770, 0x1254c367]);
+  let cache = new Uint8Array(), cacheAt = -1;
+  async function read(at, length) {
+    if (at < cacheAt || at + length > cacheAt + cache.length) {
+      cacheAt = at;
+      cache = new Uint8Array(await file.slice(at, at + 65_536).arrayBuffer());
+      touch();
+    }
+    return cache.subarray(at - cacheAt, at - cacheAt + length);
+  }
+  async function header(at, limit) {
+    if (at >= limit) return null;
+    const bytes = await read(at, Math.min(12, limit - at));
+    function vint(offset, id) {
+      if (offset >= bytes.length) return null;
+      let width = 1;
+      while (width <= (id ? 4 : 8) && !(bytes[offset] & (128 >> (width - 1)))) width++;
+      if (width > (id ? 4 : 8)) throw new Error('неверный размер EBML header');
+      if (offset + width > bytes.length) return null;
+      let value = BigInt(id ? bytes[offset] : bytes[offset] & ((128 >> (width - 1)) - 1));
+      for (let i = 1; i < width; i++) value = (value << 8n) | BigInt(bytes[offset + i]);
+      const unknown = !id && value === (1n << BigInt(7 * width)) - 1n;
+      if (!unknown && value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('слишком большой EBML element');
+      return { width, value: unknown ? null : Number(value) };
+    }
+    const id = vint(0, true);
+    if (!id) return null;
+    const size = vint(id.width, false);
+    if (!size) return null;
+    const data = at + id.width + size.width;
+    const end = size.value === null ? null : data + size.value;
+    if (end !== null && !Number.isSafeInteger(end)) throw new Error('слишком большой EBML element');
+    return { at, id: id.value, sizeAt: at + id.width, width: size.width, data, end };
+  }
+  const ebml = await header(0, file.size);
+  if (ebml?.id !== 0x1a45dfa3 || ebml.end === null || ebml.end > file.size) throw new Error('нет полного WebM header');
+  let at = ebml.end, segment;
+  while (at < file.size) {
+    const element = await header(at, file.size);
+    if (element?.id === 0x18538067) { segment = element; break; }
+    if (!element || element.end === null || element.end > file.size) throw new Error('нет WebM Segment');
+    at = element.end;
+  }
+  if (!segment) throw new Error('нет WebM Segment');
+  const limit = Math.min(segment.end ?? file.size, file.size);
+  let end = segment.data, packetCount = 0;
+  const patches = [];
+  function resize(element, newEnd) {
+    if (element.end === newEnd) return;
+    let size = BigInt(newEnd - element.data);
+    // Native streaming Clusters may reserve only 1-2 size bytes. Keep those
+    // unknown-sized when their complete payload cannot fit the existing width.
+    if (size >= (1n << BigInt(7 * element.width)) - 1n) return;
+    const bytes = new Uint8Array(element.width);
+    for (let i = bytes.length - 1; i >= 0; i--) { bytes[i] = Number(size & 255n); size >>= 8n; }
+    bytes[0] |= 128 >> (element.width - 1);
+    patches.push({ at: element.sizeAt, bytes });
+  }
+  async function countBlock(block) {
+    const bytes = await read(block.data, Math.min(block.end - block.data, 12));
+    let trackWidth = 1;
+    while (trackWidth <= 8 && !(bytes[0] & (128 >> (trackWidth - 1)))) trackWidth++;
+    if (trackWidth > 8 || bytes.length < trackWidth + 3) throw new Error('неверный WebM block');
+    const laced = bytes[trackWidth + 2] & 6;
+    if (laced && bytes.length < trackWidth + 4) throw new Error('неверный WebM lacing header');
+    packetCount += laced ? bytes[trackWidth + 3] + 1 : 1;
+  }
+  at = segment.data;
+  while (at < limit) {
+    const element = await header(at, limit);
+    if (!element) break;
+    if (element.id !== 0x1f43b675) {
+      if (element.end === null) throw new Error('неизвестный размер WebM element');
+      if (element.end > limit) break;
+      at = end = element.end;
+      continue;
+    }
+    const clusterLimit = Math.min(element.end ?? limit, limit);
+    let cursor = element.data;
+    while (cursor < clusterLimit) {
+      const child = await header(cursor, clusterLimit);
+      if (!child) break;
+      if (element.end === null && segmentChildren.has(child.id)) break;
+      if (child.end === null) throw new Error('неизвестный размер WebM block');
+      if (child.end > clusterLimit) {
+        if (clusterLimit < limit) throw new Error('WebM block выходит за пределы Cluster');
+        if (child.id === 0xa0) throw new Error('нельзя завершить неполный WebM BlockGroup');
+        break;
+      }
+      if (child.id === 0xa3) await countBlock(child);
+      if (child.id === 0xa0) {
+        // A complete BlockGroup may contain a laced Block plus timing metadata.
+        let groupAt = child.data;
+        while (groupAt < child.end) {
+          const member = await header(groupAt, child.end);
+          if (!member || member.end === null || member.end > child.end) throw new Error('неполный WebM BlockGroup');
+          if (member.id === 0xa1) await countBlock(member);
+          groupAt = member.end;
+        }
+      }
+      cursor = child.end;
+    }
+    resize(element, cursor);
+    end = cursor;
+    if (cursor < clusterLimit) {
+      const next = await header(cursor, clusterLimit);
+      if (element.end !== null || !next || !segmentChildren.has(next.id)) break;
+    }
+    at = cursor;
+  }
+  resize(segment, end);
+  const parts = [];
+  let copied = 0;
+  for (const patch of patches.sort((a, b) => a.at - b.at)) {
+    parts.push(file.slice(copied, patch.at), patch.bytes);
+    copied = patch.at + patch.bytes.length;
+  }
+  parts.push(file.slice(copied, end));
+  return { blob: new Blob(parts, { type: 'video/webm' }), truncated: end !== file.size, packetCount };
+}
+
+// MediaRecorder chunks are an unfinished WebM stream, especially after page
+// teardown. Rebuild its container on disk, copying encoded packets unchanged.
+async function remuxRawRecording(job, inputFile) {
+  const {
+    Input, Output, ALL_FORMATS, BlobSource, StreamTarget, WebMOutputFormat,
+    EncodedPacketSink, EncodedVideoPacketSource, EncodedAudioPacketSource,
+  } = await getMediabunny();
+  const dir = await liveDirectory();
+  const outName = `${job.id}-out.webm`;
+  let input, output, writable, check;
+  let writableClosed = false;
+  let stallTimer;
+  let lastTick = Date.now();
+  let stopped = false;
+  const touch = () => {
+    if (stopped) throw new Error('сборка записи остановлена');
+    lastTick = Date.now();
+  };
+  const cleanup = async () => {
+    try { if (output?.state === 'started' || output?.state === 'pending') await output.cancel(); } catch (cancelError) {}
+    if (writable && !writableClosed) await writable.abort?.().catch(() => {});
+    await dir.removeEntry(outName).catch(() => {});
+  };
+  try {
+    const copy = async () => {
+      const prefix = await completeRecordingPrefix(inputFile, touch);
+      input = new Input({ formats: ALL_FORMATS, source: new BlobSource(prefix.blob) });
+      const tracks = await input.getTracks();
+      if (!tracks.length || tracks.some((track) => !['video', 'audio'].includes(track.type))
+        || tracks.filter((track) => track.type === 'video').length !== 1
+        || tracks.filter((track) => track.type === 'audio').length > 1) {
+        throw new Error('запись содержит неизвестные или отсутствующие дорожки');
+      }
+      const states = [];
+      for (const track of tracks) {
+        const supported = track.type === 'video' ? ['vp8', 'vp9', 'av1'] : ['opus', 'vorbis'];
+        if (!supported.includes(track.codec)) throw new Error(`дорожка ${track.type} не поддерживается без перекодирования`);
+        states.push({ track, source: track.type === 'video'
+          ? new EncodedVideoPacketSource(track.codec) : new EncodedAudioPacketSource(track.codec),
+        config: await track.getDecoderConfig(), count: 0, lastMs: -Infinity });
+      }
+      // A declared audio track must not silently disappear during capture/parsing.
+      for (const codec of ['vp8', 'vp9', 'av1', 'opus', 'vorbis']) {
+        if (new RegExp(`(?:[=,])\\s*${codec}(?:[,;]|$)`, 'i').test(job.rawMime)
+          && !tracks.some((track) => track.codec === codec)) {
+          throw new Error(`заявленная дорожка ${codec} отсутствует`);
+        }
+      }
+      touch();
+      const outHandle = await dir.getFileHandle(outName, { create: true });
+      touch();
+      writable = await outHandle.createWritable();
+      touch();
+      const target = new StreamTarget(new WritableStream({
+        async write(chunk) {
+          await writable.write({ type: 'write', position: chunk.position, data: chunk.data });
+          touch();
+        },
+        async close() { await writable.close(); writableClosed = true; },
+      }), { chunked: true });
+      output = new Output({ format: new WebMOutputFormat(), target });
+      for (const state of states) {
+        if (state.track.type === 'video') output.addVideoTrack(state.source);
+        else output.addAudioTrack(state.source);
+      }
+      await output.start();
+      await Promise.all(states.map(async (state) => {
+        for await (let packet of new EncodedPacketSink(state.track).packets()) {
+          if (state.track.type === 'video') {
+            const currentMs = Math.round(packet.timestamp * 1000);
+            const nextMs = Math.max(currentMs, state.lastMs + 1);
+            if (nextMs !== currentMs) packet = packet.clone({ timestamp: nextMs / 1000 });
+            state.lastMs = nextMs;
+          }
+          await state.source.add(packet, state.count === 0 ? { decoderConfig: state.config } : undefined);
+          state.count++;
+          touch();
+        }
+        state.source.close();
+      }));
+      if (states.some((state) => !state.count)) throw new Error('дорожка записи не содержит пакетов');
+      if (states.reduce((count, state) => count + state.count, 0) !== prefix.packetCount) {
+        throw new Error('parser потерял полные WebM blocks');
+      }
+      await output.finalize();
+      if (!writableClosed) { await writable.close(); writableClosed = true; }
+      const file = await outHandle.getFile();
+      touch();
+      if (!file.size) throw new Error('сборка записала пустой WebM');
+      // Read back through ranged Blob reads: a failed/truncated OPFS output
+      // must never be reported as a successful recording. Memory stays per packet.
+      check = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+      const actualTracks = await check.getTracks();
+      if (actualTracks.length !== states.length) throw new Error('сборка потеряла дорожку записи');
+      for (const state of states) {
+        const actual = actualTracks.find((track) => track.type === state.track.type && track.codec === state.track.codec);
+        if (!actual) throw new Error('сборка изменила дорожку записи');
+        const expectedPackets = new EncodedPacketSink(state.track).packets()[Symbol.asyncIterator]();
+        const actualPackets = new EncodedPacketSink(actual).packets()[Symbol.asyncIterator]();
+        let count = 0, lastMs = -Infinity;
+        for (;;) {
+          const [before, after] = await Promise.all([expectedPackets.next(), actualPackets.next()]);
+          if (before.done || after.done) {
+            if (before.done !== after.done || count !== state.count) throw new Error('сборка потеряла пакеты записи');
+            break;
+          }
+          const expectedMs = state.track.type === 'video'
+            ? Math.max(Math.round(before.value.timestamp * 1000), lastMs + 1)
+            : Math.round(before.value.timestamp * 1000);
+          lastMs = expectedMs;
+          if (Math.round(after.value.timestamp * 1000) !== expectedMs
+            || before.value.data.length !== after.value.data.length
+            || !before.value.data.every((byte, i) => byte === after.value.data[i])) {
+            throw new Error('сборка изменила медиапакеты записи');
+          }
+          count++;
+          touch();
+        }
+      }
+      return { file, truncated: prefix.truncated };
+    };
+    const stallGuard = new Promise((_, reject) => {
+      const poll = () => {
+        if (Date.now() - lastTick > 180_000) {
+          reject(new Error('сборка записи не показывает прогресс более 180 секунд'));
+          return;
+        }
+        stallTimer = setTimeout(poll, 5_000);
+      };
+      stallTimer = setTimeout(poll, 5_000);
+    });
+    // OPFS promises cannot be cancelled. If one settles after the stall guard,
+    // stop the copy and clean up resources acquired after the first cleanup.
+    const copying = copy().catch(async (error) => {
+      stopped = true;
+      await cleanup();
+      throw error;
+    });
+    return await Promise.race([copying, stallGuard]);
+  } catch (error) {
+    stopped = true;
+    await cleanup();
+    throw error;
+  } finally {
+    clearTimeout(stallTimer);
+    check?.dispose();
+    input?.dispose();
+  }
+}
+
 async function finalizeLiveJob(message) {
   const job = liveJobs.get(message.jobId);
   if (!job) throw new Error('запись эфира не найдена');
@@ -2236,6 +2545,18 @@ async function finalizeLiveJob(message) {
       if (file.size > 0) tracks[track] = file;
     }
     if (!tracks.video && !tracks.audio) throw new Error('запись не содержит медиаданных');
+
+    if (job.rawRecording) {
+      const output = await remuxRawRecording(job, tracks.video);
+      const partial = Boolean(message.interrupted || output.truncated);
+      const filename = partial
+        ? job.filename.replace(/\.webm$/i, ' [частичная запись].webm') : job.filename;
+      await deliverOutput(output.file, filename);
+      await removeLiveFiles(job);
+      const dir = await liveDirectory();
+      await dir.removeEntry(`${job.id}-out.webm`).catch(() => {});
+      return { ok: true, filename, partial };
+    }
 
     // Single-track broadcast (or one track never arrived): save it as-is,
     // with an explicit suffix so an audio-only file is never mistaken for a
@@ -2300,7 +2621,7 @@ async function finalizeLiveJob(message) {
     // A parked recording still lives in OPFS; wiping the source files here
     // would be harmless, but the user is told the file survived, so keep the
     // storage footprint honest and only clear what is no longer referenced.
-    if (!error?.recovered) await removeLiveFiles(job).catch(() => {});
+    if (!error?.recovered && !job.rawRecording) await removeLiveFiles(job).catch(() => {});
     error.details = {
       live: true,
       bytes: job.bytes,
@@ -2310,6 +2631,10 @@ async function finalizeLiveJob(message) {
     };
     throw error;
   } finally {
+    if (job.port) {
+      try { job.port.disconnect(); } catch (error) { /* the source may already be gone */ }
+      job.port = null;
+    }
     busyFinalizers = Math.max(0, busyFinalizers - 1);
     updateKeepAlive();
   }
@@ -2413,6 +2738,29 @@ async function reportError(error) {
   return { ok: false, error: detail, logged: true, ...(error?.recovered ? { recovered: true } : {}) };
 }
 
+// This connection is owned by the extension host, so its disconnect callback
+// survives source-page teardown and does not depend on recorder.stop events.
+chrome.runtime.onConnect?.addListener((port) => {
+  const match = /^mendosave-twitch-recording:([A-Za-z0-9_-]{1,100})$/.exec(port.name || '');
+  if (!match) return;
+  const job = liveJobs.get(match[1]);
+  const sender = port.sender;
+  if (!job?.rawRecording || job.port || sender?.id !== chrome.runtime.id
+    || sender?.tab?.id !== job.tabId || (sender?.frameId ?? 0) !== job.frameId
+    || (job.documentId && sender?.documentId !== job.documentId)) {
+    try { port.postMessage({ ok: false, error: 'Запись не принадлежит этому документу.' }); } catch (error) {}
+    port.disconnect();
+    return;
+  }
+  job.port = port;
+  port.onDisconnect.addListener(() => {
+    if (liveJobs.get(job.id) !== job) return;
+    finalizeLiveJob({ jobId: job.id, interrupted: true }).catch(reportError);
+  });
+  try { port.postMessage({ ok: true }); }
+  catch (error) { finalizeLiveJob({ jobId: job.id, interrupted: true }).catch(reportError); }
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.t !== 'string') return false;
 
@@ -2450,13 +2798,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       && staging && Date.now() - staging.at < STAGING_TTL_MS ? staging : null;
     if (_sender?.id !== chrome.runtime.id || !Number.isInteger(tabId)
       || (owner && owner.tabId !== tabId)
+      || (owner?.rawRecording && ((_sender?.frameId ?? 0) !== owner.frameId
+        || (owner.documentId && _sender?.documentId !== owner.documentId)))
       || (stagedOwner && stagedOwner.tabId !== tabId)
       || (message.tabId != null && message.tabId !== tabId)
       || typeof message.jobId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(message.jobId)) {
       sendResponse({ ok: false, error: 'Задание не принадлежит этой вкладке.' });
       return false;
     }
-    message = { ...message, tabId };
+    if (message.t === 'mendosave-live-begin' && message.rawRecording) {
+      let validSource = false;
+      try { validSource = new URL(_sender.url || _sender.tab.url).origin === 'https://www.twitch.tv'; }
+      catch (error) { /* invalid source */ }
+      if (!validSource || (_sender.frameId ?? 0) !== 0) {
+        sendResponse({ ok: false, error: 'Недопустимый источник записи.' });
+        return false;
+      }
+    }
+    if (owner?.rawRecording && message.t === 'mendosave-live-finalize'
+      && message.interrupted !== undefined && typeof message.interrupted !== 'boolean') {
+      sendResponse({ ok: false, error: 'Некорректное состояние записи.' });
+      return false;
+    }
+    message = { ...message, tabId, frameId: _sender.frameId ?? 0, documentId: _sender.documentId };
     if (['mendosave-chunk', 'mendosave-stage', 'mendosave-live-chunk'].includes(message.t)
       && (typeof message.b64 !== 'string' || !message.b64.length
         || message.b64.length > 4 * Math.ceil(4 * 1024 * 1024 / 3)

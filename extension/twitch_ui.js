@@ -24,7 +24,8 @@
 
   let recorder = null;
   let recorderMime = 'video/webm';
-  let parts = [];
+  let recordingSession = null;
+  let recordingStarting = false;
   let recordedVideo = null;
   let recordingChannel = '';
   let startPath = '';
@@ -445,7 +446,7 @@
     }
   }
 
-  // ---- live recording (unchanged path) -------------------------------------
+  // ---- live recording -----------------------------------------------------
 
   function findControlsGroup() {
     return document.querySelector('.player-controls__right-control-group')
@@ -488,8 +489,62 @@
     stopRecording('трансляция завершилась');
   }
 
+  function bindRecordingPort(jobId) {
+    const port = chrome.runtime.connect({ name: `mendosave-twitch-recording:${jobId}` });
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        port.onMessage.removeListener(onMessage);
+        port.onDisconnect.removeListener(onDisconnect);
+      };
+      const fail = (error) => {
+        cleanup();
+        port.disconnect();
+        reject(error);
+      };
+      const onMessage = (message) => {
+        if (message?.ok !== true) {
+          fail(new Error(message?.error || 'обработчик не подтвердил запись'));
+          return;
+        }
+        cleanup();
+        resolve(port);
+      };
+      const onDisconnect = () => fail(new Error('связь с обработчиком записи прервалась'));
+      const timer = setTimeout(() => fail(new Error('обработчик не подтвердил запись за 30 секунд')), 30_000);
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(onDisconnect);
+    });
+  }
+
+  function preserveRecordingChunk(session, blob) {
+    if (!blob?.size || session.finished || session.failed) return;
+    session.queuedBytes += blob.size;
+    if (session.queuedBytes - session.sentBytes > 192 * 1024 * 1024) {
+      session.failed = 'передача записи не успевает за эфиром';
+      stopRecording('ошибка передачи записи');
+      return;
+    }
+    session.chain = session.chain.then(async () => {
+      if (session.failed) return;
+      const blobBytes = new Uint8Array(await blob.arrayBuffer());
+      const bytes = new Uint8Array(blobBytes);
+      for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
+        const response = await chrome.runtime.sendMessage({
+          t: 'mendosave-live-chunk', jobId: session.jobId, track: 'video',
+          mime: session.mime, b64: encodeBase64(bytes.subarray(offset, offset + TRANSFER_CHUNK_SIZE)),
+        });
+        if (!response?.ok) throw new Error(response?.error || 'обработчик не сохранил фрагмент записи');
+      }
+      session.sentBytes += bytes.length;
+    }).catch((error) => {
+      session.failed = String(error?.message || error);
+      if (recordingSession === session) stopRecording('ошибка передачи записи');
+    });
+  }
+
   async function startRecording() {
-    if (recorder) return;
+    if (recorder || recordingStarting || recordingSession) return;
     const media = findPlayerVideo();
     if (!media) {
       toast('MendoSave: плеер не найден');
@@ -501,66 +556,80 @@
       toast('MendoSave: видеокадр пока недоступен, дождитесь начала трансляции');
       return;
     }
-    if (media.paused) {
-      try { await media.play(); } catch (error) {}
-    }
-    let stream;
+    recordingStarting = true;
+    toast('MendoSave: подготавливаю запись…', true);
+    let session;
     try {
-      stream = media.captureStream();
-    } catch (error) {
-      toast(`MendoSave: не удалось захватить поток (${error?.message || error})`);
-      return;
-    }
-    if (!stream.getVideoTracks().length) {
-      toast('MendoSave: видеопоток пока недоступен, попробуйте через пару секунд');
-      return;
-    }
-    recorderMime = pickMimeType() || 'video/webm';
-    parts = [];
-    stopReason = '';
-    recordingChannel = channelFromLocation();
-    startPath = location.pathname;
-    try {
-      recorder = new MediaRecorder(stream, {
-        mimeType: recorderMime || undefined,
+      if (media.paused) {
+        try { await media.play(); } catch (error) {}
+      }
+      let stream;
+      try { stream = media.captureStream(); } catch (error) {
+        throw new Error(`не удалось захватить поток (${error?.message || error})`, { cause: error });
+      }
+      if (!stream.getVideoTracks().length) throw new Error('видеопоток пока недоступен, попробуйте через пару секунд');
+      recorderMime = pickMimeType() || 'video/webm';
+      const active = new MediaRecorder(stream, {
+        mimeType: recorderMime,
         videoBitsPerSecond: 12_000_000,
         audioBitsPerSecond: 192_000,
       });
+      startedAt = Date.now();
+      recordingChannel = channelFromLocation();
+      const stamp = new Date(startedAt).toLocaleString('sv').replace(/:/g, '-').replace(' ', '_');
+      session = {
+        jobId: crypto.randomUUID(),
+        filename: `Twitch - ${safeName(recordingChannel)} - ${stamp}.webm`,
+        mime: active.mimeType || recorderMime,
+        chain: Promise.resolve(), queuedBytes: 0, sentBytes: 0, failed: '', finished: false,
+      };
+      const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+      if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик записи');
+      const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId: session.jobId });
+      if (!registration?.ok || !Number.isInteger(registration.tabId)) throw new Error(registration?.error || 'вкладка записи не определена');
+      const begun = await chrome.runtime.sendMessage({
+        t: 'mendosave-live-begin', jobId: session.jobId, tabId: registration.tabId,
+        rawRecording: true, filename: session.filename, mime: session.mime,
+      });
+      if (!begun?.ok) throw new Error(begun?.error || 'не удалось начать сохранение записи');
+      session.begun = true;
+      session.port = await bindRecordingPort(session.jobId);
+      recordingSession = session;
+      recorder = active;
+      stopReason = '';
+      startPath = location.pathname;
+      active.ondataavailable = (event) => preserveRecordingChunk(session, event.data);
+      active.onstop = () => { void finalizeRecording(session); };
+      active.onerror = () => {
+        stopReason = 'ошибка записи потока';
+        cleanupWatchdog();
+      };
+      session.port.onDisconnect.addListener(() => {
+        // The host can close its Port after saving but before replying to
+        // finalize. Pending chunk/finalize requests still report any failure.
+        if (session.finished || session.finalizing) return;
+        session.failed = 'связь с обработчиком записи прервалась';
+        if (recordingSession === session) stopRecording('ошибка передачи записи');
+      });
+      active.start(1000);
+      recordedVideo = media;
+      media.addEventListener('ended', onPlayerEnded);
+      // A raid or navigation replaces the stream: preserve only this channel.
+      watchdog = setInterval(() => {
+        if (location.pathname !== startPath) { stopRecording('канал сменился'); return; }
+        if (recordedVideo && !document.contains(recordedVideo)) { stopRecording('плеер закрыт'); return; }
+        updateBadge();
+      }, 1000);
+      setButtonState(true);
+      toast(`MendoSave: запись начата (${recordingChannel})`);
     } catch (error) {
       recorder = null;
-      toast(`MendoSave: MediaRecorder недоступен (${error?.message || error})`);
-      return;
-    }
-    recorder.ondataavailable = (event) => {
-      if (event.data && event.data.size) parts.push(event.data);
-    };
-    recorder.onstop = finalizeRecording;
-    recorder.onerror = () => {
-      // A fatal recorder error still ends with the final dataavailable and a
-      // native stop event; calling stop()/finalize here would lose that tail
-      // chunk and run finalize twice. Record the reason and let onstop finish.
-      stopReason = 'ошибка записи потока';
-      cleanupWatchdog();
-    };
-    recorder.start(1000);
-    startedAt = Date.now();
-    recordedVideo = media;
-    media.addEventListener('ended', onPlayerEnded);
-    // A raid/host or manual navigation replaces the stream: the file must be
-    // finalized immediately, not silently record the next channel.
-    watchdog = setInterval(() => {
-      if (location.pathname !== startPath) {
-        stopRecording('канал сменился');
-        return;
-      }
-      if (recordedVideo && !document.contains(recordedVideo)) {
-        stopRecording('плеер закрыт');
-        return;
-      }
-      updateBadge();
-    }, 1000);
-    setButtonState(true);
-    toast(`MendoSave: запись начата (${recordingChannel})`);
+      recordingSession = null;
+      if (session) session.finished = true;
+      if (session?.begun) await chrome.runtime.sendMessage({ t: 'mendosave-live-abort', jobId: session.jobId }).catch(() => {});
+      session?.port?.disconnect();
+      toast(`MendoSave: ${error?.message || error}`);
+    } finally { recordingStarting = false; }
   }
 
   function stopRecording(reason) {
@@ -570,32 +639,32 @@
     if (recorder.state !== 'inactive') {
       try { recorder.stop(); return; } catch (error) {}
     }
-    finalizeRecording();
+    if (recordingSession) void finalizeRecording(recordingSession);
   }
 
-  function finalizeRecording() {
-    const active = recorder;
+  async function finalizeRecording(session) {
+    if (session.finalizing || session.finished) return;
+    session.finalizing = true;
     recorder = null;
     cleanupWatchdog();
     setButtonState(false);
-    const blob = new Blob(parts, { type: active?.mimeType || recorderMime });
-    parts = [];
-    if (blob.size < 100_000) {
-      toast('MendoSave: запись слишком короткая, файл не сохранён');
-      return;
+    toast('MendoSave: сохраняю запись…', true);
+    try {
+      await session.chain;
+      if (session.failed) throw new Error(session.failed);
+      const result = await chrome.runtime.sendMessage({
+        t: 'mendosave-live-finalize', jobId: session.jobId, interrupted: Boolean(session.interrupted),
+      });
+      if (!result?.ok) throw new Error(result?.error || 'не удалось сохранить запись');
+      toast(`MendoSave: сохранено ${result.filename || session.filename}${stopReason ? ` (${stopReason})` : ''}`);
+    } catch (error) {
+      // Disconnect lets the host preserve its acknowledged prefix as partial.
+      toast(`MendoSave: ошибка записи (${error?.message || error}); принятые фрагменты остаются у обработчика`);
+    } finally {
+      session.finished = true;
+      session.port?.disconnect();
+      if (recordingSession === session) recordingSession = null;
     }
-    const stamp = new Date(startedAt).toLocaleString('sv').replace(/:/g, '-').replace(' ', '_');
-    const channel = safeName(recordingChannel || 'stream');
-    const filename = `Twitch - ${channel} - ${stamp}.webm`;
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 120_000);
-    toast(`MendoSave: сохраняю ${filename}${stopReason ? ` (${stopReason})` : ''}`);
   }
 
   // ---- button --------------------------------------------------------------
@@ -687,7 +756,9 @@
   // cheap insurance; ensureButton() returns immediately once the button exists.
   setInterval(() => { try { ensureButton(); } catch (error) {} }, 2_000);
   window.addEventListener('beforeunload', () => {
-    // Best effort: flush what was recorded before the tab goes away.
+    // Ask for the final tail if events still run. Acknowledged chunks already
+    // live in the extension host, which finalizes on Port disconnection.
+    if (recordingSession) recordingSession.interrupted = true;
     if (recorder) stopRecording('страница закрывается');
   });
 

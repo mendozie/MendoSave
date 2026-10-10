@@ -2,6 +2,40 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { adapter, restrictNetworkViews } = require('./tiktok-adapter-harness.cjs');
 
+function recordingPort(app, reply = { ok: true }) {
+  const messages = new Set(), disconnects = new Set();
+  const port = {
+    onMessage: { addListener: (fn) => messages.add(fn), removeListener: (fn) => messages.delete(fn) },
+    onDisconnect: { addListener: (fn) => disconnects.add(fn), removeListener: (fn) => disconnects.delete(fn) },
+    disconnectCalls: 0,
+    disconnect() { this.disconnectCalls++; for (const fn of [...disconnects]) fn(); },
+    acknowledge(value = { ok: true }) { for (const fn of [...messages]) fn(value); },
+  };
+  app.context.chrome.runtime.connect = ({ name }) => {
+    port.name = name;
+    if (reply) queueMicrotask(() => port.acknowledge(reply));
+    return port;
+  };
+  return port;
+}
+
+function liveRecording(send, reply) {
+  const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
+    'https://www.twitch.tv/monstercat', async () => { throw new Error('live must not fetch a VOD'); }, send);
+  const media = app.document.querySelector('video');
+  Object.assign(media, { readyState: 2, paused: false, error: null, ended: false });
+  media.captureStream = () => ({ getVideoTracks: () => [{}] });
+  const port = recordingPort(app, reply);
+  let active;
+  app.context.MediaRecorder = class {
+    static isTypeSupported() { return true; }
+    constructor() { active = this; this.mimeType = 'video/webm'; this.startCalls = 0; }
+    start() { this.startCalls++; this.state = 'recording'; }
+    stop() { this.state = 'inactive'; queueMicrotask(() => this.onstop()); }
+  };
+  return { app, port, get recorder() { return active; } };
+}
+
 function vod(playlist, variant = 'https://media.invalid/vod/playlist.m3u8', segmentFetch, master) {
   return adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>', 'https://www.twitch.tv/videos/551972874', async (url) => {
     if (url.includes('gql.twitch.tv')) return { ok: true, json: async () => ({ data: { video: { title: 'Test VOD', lengthSeconds: 49, owner: { displayName: 'TwitchDev' } }, videoPlaybackAccessToken: { signature: 'fixture', value: 'fixture' } } }) };
@@ -176,6 +210,7 @@ test('Twitch live resumes a paused ready player before capture and starts record
   const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
     'https://www.twitch.tv/monstercat', async () => { throw new Error('live must not fetch a VOD'); });
   const media = app.document.querySelector('video');
+  recordingPort(app);
   Object.assign(media, { readyState: 2, paused: true, error: null, ended: false });
   const calls = [];
   const stream = { getVideoTracks: () => [{}] };
@@ -191,4 +226,234 @@ test('Twitch live resumes a paused ready player before capture and starts record
   assert.deepEqual(calls, ['play', 'capture', 'construct', 'start']);
   assert.equal(app.document.querySelector('#mendosave-twitch-record').classList.contains('recording'), true);
   assert.match(app.document.querySelector('#mendosave-twitch-toast').textContent, /запись начата \(monstercat\)/);
+});
+
+test('Twitch preserves received recording bytes outside the page before teardown can discard final recorder events', async () => {
+  const received = [];
+  const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
+    'https://www.twitch.tv/monstercat', async () => { throw new Error('live must not fetch a VOD'); },
+    (message) => {
+      if (message.t === 'mendosave-live-chunk') received.push(Buffer.from(message.b64, 'base64'));
+      return { ok: true, tabId: 7, state: 'complete' };
+    });
+  const media = app.document.querySelector('video');
+  recordingPort(app);
+  Object.assign(media, { readyState: 2, paused: false, error: null, ended: false });
+  media.captureStream = () => ({ getVideoTracks: () => [{}] });
+  let active, stopCalls = 0;
+  app.context.MediaRecorder = class {
+    static isTypeSupported() { return true; }
+    constructor() { active = this; this.mimeType = 'video/webm'; }
+    start() { this.state = 'recording'; }
+    // Model teardown: the document never gets final dataavailable or stop.
+    stop() { stopCalls++; this.state = 'inactive'; }
+  };
+  app.click(app.document.querySelector('#mendosave-twitch-record'));
+  await app.settle();
+  const bytes = Uint8Array.of(0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4);
+  active.ondataavailable({ data: new Blob([bytes], { type: 'video/webm' }) });
+  await app.settle();
+  app.context.window.dispatchEvent(new app.context.window.Event('beforeunload'));
+  await app.settle();
+  assert.equal(stopCalls, 1);
+  assert.equal(app.downloads.length, 0);
+  assert.equal(app.messages.some((x) => x.t === 'mendosave-live-finalize'), false);
+  assert.deepEqual(Buffer.concat(received), Buffer.from(bytes), 'already received bytes must outlive the discarded page callbacks');
+});
+
+test('Twitch marks page teardown as interrupted even when final recorder events reach the host', async () => {
+  const live = liveRecording();
+  live.app.click(live.app.document.querySelector('#mendosave-twitch-record'));
+  await live.app.settle();
+  live.recorder.ondataavailable({ data: new Blob([Uint8Array.of(0x1a, 0x45, 0xdf, 0xa3)]) });
+  await live.app.settle();
+  live.app.context.window.dispatchEvent(new live.app.context.window.Event('beforeunload'));
+  await live.app.settle();
+  const finalized = live.app.messages.filter((x) => x.t === 'mendosave-live-finalize');
+  assert.equal(finalized.length, 1);
+  assert.equal(finalized[0].interrupted, true);
+  assert.equal(live.port.disconnectCalls, 1);
+});
+
+test('Twitch handles host Port closure during finalize through the actual success or failure response', async (t) => {
+  for (const succeeds of [true, false]) await t.test(succeeds ? 'saved' : 'save rejected', async () => {
+    const live = liveRecording((message) => {
+      if (message.t === 'mendosave-live-finalize') {
+        live.port.disconnect();
+        return succeeds ? { ok: true, filename: 'saved.webm' } : { ok: false, error: 'Save failed after Port closure' };
+      }
+      return { ok: true, tabId: 7 };
+    });
+    const button = live.app.document.querySelector('#mendosave-twitch-record');
+    live.app.click(button);
+    await live.app.settle();
+    live.recorder.ondataavailable({ data: new Blob([Uint8Array.of(1, 2, 3)]) });
+    await live.app.settle();
+    live.app.click(button);
+    await live.app.settle();
+    const toast = live.app.document.querySelector('#mendosave-twitch-toast').textContent;
+    assert.match(toast, succeeds ? /сохранено saved\.webm/ : /Save failed after Port closure/);
+    if (!succeeds) assert.doesNotMatch(toast, /сохранено/);
+    assert.equal(live.app.messages.filter((x) => x.t === 'mendosave-live-finalize').length, 1);
+  });
+});
+
+test('Twitch does not hide a rejected pending chunk when Port closes while stop is draining', async () => {
+  let rejectWrite;
+  const pendingWrite = new Promise((_, reject) => { rejectWrite = reject; });
+  const live = liveRecording((message) => message.t === 'mendosave-live-chunk'
+    ? pendingWrite : { ok: true, tabId: 7 });
+  const button = live.app.document.querySelector('#mendosave-twitch-record');
+  live.app.click(button);
+  await live.app.settle();
+  live.recorder.ondataavailable({ data: new Blob([Uint8Array.of(1, 2, 3)]) });
+  live.app.click(button);
+  await live.app.settle();
+  live.port.disconnect();
+  rejectWrite(new Error('Chunk failed after Port closure'));
+  await live.app.settle();
+  const toast = live.app.document.querySelector('#mendosave-twitch-toast').textContent;
+  assert.match(toast, /Chunk failed after Port closure/);
+  assert.doesNotMatch(toast, /сохранено/);
+  assert.equal(live.app.messages.some((x) => x.t === 'mendosave-live-finalize'), false);
+});
+
+test('Twitch recording waits for its owned Port acknowledgement before recorder.start and ignores a second start click', async () => {
+  const live = liveRecording(undefined, null);
+  const button = live.app.document.querySelector('#mendosave-twitch-record');
+  live.app.click(button);
+  await live.app.settle();
+  assert.equal(live.recorder.startCalls, 0);
+  assert.equal(button.classList.contains('recording'), false);
+  live.app.click(button);
+  await live.app.settle();
+  const begins = live.app.messages.filter((message) => message.t === 'mendosave-live-begin');
+  assert.equal(begins.length, 1);
+  assert.equal(begins[0].rawRecording, true);
+  assert.equal(begins[0].mime, 'video/webm');
+  assert.match(begins[0].filename, /^Twitch - monstercat - .*\.webm$/);
+  assert.equal(live.port.name, `mendosave-twitch-recording:${begins[0].jobId}`);
+  live.port.acknowledge();
+  await live.app.settle();
+  assert.equal(live.recorder.startCalls, 1);
+  assert.equal(button.classList.contains('recording'), true);
+});
+
+test('Twitch recording aborts a rejected Port binding before recording starts', async () => {
+  const live = liveRecording(undefined, { ok: false, error: 'Foreign recording owner' });
+  live.app.click(live.app.document.querySelector('#mendosave-twitch-record'));
+  await live.app.settle();
+  assert.equal(live.recorder.startCalls, 0);
+  assert.equal(live.app.messages.filter((x) => x.t === 'mendosave-live-abort').length, 1);
+  assert.equal(live.app.messages.some((x) => x.t === 'mendosave-live-finalize'), false);
+  assert.match(live.app.document.querySelector('#mendosave-twitch-toast').textContent, /Foreign recording owner/);
+});
+
+test('Twitch recording releases an unbound host job on early Port disconnect or binding timeout', async (t) => {
+  for (const mode of ['disconnect', 'timeout']) await t.test(mode, async () => {
+    const live = liveRecording(undefined, null);
+    let expire;
+    const schedule = live.app.context.setTimeout;
+    live.app.context.setTimeout = (fn, delay) => {
+      if (delay === 30_000) { expire = fn; return 2; }
+      return schedule(fn, delay);
+    };
+    live.app.click(live.app.document.querySelector('#mendosave-twitch-record'));
+    await live.app.settle();
+    if (mode === 'timeout') expire();
+    else live.port.disconnect();
+    await live.app.settle();
+    assert.equal(live.recorder.startCalls, 0);
+    assert.equal(live.app.messages.filter((x) => x.t === 'mendosave-live-abort').length, 1);
+    assert.equal(live.app.messages.some((x) => x.t === 'mendosave-live-finalize'), false);
+    assert.match(live.app.document.querySelector('#mendosave-twitch-toast').textContent,
+      mode === 'timeout' ? /не подтвердил запись за 30 секунд/ : /связь с обработчиком записи прервалась/);
+  });
+});
+
+test('Twitch stop drains ordered 4 MiB chunks and the final recorder tail before one host finalize', async () => {
+  let release;
+  const firstWrite = new Promise((resolve) => { release = resolve; });
+  const accepted = [];
+  const live = liveRecording((message) => {
+    if (message.t === 'mendosave-live-chunk') {
+      accepted.push(Buffer.from(message.b64, 'base64'));
+      if (accepted.length === 1) return firstWrite;
+    }
+    return { ok: true, tabId: 7, filename: 'saved.webm' };
+  });
+  const button = live.app.document.querySelector('#mendosave-twitch-record');
+  live.app.click(button);
+  await live.app.settle();
+  const prefix = Buffer.alloc(4 * 1024 * 1024 + 7, 0x27);
+  prefix.set([0x1a, 0x45, 0xdf, 0xa3]);
+  const tail = Buffer.from([1, 2, 3, 4]);
+  live.recorder.ondataavailable({ data: new Blob([prefix], { type: 'video/webm' }) });
+  live.recorder.stop = () => {
+    live.recorder.state = 'inactive';
+    queueMicrotask(() => {
+      live.recorder.ondataavailable({ data: new Blob([tail], { type: 'video/webm' }) });
+      live.recorder.onstop();
+    });
+  };
+  live.app.click(button);
+  await live.app.settle();
+  assert.equal(accepted.length, 1);
+  assert.equal(live.app.messages.some((x) => x.t === 'mendosave-live-finalize'), false);
+  assert.equal(live.port.disconnectCalls, 0);
+  release({ ok: true });
+  await live.app.settle();
+  live.recorder.onstop();
+  await live.app.settle();
+  assert.deepEqual(accepted.map((part) => part.length), [4 * 1024 * 1024, 7, 4]);
+  assert.deepEqual(Buffer.concat(accepted), Buffer.concat([prefix, tail]));
+  assert.equal(live.app.messages.filter((x) => x.t === 'mendosave-live-finalize').length, 1);
+  assert.equal(live.app.messages.find((x) => x.t === 'mendosave-live-finalize').interrupted, false);
+  assert.equal(live.port.disconnectCalls, 1);
+  assert.equal(live.app.downloads.length, 0);
+  assert.match(live.app.document.querySelector('#mendosave-twitch-toast').textContent, /сохранено saved\.webm/);
+});
+
+test('Twitch transfer failure disconnects for host partial preservation without aborting acknowledged bytes or claiming completion', async () => {
+  const accepted = [];
+  const live = liveRecording((message) => {
+    if (message.t === 'mendosave-live-chunk') {
+      if (accepted.length) return { ok: false, error: 'QuotaExceededError' };
+      accepted.push(Buffer.from(message.b64, 'base64'));
+    }
+    return { ok: true, tabId: 7 };
+  });
+  live.app.click(live.app.document.querySelector('#mendosave-twitch-record'));
+  await live.app.settle();
+  live.recorder.ondataavailable({ data: new Blob([Uint8Array.of(1, 2, 3)]) });
+  await live.app.settle();
+  live.recorder.ondataavailable({ data: new Blob([Uint8Array.of(4, 5, 6)]) });
+  await live.app.settle();
+  assert.deepEqual(Buffer.concat(accepted), Buffer.from([1, 2, 3]));
+  assert.equal(live.port.disconnectCalls, 1);
+  assert.equal(live.app.messages.some((x) => ['mendosave-live-abort', 'mendosave-live-finalize'].includes(x.t)), false);
+  const toast = live.app.document.querySelector('#mendosave-twitch-toast').textContent;
+  assert.match(toast, /QuotaExceededError/);
+  assert.doesNotMatch(toast, /сохранено/);
+});
+
+test('Twitch recording copies foreign Blob bytes before subarray chunk transfer', async () => {
+  const live = liveRecording();
+  const bytes = Uint8Array.of(0x1a, 0x45, 0xdf, 0xa3, 9);
+  function XrayUint8Array(input, offset, length) {
+    const view = new Uint8Array(input, offset, length);
+    if (input === bytes.buffer) Object.defineProperty(view, 'constructor', {
+      get() { throw new Error('Permission denied to access property "constructor"'); },
+    });
+    return view;
+  }
+  XrayUint8Array.prototype = Uint8Array.prototype;
+  live.app.context.Uint8Array = XrayUint8Array;
+  live.app.click(live.app.document.querySelector('#mendosave-twitch-record'));
+  await live.app.settle();
+  live.recorder.ondataavailable({ data: { size: bytes.length, arrayBuffer: async () => bytes.buffer } });
+  await live.app.settle();
+  const chunks = live.app.messages.filter((x) => x.t === 'mendosave-live-chunk');
+  assert.equal(chunks.length, 1, live.app.document.querySelector('#mendosave-twitch-toast').textContent);
+  assert.deepEqual(Buffer.from(chunks[0].b64, 'base64'), Buffer.from(bytes));
 });
