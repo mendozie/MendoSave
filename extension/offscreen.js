@@ -778,6 +778,12 @@ function beginJob(message) {
     }
     completeTrackStream(stream);
   }
+  activeJob.receivedMemory = {
+    audio: activeJob.streams.audio.received,
+    video: activeJob.streams.video.received,
+    videoPrefix: 0,
+  };
+  activeJob.memoryBytes = activeJob.receivedMemory.audio + activeJob.receivedMemory.video;
   if (adopt.audio || adopt.video) {
     const adoptedBytes = (adopt.audio ? activeJob.streams.audio.received : 0)
       + (adopt.video ? activeJob.streams.video.received : 0);
@@ -802,8 +808,21 @@ function appendChunk(message) {
     return { ok: false, error: 'неизвестный тип дорожки' };
   }
   const target = message.track === 'video-prefix' ? 'videoPrefix' : message.track;
+  const ramInput = !activeJob.muxed || target !== 'video';
+  if (ramInput) {
+    const incoming = base64SizeEstimate(message.b64);
+    if (incoming > STAGING_TRACK_MAX_BYTES - activeJob.receivedMemory[target]
+      || incoming > STAGING_MAX_BYTES - activeJob.memoryBytes) {
+      abortJob({ jobId: activeJob.id });
+      return { ok: false, error: 'Превышен безопасный лимит памяти дорожек.' };
+    }
+  }
   const bytes = decodeBase64(message.b64);
   const length = bytes.length;
+  if (ramInput) {
+    activeJob.receivedMemory[target] += length;
+    activeJob.memoryBytes += length;
+  }
   const stream = activeJob.streams?.[target];
   if (stream) {
     stream.received += length;
@@ -984,25 +1003,47 @@ async function remuxSpooledStream(job, inputFile) {
 // bytes only for the tracks the page verified byte for byte, and the rest is
 // transferred the normal way.
 const STAGING_TTL_MS = 20 * 60_000;
+const STAGING_TRACK_MAX_BYTES = 750_000_000;
+const STAGING_MAX_BYTES = 1_500_000_000;
 let staging;
+
+function base64SizeEstimate(value) {
+  return Math.floor(value.length * 3 / 4) - (value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0);
+}
+
+// The MAIN-world producer is page controlled. Bound retained bytes here, and
+// measure age from opening, so an endless producer cannot renew its lease.
+setInterval(() => {
+  if (staging && Date.now() - staging.at >= STAGING_TTL_MS) dropStaging();
+}, 60_000);
 
 function openStaging(message) {
   if (typeof message.jobId !== 'string' || !message.jobId) {
     return { ok: false, error: 'идентификатор задания отсутствует' };
   }
-  staging = { id: message.jobId, video: [], audio: [], bytes: 0, at: Date.now() };
+  staging = { id: message.jobId, video: [], audio: [], bytes: 0, sizes: { video: 0, audio: 0 }, at: Date.now() };
   return { ok: true };
 }
 
 function stageChunk(message) {
   if (!staging || staging.id !== message.jobId) return { ok: false, error: 'нет области приёма' };
+  if (Date.now() - staging.at >= STAGING_TTL_MS) {
+    dropStaging();
+    return { ok: false, error: 'Истёк срок промежуточного приёма медиа.' };
+  }
   if (message.track !== 'video' && message.track !== 'audio') {
     return { ok: false, error: 'неизвестный тип дорожки' };
+  }
+  const incoming = base64SizeEstimate(message.b64);
+  if (incoming > STAGING_TRACK_MAX_BYTES - staging.sizes[message.track]
+    || incoming > STAGING_MAX_BYTES - staging.bytes) {
+    dropStaging();
+    return { ok: false, error: 'Превышен безопасный лимит памяти промежуточных дорожек.' };
   }
   const bytes = decodeBase64(message.b64);
   staging[message.track].push(bytes);
   staging.bytes += bytes.length;
-  staging.at = Date.now();
+  staging.sizes[message.track] += bytes.length;
   return { ok: true };
 }
 

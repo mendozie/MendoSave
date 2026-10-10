@@ -2,6 +2,47 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { browserContext } = require('./background-harness.cjs');
 
+test('page-relayed diagnostics reject oversized fields and leave settings and recovery writable', async () => {
+  const browser = browserContext();
+  for (const fields of [{ tag: 'x'.repeat(129), text: 'short' },
+    { tag: 'network', text: 'x'.repeat(65_537) }, { tag: {}, text: 'x' }, { tag: 'network', text: {} }]) {
+    const result = await browser.message({ t: 'mendosave-log', ...fields });
+    assert.equal(result.ok, false);
+  }
+  assert.equal(browser.data.nova_logs, undefined);
+  const result = await browser.message({ t: 'mendosave-log', tag: 'network', text: 'normal log' });
+  assert.equal(result.ok, true);
+  await browser.chrome.storage.local.set({ nova_settings: { ask: true }, nova_recovered: [] });
+  assert.equal(browser.data.nova_settings.ask, true);
+  assert.equal(browser.data.nova_logs[0].tag, 'network');
+});
+
+test('a new diagnostic write bounds oversized entries left by an older version', async () => {
+  const browser = browserContext();
+  browser.data.nova_logs = [{ ts: 1, tag: 'a'.repeat(200), text: 'b'.repeat(5000) }];
+  assert.equal((await browser.message({ t: 'mendosave-log', tag: 'new', text: 'small' })).ok, true);
+  assert.ok(browser.data.nova_logs.every((entry) => entry.tag.length <= 128 && entry.text.length <= 4000));
+});
+
+test('blocked diagnostic storage cannot accumulate an unlimited pending write queue', async () => {
+  const browser = browserContext();
+  let unblock;
+  const gate = new Promise((resolve) => { unblock = resolve; });
+  browser.chrome.storage.local.set = async (values) => { await gate; Object.assign(browser.data, values); };
+  const pending = Array.from({ length: 32 }, (_, index) => browser.message({ t: 'mendosave-log', tag: 'network', text: `entry ${index}` }));
+  // On the vulnerable implementation this request is retained behind the
+  // blocked write. A bounded queue responds immediately with a refusal.
+  const result = await Promise.race([
+    browser.message({ t: 'mendosave-log', tag: 'network', text: 'overflow' }),
+    new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 50)),
+  ]);
+  unblock();
+  await Promise.all(pending);
+  assert.equal(result.ok, false);
+  assert.equal(result.timeout, undefined);
+  assert.equal((await browser.message({ t: 'mendosave-log', tag: 'network', text: 'resumed' })).ok, true);
+});
+
 test('a diagnostic export removes credentials and signed links from every report section', async () => {
   const browser = browserContext();
   let report = '';

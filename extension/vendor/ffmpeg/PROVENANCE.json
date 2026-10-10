@@ -1,0 +1,81 @@
+{
+  "name": "ffmpeg.wasm",
+  "version": "wrapper-0.12.10_core-0.12.6",
+  "repository": "https://github.com/ffmpegwasm/ffmpeg.wasm",
+  "commit": "e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4",
+  "license": "MIT AND GPL-2.0-or-later",
+  "verifiedDate": "10-10-2026",
+  "packages": [
+    {
+      "name": "@ffmpeg/ffmpeg",
+      "version": "0.12.10",
+      "tarball": "https://registry.npmjs.org/@ffmpeg/ffmpeg/-/ffmpeg-0.12.10.tgz",
+      "integrity": "sha512-lVtk8PW8e+NUzGZhPTWj2P1J4/NyuCrbDD3O9IGpSeLYtUZKBqZO8CNj1WYGghep/MXoM8e1qVY1GztTkf8YYQ==",
+      "sha256": "b2f2418be6cc3c29a0765c1376ebfbfea94073b287767460851a3ce487666d8f",
+      "gitHead": "e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4"
+    },
+    {
+      "name": "@ffmpeg/core",
+      "version": "0.12.6",
+      "tarball": "https://registry.npmjs.org/@ffmpeg/core/-/core-0.12.6.tgz",
+      "integrity": "sha512-PrjWBTfGn2WVn9T7wGnzfFwChbqWeZc7tM9vvJZVRadYFUDakfzy7W0LpYC0cvvK0xT82qlBsk38lQhJ/Hps5A==",
+      "sha256": "9812c82188e8ca434a3d0e9edc2435458b55df0ce3f700a8df867c22ec8a8ced",
+      "gitHead": "e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4"
+    }
+  ],
+  "files": [
+    {
+      "path": "ffmpeg.js",
+      "bytes": 4126,
+      "sha256": "a4c09a1997ac582a735fc21e20f9913df4af6dde4ebb373f1d714a4b6e7616f1",
+      "modified": false,
+      "source": "npm:@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"
+    },
+    {
+      "path": "814.ffmpeg.js",
+      "bytes": 2634,
+      "sha256": "6fdceaa2bb9765257a5474fd86f4a90c67995d9b8c63df3a7e92f264cda8be71",
+      "modified": true,
+      "source": "npm:@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js",
+      "transformation": {
+        "replace": "\"https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js\"",
+        "with": "new URL(\"ffmpeg-core.js\",self.location.href).href",
+        "inheritedFrom": "Nova Video Saver 6a2bc6dc1234a3c4b0037885b08cad486abe1bac"
+      }
+    },
+    {
+      "path": "ffmpeg-core.js",
+      "bytes": 114673,
+      "sha256": "a34873964b0f62aec516bac75e3aa9086ec3535d4d07f0269aa94ea748b6cb71",
+      "modified": false,
+      "source": "npm:@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js"
+    },
+    {
+      "path": "ffmpeg-core.wasm",
+      "bytes": 32129114,
+      "sha256": "2390efa7fb66e7e42dbae15427571a5ffc96b829480904c30f471f0a78967f61",
+      "modified": false,
+      "source": "npm:@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm"
+    },
+    {
+      "path": "LICENSE.wrapper",
+      "bytes": 1066,
+      "sha256": "3e123e29517d76504ffce77b3f8e2ccffd4712493f27694b0aba3e376676459f",
+      "modified": false,
+      "source": "https://raw.githubusercontent.com/ffmpegwasm/ffmpeg.wasm/e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4/LICENSE"
+    },
+    {
+      "path": "COPYING.GPLv2",
+      "bytes": 18092,
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "modified": false,
+      "source": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n5.1.4/COPYING.GPLv2"
+    }
+  ],
+  "sourceRecipe": {
+    "url": "https://codeload.github.com/ffmpegwasm/ffmpeg.wasm/tar.gz/e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4",
+    "sha256": "6f9e1c6891e368c1ded5546f6ff09bacd031f679192d866c731dfd79def4c095",
+    "ffmpeg": "n5.1.4",
+    "emsdk": "3.1.40"
+  }
+}

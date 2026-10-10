@@ -37,5 +37,23 @@
     "network": false,
     "dynamicCodeExecution": false,
     "wasm": false
+  },
+  "packages": [
+    {
+      "name": "@zip.js/zip.js",
+      "version": "2.20.0",
+      "tarball": "https://registry.npmjs.org/@zip.js/zip.js/-/zip.js-2.20.0.tgz",
+      "integrity": "sha512-ws8m/tIfbt10L7E9PZj4h0vePKBodxpF13z9JzXdNw1e9ZMFdqnS7ppcK7vXPfN7vwSv2TuRTP7cO2OetdndvA==",
+      "sha256": "667adbcf3067aa2e798606e2b1a24476dbbc2d7867ef0be40c2b00412b284bc3",
+      "gitHead": "38508528fe00b094447d9122b7725ab412149e2d"
+    }
+  ],
+  "source": {
+    "url": "https://registry.npmjs.org/@zip.js/zip.js/-/zip.js-2.20.0.tgz",
+    "paths": [
+      "package/lib",
+      "package/LICENSE"
+    ],
+    "nativeBundleMatchesNpm": true
   }
 }

@@ -41,7 +41,7 @@ History scan читает reachable commits и проверяет каждый �
 
 ESLint не является type checker. Межфайловая типизация, динамические message schemas, фактическое поведение браузера и доступность сайтов подтверждаются контрактными/regression tests и отдельной browser QA. Whole-program dead-code removal не добавлен: manifest, HTML и shared globals являются динамическими entrypoints. Локальные неиспользуемые значения ESLint показывает без удаления кода.
 
-В 0.3.0 весь набор содержит 269 tests. Новые public-boundary проверки охватывают ZIP/CRC/имена, очередь и принадлежность позиции, схемы Blob/source messages, квоту, отмену Save As, восстановление, откат при ошибке recovery index или открытия writable и foreign buffer view Gecko. Реальный браузерный harness запускает отдельные профили и использует WebDriver/CDP; диагностические binary fixtures проверяют передачу и упаковку, а не качество медиа. Финальные browser/file receipts и screenshots находятся в игнорируемой `.local/qa/phase3/`. Перед Git проверь изображения глазами: текстовый outgoing scanner их содержимое не анализирует.
+В фазе 3 набор 0.3.0 содержал 269 tests. Фаза 4 добавляет проверки dependency policy, release archives, warning inventory, RAM budgets и диагностики. Новые public-boundary проверки охватывают ZIP/CRC/имена, очередь и принадлежность позиции, схемы Blob/source messages, квоту, отмену Save As, восстановление, откат при ошибке recovery index или открытия writable и foreign buffer view Gecko. Реальный браузерный harness запускает отдельные профили и использует WebDriver/CDP; диагностические binary fixtures проверяют передачу и упаковку, а не качество медиа. Финальные browser/file receipts и screenshots находятся в игнорируемой `.local/qa/phase3/`. Перед Git проверь изображения глазами: текстовый outgoing scanner их содержимое не анализирует.
 
 Локальная zip.js закреплена вместе с BSD-3-Clause и SHA-256 в `extension/vendor/zipjs/`; установка npm не загружает runtime ZIP library. Измеренный ZIP payload - 128 MiB в обоих браузерах; guard 1 GiB не является результатом нагрузочного испытания. Полные сценарии и ограничения находятся в [PHASE3_VERIFICATION.md](PHASE3_VERIFICATION.md).
 
@@ -54,6 +54,24 @@ npm ls shell-quote node-forge
 
 Scoped override `fx-runner > shell-quote` закреплён на 1.11.0. В 1.10.0 reproducer позволял newline после comment token без ошибки; 1.11.0 отклоняет его. Проверка также подтверждает parsing quoted browser/profile arguments, а `web-ext lint` проверен после override. Это исправление не меняет `web-ext` major и не запускает браузер. Источники: [advisory shell-quote](https://github.com/advisories/GHSA-pqg4-j6r4-53mv), [upstream changelog](https://github.com/ljharb/shell-quote/blob/main/CHANGELOG.md).
 
-На 09-10-2026 `npm audit` после override возвращает три high entries одной цепочки: `web-ext > @devicefarmer/adbkit > node-forge` 1.4.0, advisory [RSA signature verification](https://github.com/advisories/GHSA-86w9-cpqp-85rv). Latest `node-forge` в npm registry остаётся 1.4.0; совместимое исправление не подтверждено. Critical entries после override отсутствуют. Это служебные зависимости; `check:build` исключает `node_modules` из поставки. Автоматический `npm audit fix --force` предлагает downgrade `web-ext` до 5.1.0 и не принят. Перед релизом нужны повторный audit и предусмотренный проектом repository security scan; нынешние checks не заявляют их завершение.
+Исторический audit от 09-10-2026 после override возвращал три high entries одной цепочки: `web-ext > @devicefarmer/adbkit > node-forge` 1.4.0, advisory [RSA signature verification](https://github.com/advisories/GHSA-86w9-cpqp-85rv). Latest `node-forge` в npm registry остаётся 1.4.0; совместимое исправление не подтверждено. Critical entries после override отсутствуют. Это служебные зависимости; `check:build` исключает `node_modules` из поставки. Автоматический `npm audit fix --force` предлагает downgrade `web-ext` до 5.1.0 и не принят. Свежий audit от 10-10-2026 и достижимость рассмотрены в [DEPENDENCIES.md](DEPENDENCIES.md); он подтверждает те же три tooling entries и 0 runtime entries. Repository security scan учитывается отдельно.
 
 Установка расширения, реальные media outputs, wide/narrow screenshots, keyboard и adapters проверяются отдельно по [PROJECT_SPEC.md](PROJECT_SPEC.md) и [ROADMAP.md](ROADMAP.md). Команды выше не доказывают browser compatibility или полноту конечного media-файла.
+
+## Pipeline фазы 4
+
+После `npm ci --ignore-scripts` выполни:
+
+```powershell
+npm run verify
+```
+
+Pipeline последовательно запускает tests, semantic lint, офлайн vendor/license/lockfile checks, свежие tooling/runtime audits, обе сборки и inventories, warning gate, outgoing current/history scan и подготовку неподписанных архивов. На первом отказе он останавливается. Локальный receipt с командами и exit codes сохраняется в `.local/qa/phase4/pipeline.json`.
+
+`check:extension` читает JSON Mozilla linter. Errors/notices, некорректный report и любое новое или повторное warning завершают gate с ошибкой. Три разобранные vendor warnings допускаются только при совпадении code/file/line/column и закреплённых SHA-256 соответствующих файлов; они выводятся явно. `lint:extension:strict` по-прежнему отклоняет эти warnings. Обоснование находится в [DEPENDENCIES](DEPENDENCIES.md).
+
+`prepare:release` создаёт Firefox unsigned XPI, Chromium ZIP, source ZIP и manifests/checksums в `artifacts/mendosave-<version>/`. Каждый архив проверяется повторным чтением CRC и извлечённых bytes. Порядок, STORE compression и timestamps фиксированы. Source берётся из текущих tracked и неигнорируемых untracked files, поэтому признак `dirty` в receipt важен: окончательные archives следует строить из чистого проверенного commit. Подробности поставки и следующий внешний шаг - в [DISTRIBUTION](DISTRIBUTION.md).
+
+[GitHub workflow](../.github/workflows/verify.yml) выполняет те же checks на `ubuntu-24.04` и `windows-2025`, затем сравнивает hashes архивов. Node 22.18.0 и Actions закреплены; Actions используют full commit SHA. Checkout имеет read-only token и не сохраняет credentials. Workflow работает на PR, разрешённых task branches, main и manual dispatch; он не подписывает, не публикует GitHub release и не содержит signing secrets. Artifacts хранятся 14 дней. `.gitattributes` фиксирует LF для source и сохраняет vendor/binary bytes.
+
+GitHub CI проверяет переносимость developer pipeline. Windows runner без Zen и Linux checks не заменяют отдельные browser/file receipts. Живой network audit может остановиться при недоступности registry или новой advisory; обход такого отказа не встроен. SHA-pinned Action проверяет используемый checkout actions code, но hosted runner image продолжает обслуживаться GitHub.

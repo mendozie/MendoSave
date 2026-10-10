@@ -12,7 +12,7 @@
 - Проверки фазы 3: 269/269 tests, ESLint 0 errors / 14 warnings; обе сборки и inventories, `web-ext` 0 errors / 3 vendor warnings. Внутренний совокупный review и focused review коррекций выполнены; подтверждённая утечка recovery bytes из первого managed review исправлена с regression checks. В Zen проверены настоящие Save As для MP4/MP3/SRT/ZIP и отмена. В обоих браузерах завершены три файла Coub, ZIP с byte comparison и диагностический ZIP 128 MiB; в Chromium проверены две вкладки и отмена после первого chunk. Подробности и частные receipts - в отчёте фазы 3; результаты старых WebM/live проверок остаются в [PHASE2_VERIFICATION.md](PHASE2_VERIFICATION.md).
 - Пользовательская приёмка: подготовка и направление приняты 09-10-2026. Техническое закрытие фазы 2 не заменяет пользовательскую визуальную приёмку и релизную приёмку.
 - GitHub: [mendozie/MendoSave](https://github.com/mendozie/MendoSave) создан приватным; owner, remote и `isPrivate: true` проверены через API. Разрешены task branch и PR. Подписанного релиза и отправки в Mozilla нет; видимость остаётся приватной до подготовки релиза.
-- Продолжение: фаза 3 разрешена 10-10-2026 и технически завершена; реализация и GitHub review находятся в [PR #2](https://github.com/mendozie/MendoSave/pull/2). Проверенный срез проходит обычный приватный PR workflow по постоянному разрешению пользователя. Фаза 4 не начата; подписание, канал распространения и смена видимости требуют соответствующего решения. Подготовка и импорт upstream не повторяются.
+- Продолжение: фазы 1-3 интегрированы через [PR #1](https://github.com/mendozie/MendoSave/pull/1) и [PR #2](https://github.com/mendozie/MendoSave/pull/2). Фаза 4 начата 10-10-2026: разрешены локальные исправления, релизная подготовка и обычный приватный PR workflow. Подписание, канал распространения и смена видимости требуют соответствующего решения. Подготовка и импорт upstream не повторяются.
 - Границы: TikTok-файл, многоматериальная playlist queue, длинный live, активный browser restart, верхний ZIP размер и реальное заполнение квоты не подтверждены. Измерены 128 MiB payload; production guard - 1 GiB и 20 позиций. Физический chooser Chromium не проверен из-за ограничения native UI-инструмента; downloads completion/cancel/recovery проверены. Полный security scan и публичный выпуск остаются в фазе 4.
 
 ## Фаза 0 - подготовка
@@ -80,14 +80,18 @@ Evidence: A-003/A-004/A-005/A-006/A-009 в указанном объёме - [PH
 
 ## Фаза 4 - публичный выпуск
 
-Статус: `[ ]`; внешние действия требуют применимого разрешения.
+Статус: `[~]`; выполняется техническая подготовка. Подписанный публичный выпуск пока не подтверждён; внешние действия требуют применимого разрешения.
 
 Результат: проверенный подписанный пакет и публичные материалы с фактическими возможностями, ограничениями и правилами приватности.
 
-- Проверить зависимости, локальные версии, состав пакета, source/build reproducibility и лицензионную поставку.
-- Выполнить применимые тесты, `web-ext` lint/build, code review и `$codex-security:security-scan`; разобрать существенные findings.
-- Подготовить инструкции установки, privacy/security reporting и поддерживаемую матрицу. Выбрать add-on ID и канал AMO/unlisted.
-- До релизной версии сохранять приватность репозитория. После применимого разрешения открыть репозиторий и выполнить подписанный выпуск; проверить сохранённые внешние условия и доступность пакета через readback.
+- [ ] Проверить свежий dependency audit, достижимость advisories, runtime versions/hashes, corresponding source и vendor warnings. Не считать совпадение official binary hash доказательством полного source→binary rebuild.
+- [ ] Проверить сохранение, lifecycle/recovery, privileged boundaries и доступность controls; завершить полный repository security scan и совокупный code review.
+- [ ] Закрыть практические gaps: TikTok-файл, playlist queue, длительный live/processor, полный restart, размер ZIP и безопасный resource failure, физический Chromium Save As. Для недоступных сценариев сохранить отрицательное evidence и согласовать release claim.
+- [ ] Подготовить переносимый локальный pipeline и GitHub CI на Windows/Linux: lockfile, tests, semantic lint, web-ext, licenses/vendor hashes, outgoing files/history, unsigned archives/source/CRC/hashes. Сохранить результат действительного CI run; Linux не заменяет Zen QA.
+- [ ] Повторить release candidate в отдельных muted Zen/Chromium profiles: конечные media/ZIP bytes, Cancel/recovery/source lifecycle, wide/narrow viewport и keyboard. Записать фактические версии и пределы.
+- [ ] Завершить README, install/update/uninstall, privacy/security, site matrix, license/provenance и release notes. Подготовить конкретный [вариант распространения](DISTRIBUTION.md), получить решение по add-on ID и каналу.
+- [ ] После отдельного разрешения подписать пакет, проверить saved ID/version/channel и реальную установку подписанного XPI. Пользовательская визуальная приёмка остаётся отдельной от технического PASS.
+- [ ] До релизной готовности сохранять приватность репозитория. После разрешения открыть репозиторий и опубликовать выпуск; проверить сохранённые внешние условия и доступность пакета через readback.
 
 Evidence: A-008/A-010, подтверждённое подписание/установка и readback разрешённой публикации. Наличие public GitHub source не означает подписанный или одобренный Mozilla пакет.
 

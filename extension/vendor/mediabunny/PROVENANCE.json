@@ -1,0 +1,55 @@
+{
+  "name": "mediabunny",
+  "version": "1.51.0",
+  "repository": "https://github.com/Vanilagy/mediabunny",
+  "commit": "634186fd5e2dac946bf994a955680b85aceb7709",
+  "license": "MPL-2.0",
+  "verifiedDate": "10-10-2026",
+  "packages": [
+    {
+      "name": "mediabunny",
+      "version": "1.51.0",
+      "tarball": "https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz",
+      "integrity": "sha512-u327374xU8Ho0gCaMII7fUK8t0PnqkabCox1k8uUwvgvGb9o6YQGZEG2Qr4DTe7nTMpzfL7ukgnHDvDROySZ+Q==",
+      "sha256": "d7e27cc61de1691a7adcd27e11cbb8f33a4bda21c17896c2c1e401e2b5077e26",
+      "gitHead": "634186fd5e2dac946bf994a955680b85aceb7709"
+    }
+  ],
+  "source": {
+    "url": "https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz",
+    "paths": [
+      "package/src",
+      "package/LICENSE"
+    ],
+    "containsOriginalSource": true,
+    "gitArchive": {
+      "url": "https://codeload.github.com/Vanilagy/mediabunny/tar.gz/634186fd5e2dac946bf994a955680b85aceb7709",
+      "sha256": "fdc44cf9288676f7de25a3984326145433fa213bf12445bb0ed5cf04228f07b5",
+      "npmSourceFilesCompared": 66,
+      "exactMatch": true
+    }
+  },
+  "bundle": {
+    "url": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm",
+    "rollup": "4.62.2",
+    "esbuild": "0.28.1",
+    "exactDownloadMatch": true,
+    "bitRebuildVerified": false
+  },
+  "files": [
+    {
+      "path": "mediabunny.min.mjs",
+      "bytes": 644573,
+      "sha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68",
+      "modified": false,
+      "source": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 16726,
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+      "modified": false,
+      "source": "npm:mediabunny@1.51.0/LICENSE"
+    }
+  ]
+}
