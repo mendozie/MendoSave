@@ -1,0 +1,37 @@
+# Mozilla reviewer build instructions
+
+Submission: MendoSave 0.3.0, add-on ID `mendosave@mendozie`, self-distributed (unlisted). The repository is private. No public AMO listing or update server is part of this submission.
+
+## Build the submitted Firefox package
+
+The source archive contains the extension, browser-specific host, build scripts, lockfile, bundled libraries, licenses and provenance. Extract it into an empty directory and run commands from its root.
+
+Tested environment: Windows with Node.js 22.18.0 / npm 10.9.3. The packaging pipeline was also validated on Ubuntu 24.04. Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
+
+```sh
+npm ci --ignore-scripts
+npm run build
+npm run check:build
+npm run check:dependencies
+npm run check:extension
+```
+
+On Windows PowerShell, use `npm.cmd` instead of `npm` if the script execution policy blocks npm's PowerShell shim. These commands do not require Docker, WSL or a compiler.
+
+`dist/firefox/` contains the submitted Firefox extension. Compare its file contents with the unsigned XPI. The build copies first-party JavaScript without minification and generates only `manifest.json`, using the pinned package version and Firefox background contract. Chromium has its own output and is not submitted to Mozilla. `dist/firefox-hashes.json` records every packaged file. ZIP metadata and Mozilla's later signature files are not application source differences.
+
+## Bundled libraries
+
+The build uses the supplied local vendor files, without downloading runtime code. Full notices, exact versions, source URLs, hashes and modifications are in [DEPENDENCIES.md](DEPENDENCIES.md), [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and the vendor `PROVENANCE.json` files.
+
+- FFmpeg wrapper 0.12.10 and core 0.12.6: the wrapper's worker has a documented inherited change making its default core URL local. The existing official core is included unchanged. This submission does not claim a fresh native-code compilation.
+- Mediabunny 1.51.0: the supplied bundle contains local MP4/AAC resource guards. Complete modified MPL source files, original source identifiers and deterministic bundle/source transformations are included. See [PATCH.md](../extension/vendor/mediabunny/PATCH.md). A fresh bit-for-bit TypeScript compilation is not claimed.
+- zip.js 2.20.0: the native bundle is unchanged from the pinned npm archive. Runtime ZIP writing uses STORE and disables web workers.
+
+The three known lint warnings and their local-only execution boundaries are documented in [DEPENDENCIES.md](DEPENDENCIES.md). Content security policy permits only bundled scripts, workers and WebAssembly; it does not enable string evaluation or remote scripts.
+
+## Exercise the extension
+
+Load `dist/firefox/manifest.json` temporarily in a separate Firefox/Zen profile. Open a supported media page such as a YouTube watch page or Coub, select an available download option in MendoSave, and check the resulting file. The popup controls Save As, cancellation and manual recovery of prepared package inputs. Source-site availability and formats vary by material.
+
+The extension processes media locally and contacts the selected source site/CDN for media data. There is no analytics, advertising, processing server or Native Messaging. Permissions and storage are explained in [PRIVACY.md](../PRIVACY.md); measured behavior and remaining test gaps are in [PHASE4_VERIFICATION.md](PHASE4_VERIFICATION.md).

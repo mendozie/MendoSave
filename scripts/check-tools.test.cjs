@@ -16,7 +16,7 @@ test('build check rejects missing references, changed bytes, and unexpected file
     const manifest = { manifest_version: 3, name: 'MendoSave', version: '0.2.0',
       permissions: ['downloads'], background: { scripts: ['background.js'] },
       content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'" },
-      browser_specific_settings: { gecko: { id: 'fixture@example.test' } } };
+      browser_specific_settings: { gecko: { id: 'mendosave@mendozie' } } };
     const entries = { 'manifest.json': JSON.stringify(manifest), 'background.js': 'globalThis.ready = true;', LICENSE: 'license', 'THIRD_PARTY_NOTICES.md': 'notice' };
     for (const [name, text] of Object.entries(entries)) fs.writeFileSync(path.join(output, name), text);
     const hashes = Object.entries(entries).map(([name, text]) => ({ path: name, sha256: crypto.createHash('sha256').update(text).digest('hex') }));
@@ -47,6 +47,26 @@ test('build check rejects remote entrypoints, unsafe CSP and traversal', () => {
     const errors = checkBuild(root, 'chromium', '0.2.0');
     assert.ok(errors.some((error) => error.includes('non-local reference')));
     assert.ok(errors.some((error) => error.includes('CSP')));
+});
+
+test('build check accepts the permanent Firefox identity and rejects development or foreign identities', () => {
+  const root = fs.mkdtempSync(path.join(fixtureArea, 'identity-'));
+  const output = path.join(root, 'dist', 'firefox');
+  fs.mkdirSync(output, { recursive: true });
+  for (const id of ['mendosave@mendozie', 'mendosave-dev@mendozie.local', 'foreign@example.test']) {
+    const manifest = { manifest_version: 3, name: 'MendoSave', version: '0.3.0',
+      permissions: ['downloads'], background: { scripts: ['background.js'] },
+      content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'" },
+      browser_specific_settings: { gecko: { id } } };
+    const entries = { 'manifest.json': JSON.stringify(manifest), 'background.js': 'globalThis.ready = true;',
+      LICENSE: 'license', 'THIRD_PARTY_NOTICES.md': 'notice' };
+    for (const [name, text] of Object.entries(entries)) fs.writeFileSync(path.join(output, name), text);
+    fs.writeFileSync(path.join(root, 'dist', 'firefox-hashes.json'), JSON.stringify(Object.entries(entries)
+      .map(([name, text]) => ({ path: name, sha256: crypto.createHash('sha256').update(text).digest('hex') }))));
+    const errors = checkBuild(root, 'firefox', '0.3.0');
+    if (id === 'mendosave@mendozie') assert.deepEqual(errors, []);
+    else assert.ok(errors.includes('Firefox add-on identity mismatch'), `Accepted ${id}`);
+  }
 });
 
 test('build check rejects duplicate CSP directives instead of accepting the final safe value', () => {
