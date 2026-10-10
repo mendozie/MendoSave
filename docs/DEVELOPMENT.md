@@ -1,6 +1,6 @@
 # Локальные проверки MendoSave
 
-Актуализировано: 09-10-2026. Команды выполняются из корня репозитория в PowerShell либо другом shell с Node.js.
+Актуализировано: 10-10-2026. Команды выполняются из корня репозитория в PowerShell либо другом shell с Node.js.
 
 ## Среда и зависимости
 
@@ -28,7 +28,7 @@ npm run check:outgoing
 - `npm test` запускает regression tests расширения и проверки самих QA-инструментов. Проверки QA создают небольшие fixtures в `.local/qa/phase2/checks/fixtures/`; они сохраняются для диагностики и не попадают в Git.
 - `lint:js` применяет semantic recommended rules к собственному JS в `extension/`, `browser-hosts/`, `scripts/`, `tests/` и конфигурации. Browser, worker и Node globals заданы по окружению; shared extension globals объявлены явно. Vendor, сборки, `.local/` и `node_modules/` исключены. Ошибки вроде необъявленного binding завершают команду с ненулевым кодом. Неиспользуемые значения, лишние присвоения и потеря `cause` остаются видимыми предупреждениями. Style rules и массовое автоисправление не добавлены.
 - `build` генерирует Firefox- и Chromium-сборки. `check:build` читает готовый `dist/`: проверяет имя/версию manifest, разделение browser hosts, локальные manifest/HTML script references, CSP, обязательные licenses, полный inventory и SHA-256 каждого файла, совпадение копируемых source bytes и отсутствие служебных/private artifacts. Устаревшая сборка не проходит проверку. Это локальная проверка состава, без установки в браузер.
-- `lint:extension` проверяет Firefox-сборку через Mozilla `web-ext`. У vendored FFmpeg известны два предупреждения: dynamic import в worker и `Function` constructor в wrapper. Обычная команда сохраняет эти предупреждения; `lint:extension:strict` намеренно возвращает ошибку при любом предупреждении. Разрешение этих warnings не означает прохождения полного security scan или релизной приёмки.
+- `lint:extension` проверяет Firefox-сборку через Mozilla `web-ext`. В 0.3.0 остаются три vendor warnings: dynamic import в FFmpeg worker, `Function` constructor в FFmpeg wrapper и dynamic import в zip.js native bundle. ZIP выполняется локально с `useWebWorkers: false`; этот режим не вызывает worker import. Обычная команда сохраняет warnings; `lint:extension:strict` намеренно возвращает ошибку при любом предупреждении. Разбор warnings не означает прохождения полного security scan или релизной приёмки.
 - `check:outgoing` сканирует текущие tracked и неигнорируемые untracked файлы. Ищет распространённые токены, private-key markers, приватные пути и буквальные подписанные URL; выводит только путь, строку и категорию. `.local/`, профили и ignored файлы не читаются. Если приватная область уже tracked, её наличие считается ошибкой. Binary blobs пропускаются и учитываются в summary; значения совпадений не выводятся. Проверка не заменяет полный поиск секретов, просмотр изображений, индексированного состояния или проверку браузерных профилей.
 
 Для исходящей истории укажи реально разрешённую revision:
@@ -40,6 +40,10 @@ node scripts/check-outgoing.cjs --history=HEAD
 History scan читает reachable commits и проверяет каждый уникальный text blob по паре path/object. Рабочая копия и история проверяются раздельно: `--all` не доказывает чистоту старых commits. В обоих режимах действуют узкие reviewed exceptions для отрицательных test fixtures. Один исторический build path в неизменённом FFmpeg wrapper разрешён только при совпадении конкретного пути и SHA-256 vendor-файла; новые пути или изменённые bytes требуют отдельного рассмотрения. Совпадения exceptions видны в summary. Лицензии и происхождение upstream сохраняются.
 
 ESLint не является type checker. Межфайловая типизация, динамические message schemas, фактическое поведение браузера и доступность сайтов подтверждаются контрактными/regression tests и отдельной browser QA. Whole-program dead-code removal не добавлен: manifest, HTML и shared globals являются динамическими entrypoints. Локальные неиспользуемые значения ESLint показывает без удаления кода.
+
+В 0.3.0 весь набор содержит 269 tests. Новые public-boundary проверки охватывают ZIP/CRC/имена, очередь и принадлежность позиции, схемы Blob/source messages, квоту, отмену Save As, восстановление, откат при ошибке recovery index или открытия writable и foreign buffer view Gecko. Реальный браузерный harness запускает отдельные профили и использует WebDriver/CDP; диагностические binary fixtures проверяют передачу и упаковку, а не качество медиа. Финальные browser/file receipts и screenshots находятся в игнорируемой `.local/qa/phase3/`. Перед Git проверь изображения глазами: текстовый outgoing scanner их содержимое не анализирует.
+
+Локальная zip.js закреплена вместе с BSD-3-Clause и SHA-256 в `extension/vendor/zipjs/`; установка npm не загружает runtime ZIP library. Измеренный ZIP payload - 128 MiB в обоих браузерах; guard 1 GiB не является результатом нагрузочного испытания. Полные сценарии и ограничения находятся в [PHASE3_VERIFICATION.md](PHASE3_VERIFICATION.md).
 
 ## Audit dev tooling
 

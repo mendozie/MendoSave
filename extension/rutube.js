@@ -3,6 +3,13 @@
 // Segments are ordinary GETs, and the assembled MPEG-TS goes to the shared
 // offscreen muxer as a single already-muxed input.
 (() => {
+  const mendoSend = (message) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  const mendoFetch = (url, options) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
+  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
+
   const BUTTON_ID = 'mendosave-rutube-btn';
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
   const SEGMENT_CONCURRENCY = 6;
@@ -13,12 +20,12 @@
   let toast;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `rutube/${tag}`, text }).catch(() => {});
+    mendoSend({ t: 'mendosave-log', tag: `rutube/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
     console.error('[MendoSave]', error);
-    return chrome.runtime.sendMessage({
+    return mendoSend({
       t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
@@ -50,7 +57,7 @@
   async function fetchPlayOptions(videoId) {
     const url = `${location.origin}/api/play/options/${videoId}/`
       + `?no_404=true&referer=${encodeURIComponent(location.href)}`;
-    const response = await fetch(url, { credentials: 'include' });
+    const response = await mendoFetch(url, { credentials: 'include' });
     if (!response.ok) throw new Error(`Rutube API ответил ${response.status}`);
     const payload = await response.json();
     const master = payload?.video_balancer?.m3u8 || payload?.video_balancer?.default;
@@ -126,7 +133,7 @@
   }
 
   async function fetchText(url) {
-    const response = await fetch(url, { credentials: 'omit' });
+    const response = await mendoFetch(url, { credentials: 'omit' });
     if (!response.ok) throw new Error(`плейлист ответил ${response.status}`);
     return response.text();
   }
@@ -135,7 +142,7 @@
 
   async function fetchSegment(url, attempt = 0) {
     try {
-      const response = await fetch(url, { credentials: 'omit' });
+      const response = await mendoFetch(url, { credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       // In Gecko a view over a DOM-returned ArrayBuffer can stay in its foreign
       // realm. Its subarray() then fails when species reads `constructor`.
@@ -145,6 +152,7 @@
       if (!bytes.length) throw new Error('пустой сегмент');
       return bytes;
     } catch (error) {
+      if (error?.name === 'AbortError') throw error;
       if (attempt >= 2) throw error;
       await new Promise((resolve) => { setTimeout(resolve, 300 * (attempt + 1)); });
       return fetchSegment(url, attempt + 1);
@@ -207,13 +215,13 @@
   }
 
   async function beginJob(job, expectedBytes) {
-    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+    const ensured = await mendoSend({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId: job.jobId });
+    const registration = await mendoSend({ t: 'mendosave-register-job', jobId: job.jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
-    const started = await chrome.runtime.sendMessage({
+    const started = await mendoSend({
       t: 'mendosave-begin',
       jobId: job.jobId,
       tabId: registration.tabId,
@@ -236,7 +244,7 @@
   async function sendBytes(jobId, bytes) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
-      const response = await chrome.runtime.sendMessage({
+      const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track: 'video', b64: encodeBase64(chunk),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
@@ -293,6 +301,7 @@
   async function openMenu(event) {
     event.preventDefault();
     event.stopPropagation();
+    if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
     menu = document.createElement('div');
     const openedMenu = menu;
@@ -345,6 +354,13 @@
         });
         menu.append(item);
       }
+      if (variants.length > 1) globalThis.MendoPackageUI?.add(menu, {
+        title: options.title, close: closeMenu,
+        options: variants.map((variant, index) => ({
+          id: `rutube-${index}`, label: `${variant.height}p MP4`,
+          run: () => startDownload(variant, options),
+        })),
+      });
     } catch (error) {
       if (menu !== openedMenu) return;
       loading.remove();
@@ -371,7 +387,12 @@
   }
 
   async function startDownload(variant, options) {
-    if (downloadInProgress) return;
+    const bundled = packageRunning();
+    mendoCheck();
+    if (downloadInProgress) {
+      if (bundled) throw new Error('Другая загрузка уже выполняется');
+      return;
+    }
     downloadInProgress = true;
     const notification = getToast();
     let job;
@@ -383,7 +404,10 @@
         try {
           segments = parseMediaPlaylist(await fetchText(mirror), mirror);
           if (segments.length) break;
-        } catch (error) { lastError = error; }
+        } catch (error) {
+          if (error?.name === 'AbortError') throw error;
+          lastError = error;
+        }
       }
       if (!segments?.length) throw lastError || new Error('плейлист сегментов пуст');
       const estimate = (variant.bandwidth || 0) / 8 * (options.durationSeconds || 0);
@@ -408,12 +432,19 @@
       log('download', `segments streamed; bytes=${sentBytes}`);
 
       notification.set('Сборка файла…', 0.94);
-      const result = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId: job.jobId });
+      const result = await mendoSend({ t: 'mendosave-finalize', jobId: job.jobId });
       if (!result?.ok) throw new Error(result?.error || 'не удалось собрать файл');
       notification.set(`Готово: ${result.filename || filename}`, 1);
       notification.hide(5000);
+      return result.filename || filename;
     } catch (error) {
-      if (job) await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
+      if (job) await mendoSend({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
+      if (bundled) throw error;
+      if (error?.name === 'AbortError') {
+        notification.set('Загрузка отменена', 1);
+        notification.hide(5000);
+        return;
+      }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(9000);
       await reportError('rutube/download', error, { height: variant?.height, page: location.href });

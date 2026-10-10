@@ -23,6 +23,7 @@ const HANDLED_MESSAGES = new Set([
   'mendosave-fetch-caption',
   'mendosave-register-job',
   'mendosave-progress',
+  'mendosave-package-progress',
   'mendosave-set-reload-download',
   'mendosave-get-reload-download',
   'mendosave-clear-reload-download',
@@ -103,12 +104,12 @@ async function ensureOffscreen() {
 
 // Finished files the offscreen document could not hand over (see the recovery
 // store there). Flushing needs that document, so it is created on demand.
-async function flushRecoveredFiles() {
+async function flushRecoveredFiles(manual = false) {
   const stored = await chrome.storage.local.get(RECOVERY_KEY).catch(() => ({}));
   const entries = Array.isArray(stored[RECOVERY_KEY]) ? stored[RECOVERY_KEY] : [];
   if (!entries.some((entry) => entry && !entry.savedAt)) return { ok: true, saved: 0, pending: 0 };
   await ensureOffscreen();
-  const result = await chrome.runtime.sendMessage({ t: 'mendosave-flush' })
+  const result = await chrome.runtime.sendMessage({ t: 'mendosave-flush', manual })
     .catch((error) => ({ ok: false, error: String(error?.message || error) }));
   return result || { ok: false, error: 'обработчик медиа не ответил' };
 }
@@ -189,14 +190,32 @@ async function saveDownload(url, filename) {
     const text = decodeURIComponent(match[2]);
     await ensureOffscreen();
     const response = await chrome.runtime.sendMessage({ t: 'mendosave-save-text', text, type: match[1], filename: repaired });
-    if (!response?.ok) throw new Error(response?.error || 'Не удалось сохранить текстовый файл');
+    if (!response?.ok) {
+      const error = new Error(response?.error || 'Не удалось сохранить текстовый файл');
+      error.cancelled = Boolean(response?.cancelled); throw error;
+    }
     return response.id;
   }
   const parsed = new URL(url);
   if (parsed.protocol !== 'https:' && !url.startsWith(`blob:${chrome.runtime.getURL('')}`)) {
     throw new Error('Download URL is not allowed');
   }
-  return chrome.downloads.download({ url, filename: repaired, saveAs: false, conflictAction: 'uniquify' });
+  const stored = await chrome.storage.local.get('nova_settings');
+  try {
+    return await chrome.downloads.download({ url, filename: repaired,
+      saveAs: stored?.nova_settings?.saveAs === true, conflictAction: 'uniquify' });
+  } catch (error) {
+    // The native picker rejects before there is a download ID in Gecko.
+    // Only known browser cancellation errors are user actions; a generic
+    // network or filesystem failure must remain an error.
+    const detail = String(error?.message || error);
+    if (detail === 'Download canceled by the user' || detail === 'USER_CANCELED') {
+      const cancelled = new Error(detail, { cause: error });
+      cancelled.cancelled = true;
+      throw cancelled;
+    }
+    throw error;
+  }
 }
 
 function validateCaptionUrl(value) {
@@ -349,7 +368,7 @@ async function handleMessage(message, sender) {
       return { ok: true };
 
     case 'mendosave-flush-recovered':
-      return flushRecoveredFiles();
+      return flushRecoveredFiles(true);
 
     case 'mendosave-recovery-read':
     case 'mendosave-recovery-write': {
@@ -372,6 +391,17 @@ async function handleMessage(message, sender) {
 
     case 'mendosave-save': {
       const owner = downloadOwner();
+      if (message.packageId) {
+        if (!Number.isInteger(sender.tab?.id) || sender.frameId !== 0) throw new Error('Пакет доступен только верхнему документу вкладки');
+        if (typeof message.url !== 'string' || typeof message.filename !== 'string' || !message.filename.length
+          || message.filename.length > 250) throw new Error('Некорректный результат пакета');
+        await ensureOffscreen();
+        const response = await chrome.runtime.sendMessage({ t: 'mendosave-save-source', packageId: message.packageId,
+          packageIndex: message.packageIndex, url: message.url, filename: repairFilename(message.filename),
+          sourceOwner: { tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId } });
+        if (response?.ok && Number.isInteger(response.id)) await chrome.storage.session.set({ [`mendo_download_owner:${response.id}`]: owner });
+        return response;
+      }
       const id = await saveDownload(message.url, message.filename);
       await chrome.storage.session.set({ [`mendo_download_owner:${id}`]: owner });
       return { ok: true, id };
@@ -494,13 +524,15 @@ async function handleMessage(message, sender) {
       await chrome.storage.session.remove([reloadDownloadKey(), reloadGuardKey()]);
       return { ok: true };
 
-    case 'mendosave-progress': {
+    case 'mendosave-progress':
+    case 'mendosave-package-progress': {
       if (sender?.url !== chrome.runtime.getURL('offscreen.html')) {
         throw new Error('progress messages are only accepted from the media processor');
       }
       if (!Number.isInteger(message.tabId)) throw new Error('progress tab is unavailable');
       await chrome.tabs.sendMessage(message.tabId, {
-        t: 'mendosave-progress',
+        t: message.t,
+        ...(message.packageId ? { packageId: message.packageId } : {}),
         jobId: message.jobId,
         value: message.value,
         percent: message.percent,
@@ -519,6 +551,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   handleMessage(message, sender)
     .then(sendResponse)
-    .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    .catch((error) => sendResponse({ ok: false, error: String(error?.message || error),
+      ...(error?.cancelled === true ? { cancelled: true } : {}) }));
   return true;
 });

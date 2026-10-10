@@ -25,5 +25,6 @@ module.exports = [
   { files: ['extension/content_hook.js'], languageOptions: { globals: { MendoCaptions: 'readonly' } } },
   { files: ['extension/content_ui.js'], languageOptions: { globals: { MendoMenu: 'readonly', MendoMediaPlan: 'readonly' } } },
   { files: ['extension/captions.js', 'extension/media_plan.js', 'extension/menu.js', 'extension/diagnostics.js'], languageOptions: { globals: { module: 'readonly' } } },
+  { files: ['extension/package_queue.js', 'extension/package_ui.js', 'extension/package_host.js'], languageOptions: { globals: { module: 'readonly' } } },
   { files: ['scripts/**/*.cjs', 'tests/**/*.cjs', 'eslint.config.cjs'], languageOptions: { sourceType: 'commonjs', globals: globals.node } },
 ];

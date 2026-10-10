@@ -1,8 +1,7 @@
 // Local development popup. No upstream updater.
 document.getElementById('current-version').textContent = `v${chrome.runtime.getManifest().version}`;
 
-// Player quality preferences. Applied by content_ui.js/content_hook.js on
-// YouTube and by twitch_ui.js on Twitch; this popup only edits the record.
+// Save location and player quality preferences share one persisted record.
 const settingsHint = document.getElementById('settings-hint');
 
 function fillQualitySelect(select, heights) {
@@ -25,6 +24,7 @@ function fillQualitySelect(select, heights) {
 
 async function setupSettings() {
   const { YOUTUBE_HEIGHTS, TWITCH_HEIGHTS, save, load } = globalThis.MendoSaveSettings;
+  const saveAs = document.getElementById('save-as');
   const youtubeQuality = document.getElementById('yt-quality');
   const youtubeLock = document.getElementById('yt-lock');
   const twitchQuality = document.getElementById('tw-quality');
@@ -34,6 +34,7 @@ async function setupSettings() {
   fillQualitySelect(twitchQuality, TWITCH_HEIGHTS);
 
   const current = await load();
+  saveAs.checked = current.saveAs;
   youtubeQuality.value = String(current.youtubeQuality);
   youtubeLock.checked = current.youtubeLock;
   twitchQuality.value = String(current.twitchQuality);
@@ -49,6 +50,12 @@ async function setupSettings() {
     }
   };
 
+  saveAs.addEventListener('change', () => persist(
+    { saveAs: saveAs.checked },
+    saveAs.checked
+      ? 'Сохранено. Браузер спросит, куда сохранить следующий файл.'
+      : 'Сохранено. Следующий файл попадёт в стандартную папку загрузок браузера.',
+  ));
   youtubeQuality.addEventListener('change', () => persist(
     { youtubeQuality: youtubeQuality.value },
     'Сохранено. На открытых вкладках YouTube — обновите страницу (F5).',
@@ -97,7 +104,10 @@ async function refreshRecovered() {
   // These controls only ever appear after a download finished processing but
   // the browser refused to accept the file, so say exactly that — an unexplained
   // button here reads like a mystery feature.
-  recoveredBox.textContent = pending.length === 1
+  const packageCount = pending.filter(entry => entry.reason === 'package').length;
+  recoveredBox.textContent = packageCount
+    ? `Подготовленные файлы незавершённого пакета: ${packageCount}. Можно сохранить их по отдельности кнопкой ниже.`
+    : pending.length === 1
     ? `Загрузка завершилась, но браузер не принял файл «${pending[0].filename}»`
       + `${formatSize(pending[0].bytes)}. Он сохранён во временном хранилище — нажмите кнопку ниже.`
     : `Готовых файлов, которые браузер не принял: ${pending.length}.`
@@ -117,8 +127,8 @@ saveRecoveredButton.addEventListener('click', async () => {
     recoveredBox.hidden = false;
     recoveredBox.textContent = 'Готово: файл отправлен в загрузки браузера.';
   } else {
-    recoveredBox.textContent = `Не удалось сохранить: ${result?.error || 'ошибка'}.`
-      + ' Попробуйте ещё раз или перезапустите браузер.';
+    recoveredBox.textContent = result?.cancelled ? 'Сохранение отменено. Готовые файлы остаются для ручного повторного сохранения.'
+      : `Не удалось сохранить: ${result?.error || 'ошибка'}. Готовые файлы остаются во временном хранилище.`;
   }
 });
 

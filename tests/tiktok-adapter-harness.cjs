@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { parseHTML } = require('linkedom');
+const { parseHTML, DOMParser } = require('linkedom');
 
 // Runs the delivered content script and exercises its DOM/runtime boundary.
 function adapter(script, html, href, network, send) {
@@ -8,12 +8,13 @@ function adapter(script, html, href, network, send) {
   window.innerWidth = 1280;
   window.innerHeight = 800;
   window.Element.prototype.getBoundingClientRect = () => ({ width: 320, height: 200, top: 300, bottom: 500, left: 20, right: 340 });
-  const messages = [], requests = [], downloads = [], listeners = new Set();
+  const messages = [], requests = [], downloads = [], blobs = [], listeners = new Set();
   document.addEventListener('click', (event) => {
     if (event.target.tagName === 'A' && event.target.download) downloads.push(event.target.download);
   }, true);
   const context = vm.createContext({
-    window, document, location: new URL(href), URL, Blob, Uint8Array, crypto: require('node:crypto').webcrypto,
+    window, document, location: new URL(href), URL, Blob, Uint8Array, DOMParser, TextDecoder,
+    crypto: require('node:crypto').webcrypto,
     console: { log() {}, error() {} },
     fetch: async (url, options = {}) => { requests.push({ url: String(url), options }); return network(String(url), options); },
     chrome: { runtime: {
@@ -29,9 +30,22 @@ function adapter(script, html, href, network, send) {
     requestAnimationFrame(fn) { fn(); return 1; },
     MutationObserver: class { observe() {} },
   });
+  context.MendoPackageUI = {
+    running: false,
+    check() {},
+    send: (message) => context.chrome.runtime.sendMessage(message),
+    fetch: (url, options) => context.fetch(url, options),
+    add() {},
+    interruption(code) {
+      const error = new Error(`Сохранение прервано: ${code}`);
+      if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') error.name = 'AbortError';
+      throw error;
+    },
+    async saveBlob(blob, filename) { blobs.push(blob); downloads.push(filename); return filename; },
+  };
   vm.runInContext(fs.readFileSync(`extension/${script}`, 'utf8'), context, { filename: script });
   return {
-    document, messages, requests, downloads, context,
+    document, messages, requests, downloads, blobs, context,
     click(element) { element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true })); },
     press(element, key, repeat = false) {
       const event = new window.Event('keydown', { bubbles: true, cancelable: true });

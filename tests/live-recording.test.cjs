@@ -134,6 +134,9 @@ function host({ writeBarrier, outputBarrier, outputSinkBarriers, downloadState, 
     setInterval(fn, ms) { const timer = setInterval(fn, ms); timer.unref(); timers.add(timer); return timer; },
     clearInterval(timer) { clearInterval(timer); timers.delete(timer); },
   });
+  Object.assign(context, { File, AbortController, AbortSignal, DOMException, WritableStream, ReadableStream, crypto, MendoArchive: require('../extension/archive.js') });
+  vm.runInContext(fs.readFileSync('extension/package_host.js', 'utf8'), context);
+  vm.runInContext(fs.readFileSync('extension/package_io.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/offscreen.js', 'utf8'), context);
   // Replace only extension module loading; parsing and packet copy use the pinned vendor.
   vm.runInContext('mediabunnyLoad = mediabunnyDependency;', context);

@@ -16,6 +16,7 @@
   // quietly dropping to 360p and staying there, which is the normal state
   // without them, not an edge case.
   const DEFAULTS = {
+    saveAs: false,
     youtubeQuality: 'auto',
     youtubeLock: true,
     twitchQuality: 'auto',
@@ -40,6 +41,7 @@
   function normalize(raw) {
     const stored = raw && typeof raw === 'object' ? raw : {};
     return {
+      saveAs: stored.saveAs === true,
       youtubeQuality: normalizeQuality(stored.youtubeQuality, YOUTUBE_HEIGHTS),
       youtubeLock: stored.youtubeLock == null ? DEFAULTS.youtubeLock : Boolean(stored.youtubeLock),
       twitchQuality: normalizeQuality(stored.twitchQuality, TWITCH_HEIGHTS),

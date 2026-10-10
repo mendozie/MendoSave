@@ -15,6 +15,19 @@
 //     is streamed to the offscreen document slice by slice, so a two-hour
 //     audiobook never exists in the page in one piece.
 (() => {
+  const mendoSend = (message) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  const mendoFetch = (url, options) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
+  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
+  function downloadInterrupted(code) {
+    if (globalThis.MendoPackageUI) globalThis.MendoPackageUI.interruption(code);
+    const error = new Error(`Сохранение прервано: ${code || 'причина не указана'}`);
+    if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') error.name = 'AbortError';
+    throw error;
+  }
+
   const BUTTON_CLASS = 'mendosave-vk-btn';
   const SLICE_BYTES = 8 * 1024 * 1024;
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
@@ -25,12 +38,12 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `vk/${tag}`, text }).catch(() => {});
+    mendoSend({ t: 'mendosave-log', tag: `vk/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
     console.error('[MendoSave]', error);
-    return chrome.runtime.sendMessage({
+    return mendoSend({
       t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
@@ -124,7 +137,7 @@
       + `&id=${encodeURIComponent(ids.id)}&hd=4&autoplay=0`;
     // With cookies: age-restricted and closed-group videos answer with an error
     // payload otherwise, and the site itself loads the player the same way.
-    const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store' });
     if (!response.ok) throw new Error(`страница плеера не открылась (HTTP ${response.status})`);
     // VK still serves this endpoint as windows-1251. Read as UTF-8 the title
     // decodes to replacement characters and the saved file is called
@@ -157,7 +170,7 @@
   // whole-file video comes from the progressive URLs, which cost nothing.
   async function loadAudioTrack(files) {
     if (!files.dash_sep) throw new Error('у этого видео нет отдельной аудиодорожки');
-    const response = await fetch(files.dash_sep, { credentials: 'omit', cache: 'no-store' });
+    const response = await mendoFetch(files.dash_sep, { credentials: 'omit', cache: 'no-store' });
     if (!response.ok) throw new Error(`манифест DASH не открылся (HTTP ${response.status})`);
     const manifest = new DOMParser().parseFromString(await response.text(), 'application/xml');
     const sets = [...manifest.querySelectorAll('AdaptationSet')];
@@ -203,7 +216,7 @@
   // sits in the cache as a no-cors entry that a CORS request cannot read, and
   // Chrome reports that as a bare `TypeError: Failed to fetch`.
   async function fetchRange(url, from, to, total) {
-    const response = await fetch(url, {
+    const response = await mendoFetch(url, {
       credentials: 'omit',
       cache: 'no-store',
       headers: { Range: `bytes=${from}-${to}` },
@@ -246,12 +259,15 @@
   async function probeSize(url) {
     for (const method of ['HEAD', 'GET']) {
       try {
-        const response = await fetch(url, { method, credentials: 'omit', cache: 'no-store' });
+        const response = await mendoFetch(url, { method, credentials: 'omit', cache: 'no-store' });
         const length = response.headers.get('content-length');
         const total = /^\d+$/.test(length || '') ? Number(length) : 0;
         if (method === 'GET') await response.body?.cancel().catch(() => {});
         if (response.ok && Number.isSafeInteger(total) && total > 0) return total;
-      } catch (error) { /* try the next method */ }
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        /* try the next method */
+      }
     }
     return 0;
   }
@@ -259,7 +275,7 @@
   async function sendChunk(jobId, track, bytes) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
-      const response = await chrome.runtime.sendMessage({
+      const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track, b64: encodeBase64(slice),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
@@ -269,9 +285,9 @@
   // ---- downloads -------------------------------------------------------------
 
   async function saveDirect(url, filename) {
-    const saved = await chrome.runtime.sendMessage({ t: 'mendosave-save', url, filename });
+    const saved = await mendoSend({ t: 'mendosave-save', url, filename });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
-    return saved.id;
+    return saved.collected ? saved : saved.id;
   }
 
   // The browser pulls a direct file itself, so its progress has to be asked
@@ -279,10 +295,15 @@
   // why this polls. Without it the page could only say "handed over" while the
   // real bar lived in Chrome's own download bubble.
   async function followBrowserDownload(id, notification) {
+    if (id?.collected) return;
     let misses = 0;
     for (;;) {
+      mendoCheck();
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id }).catch(() => null);
+      const state = await mendoSend({ t: 'mendosave-download-state', id }).catch((error) => {
+        if (error?.name === 'AbortError') throw error;
+        return null;
+      });
       if (!state?.ok) {
         // A download the browser has not registered yet is normal for a moment.
         if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
@@ -290,7 +311,7 @@
       }
       misses = 0;
       if (state.state === 'interrupted') {
-        throw new Error(`браузер прервал загрузку (${state.error || 'причина не указана'})`);
+        downloadInterrupted(state.error);
       }
       if (state.state === 'complete') {
         notification.stage('file', 1, 'done', 'Загрузка файла');
@@ -315,13 +336,13 @@
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const extension = audioFormat === 'mp3' ? '.mp3' : '.m4a';
     const filename = `VK - ${safeName(info.title)}${extension}`;
-    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+    const ensured = await mendoSend({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId });
+    const registration = await mendoSend({ t: 'mendosave-register-job', jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
-    const started = await chrome.runtime.sendMessage({
+    const started = await mendoSend({
       t: 'mendosave-begin',
       jobId,
       tabId: registration.tabId,
@@ -359,13 +380,13 @@
       }
       notification.stage('fetch', 1, 'done', 'Скачивание звука');
       notification.stage('process', null, 'active', 'Сборка файла');
-      const finalized = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId });
+      const finalized = await mendoSend({ t: 'mendosave-finalize', jobId });
       if (!finalized?.ok) throw new Error(finalized?.error || 'не удалось собрать файл');
       notification.stage('process', 1, 'done', 'Сборка файла');
       log('audio', `saved; bitrate=${track.bandwidth} bytes=${total} format=${audioFormat}`);
       return finalized.filename || filename;
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId }).catch(() => {});
+      await mendoSend({ t: 'mendosave-abort', jobId }).catch(() => {});
       throw error;
     } finally {
       chrome.runtime.onMessage.removeListener(onProgress);
@@ -485,12 +506,18 @@
   }
 
   async function runChoice(info, choice) {
-    if (busy) return;
+    const bundled = packageRunning();
+    mendoCheck();
+    if (busy) {
+      if (bundled) throw new Error('Другая загрузка уже выполняется');
+      return;
+    }
     busy = true;
     const notification = getToast();
     try {
+      let filename;
       if (choice.kind === 'video') {
-        const filename = `VK - ${safeName(info.title)} [${choice.rung.height}p].mp4`;
+        filename = `VK - ${safeName(info.title)} [${choice.rung.height}p].mp4`;
         notification.begin(`Скачиваю ${choice.rung.height}p…`, [{ id: 'file', label: 'Загрузка файла' }]);
         notification.stage('file', null, 'active', 'Передача браузеру');
         const downloadId = await saveDirect(choice.rung.url, filename);
@@ -499,17 +526,25 @@
         // while, so the panel follows the real transfer instead of claiming
         // "готово" against a downloads list that says otherwise.
         await followBrowserDownload(downloadId, notification);
+        filename = downloadId?.filename || filename;
         notification.set(`Готово: ${filename}`, 1);
       } else {
         notification.begin(`Скачиваю звук · ${choice.audioFormat === 'mp3' ? 'MP3' : 'M4A'}…`, [
           { id: 'fetch', label: 'Скачивание звука' },
           { id: 'process', label: 'Сборка файла' },
         ]);
-        const filename = await downloadAudio(info, choice.audioFormat, notification);
+        filename = await downloadAudio(info, choice.audioFormat, notification);
         notification.set(`Готово: ${filename}`, 1);
       }
       notification.hide(4000);
+      return filename;
     } catch (error) {
+      if (bundled) throw error;
+      if (error?.name === 'AbortError') {
+        notification.set('Загрузка отменена', 1);
+        notification.hide(4000);
+        return;
+      }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
       void reportError('vk-download', error, { kind: choice.kind });
@@ -521,6 +556,7 @@
   async function openMenu(button, event) {
     event.preventDefault();
     event.stopPropagation();
+    if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
     menu = createElement('div', 'mendosave-vk-menu');
     const heading = createElement('div', 'mendosave-vk-head', `MendoSave v${chrome.runtime.getManifest().version}`);
@@ -550,6 +586,13 @@
         item.addEventListener('click', () => { closeMenu(); void runChoice(info, choice); });
         menu.append(item);
       }
+      if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
+        title: info.title, close: closeMenu,
+        options: choices.map((choice, index) => ({
+          id: `vk-${index}`, label: choice.text,
+          run: () => runChoice(info, choice),
+        })),
+      });
       positionMenu(button);
     } catch (error) {
       if (!menu) return;

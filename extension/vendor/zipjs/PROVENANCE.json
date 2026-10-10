@@ -1,0 +1,41 @@
+{
+  "name": "@zip.js/zip.js",
+  "version": "2.20.0",
+  "repository": "https://github.com/gildas-lormeau/zip.js",
+  "tag": "v2.20.0",
+  "commit": "38508528fe00b094447d9122b7725ab412149e2d",
+  "license": "BSD-3-Clause",
+  "verifiedDate": "10-10-2026",
+  "files": [
+    {
+      "path": "zip-native.min.js",
+      "upstreamPath": "dist/zip-native.min.js",
+      "source": "https://raw.githubusercontent.com/gildas-lormeau/zip.js/38508528fe00b094447d9122b7725ab412149e2d/dist/zip-native.min.js",
+      "bytes": 171205,
+      "sha256": "312496a273c1782970ae68ccfe10ba9782766bf0a53d789512526aa92f7b62cb",
+      "gitBlob": "4cc958891057fad891e04ed4d844f392add2a37b",
+      "modified": false
+    },
+    {
+      "path": "LICENSE",
+      "upstreamPath": "LICENSE",
+      "source": "https://raw.githubusercontent.com/gildas-lormeau/zip.js/38508528fe00b094447d9122b7725ab412149e2d/LICENSE",
+      "bytes": 1501,
+      "sha256": "1b7ebc8d7889ed25491484ab2b102370742ca6c0b26650a0c62cc2269b579b84",
+      "gitBlob": "c4fd485e3d1084008e5dbdd540a05384525c9858",
+      "modified": false
+    }
+  ],
+  "runtime": {
+    "entry": "zip-native.min.js",
+    "useWebWorkers": false,
+    "level": 0,
+    "bufferedWrite": false,
+    "zip64": "automatic",
+    "source": "BlobReader",
+    "destination": "WritableStream",
+    "network": false,
+    "dynamicCodeExecution": false,
+    "wasm": false
+  }
+}

@@ -64,12 +64,15 @@
         "https://music.youtube.com/*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "settings.js",
         "menu.js",
         "media_plan.js",
         "content_ui.js"
       ],
       "css": [
+        "package_ui.css",
         "content_ui.css"
       ],
       "run_at": "document_idle",
@@ -82,9 +85,12 @@
         "https://rutube.sport/*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "rutube.js"
       ],
       "css": [
+        "package_ui.css",
         "rutube.css"
       ],
       "run_at": "document_idle",
@@ -97,10 +103,13 @@
         "https://clips.twitch.tv/*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "settings.js",
         "twitch_ui.js"
       ],
       "css": [
+        "package_ui.css",
         "twitch_ui.css"
       ],
       "run_at": "document_start",
@@ -112,9 +121,12 @@
         "https://coub.com/*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "coub.js"
       ],
       "css": [
+        "package_ui.css",
         "coub.css"
       ],
       "run_at": "document_idle",
@@ -129,9 +141,12 @@
         "https://vk.com/clip*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "vk.js"
       ],
       "css": [
+        "package_ui.css",
         "vk.css"
       ],
       "run_at": "document_idle",
@@ -142,9 +157,12 @@
         "https://zvuk.com/*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "zvuk.js"
       ],
       "css": [
+        "package_ui.css",
         "zvuk.css"
       ],
       "run_at": "document_idle",
@@ -156,9 +174,12 @@
         "https://www.tiktok.com/*"
       ],
       "js": [
+        "package_queue.js",
+        "package_ui.js",
         "tiktok.js"
       ],
       "css": [
+        "package_ui.css",
         "tiktok.css"
       ],
       "run_at": "document_idle",
