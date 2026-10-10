@@ -1,0 +1,11 @@
+{
+  "name": "mendosave-runtime-audit",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@ffmpeg/core": "0.12.6",
+    "@ffmpeg/ffmpeg": "0.12.10",
+    "@zip.js/zip.js": "2.20.0",
+    "mediabunny": "1.51.0"
+  }
+}

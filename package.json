@@ -11,6 +11,11 @@
     "lint:js": "eslint extension browser-hosts scripts tests eslint.config.cjs",
     "check:build": "node scripts/check-build.cjs",
     "check:outgoing": "node scripts/check-outgoing.cjs --all",
+    "check:dependencies": "node scripts/check-dependencies.cjs",
+    "audit:dependencies": "node scripts/check-dependencies.cjs --audit",
+    "check:extension": "node scripts/check-extension.cjs",
+    "prepare:release": "node scripts/release.cjs",
+    "verify": "node scripts/verify.cjs",
     "lint:extension": "web-ext lint --source-dir dist/firefox",
     "lint:extension:strict": "web-ext lint --source-dir dist/firefox --warnings-as-errors"
   },

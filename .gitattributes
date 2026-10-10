@@ -1,0 +1,8 @@
+* text=auto eol=lf
+extension/vendor/** -text
+*.png -text
+*.jpg -text
+*.webm -text
+*.wasm -text
+*.zip -text
+*.xpi -text

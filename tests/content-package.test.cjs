@@ -12,7 +12,8 @@ const declarations = tree.body[0].expression.callee.body.body;
 // bridge transport are replaced at their existing DOM/runtime boundary.
 const names = new Set(['addDownloadItems', 'addSubtitleItems', 'addRadioSelector', 'addFormatSelector',
   'openMenu', 'videoIdFromLocation', 'startDownload', 'tryDownloadViaSabr', 'downloadViaSabr',
-  'downloadSubtitles', 'encodeBase64', 'snapshotPackageOptions', 'mediaResponseError']);
+  'downloadSubtitles', 'encodeBase64', 'snapshotPackageOptions', 'mediaResponseError',
+  'buildTimedSubtitles', 'normalizeCues', 'formatCueTime']);
 const constants = new Set(['TRANSFER_CHUNK_SIZE', 'HAS_NATIVE_BASE64', 'SUBTITLE_OUTPUTS']);
 const flowSource = declarations.filter(node => (node.type === 'FunctionDeclaration' && names.has(node.id.name))
   || (node.type === 'VariableDeclaration' && node.declarations.some(item => constants.has(item.id.name))))
@@ -113,6 +114,21 @@ test('original codec snapshot remains original after the setting later changes t
   h.context.MendoPackageUI.running = true;
   await selected.run();
   assert.equal(h.messages.find(message => message.t === 'mendosave-begin').transcode, false);
+});
+
+test('SRT download preserves actual cue times instead of extending short lines into later cues', async () => {
+  const h = harness();
+  h.context.callHook = async () => ({ lang: 'en', cues: [
+    { start: 1, end: 1.25, text: 'A long spoken line in a short interval.' },
+    { start: 1.5, end: 1.75, text: 'Second short line.' },
+    { start: 2, end: 2.2, text: 'Last short line.' },
+  ] });
+  assert.equal(await h.context.downloadSubtitles(h.info, 'srt'), 'Fixture [en].srt');
+  const saved = h.messages.find((message) => message.t === 'mendosave-save');
+  const content = decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1));
+  assert.match(content, /00:00:01,000 --> 00:00:01,250/);
+  assert.match(content, /00:00:01,500 --> 00:00:01,750/);
+  assert.match(content, /00:00:02,000 --> 00:00:02,200/);
 });
 
 test('package rejects changed SPA material before any video, audio or subtitle operation', async (t) => {

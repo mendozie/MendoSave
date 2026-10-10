@@ -6,7 +6,7 @@
 
 MendoSave сохраняет медиа с поддерживаемых страниц и обрабатывает его внутри расширения. Основная среда - **Zen Browser на Windows**; дополнительная Chromium-сборка использует общий код. Медиабиблиотеки входят в расширение: сервер обработки и отдельная устанавливаемая программа не нужны.
 
-[Проверенные площадки](docs/SITE_MATRIX.md) · [Сборка и проверки](docs/DEVELOPMENT.md) · [План разработки](docs/ROADMAP.md)
+[Проверенные площадки](docs/SITE_MATRIX.md) · [Установка](docs/INSTALLATION.md) · [Сборка и проверки](docs/DEVELOPMENT.md) · [Приватность](PRIVACY.md) · [План разработки](docs/ROADMAP.md)
 
 ## Что умеет
 
@@ -25,11 +25,11 @@ MendoSave сохраняет медиа с поддерживаемых стра
 
 ## Текущее состояние
 
-**0.3.0 - версия в разработке; фазы 1-3 технически завершены.** Выбор места, последовательная очередь и ZIP проверены 10-10-2026: 269/269 tests, реальные Coub-файлы и SRT, отмена и восстановление. В Zen и Chromium завершены ZIP с 128 MiB диагностического payload; извлечённые bytes совпали. Проверки и ограничения записаны в [отчёте фазы 3](docs/PHASE3_VERIFICATION.md). [Репозиторий GitHub](https://github.com/mendozie/MendoSave) остаётся приватным. Подписанного XPI, выпуска в магазине и публичного релиза ещё нет.
+**0.3.0 - версия в разработке; идёт релизная подготовка.** Фазы 1-3 технически завершены. Локальный pipeline проходит 295 tests, проверки двух сборок, vendor hashes и архивов. В фазе 4 добавлены ограничения RAM, диагностики и MP4/AAC metadata, исправлен экспорт SRT, подготовлены воспроизводимая упаковка и Windows/Linux CI. Выбран порядок распространения: сначала подписанный файл для проверки в Zen, затем магазин AMO. [Репозиторий GitHub](https://github.com/mendozie/MendoSave) остаётся приватным. Подписанного XPI, выпуска в магазине и публичного релиза ещё нет.
 
-В отдельных тестовых профилях на Windows проверены YouTube watch/Music/Shorts, Rutube VOD/Shorts, VK Видео, Coub, Twitch Clips/VOD и короткая запись активного эфира, а также доступный аудиофрагмент Звука. Chromium regression покрывает YouTube, Rutube VOD, Coub, Twitch Clips и запись эфира. Для записи проверены остановка и закрытие вкладки в обоих браузерах, reload в Zen; закрытие источника сохраняет полученный фрагмент с пометкой `[частичная запись]`. Контрольный TikTok оказался недоступен в обоих браузерах; конечный файл для него не подтверждён. Это результат для конкретных материалов и условий. Версии браузеров, сценарии и ограничения находятся в [матрице площадок](docs/SITE_MATRIX.md) и [отчёте фазы 2](docs/PHASE2_VERIFICATION.md).
+В отдельных тестовых профилях на Windows проверены YouTube watch/Music/Shorts, Rutube VOD/Shorts, VK Видео, TikTok, Coub, Twitch Clips/VOD и запись активного эфира, а также доступный аудиофрагмент Звука. Chromium regression покрывает YouTube, Rutube VOD, TikTok, Coub, Twitch Clips и запись эфира. Для записи проверены остановка и закрытие вкладки в обоих браузерах, reload в Zen; закрытие источника сохраняет полученный фрагмент с пометкой `[частичная запись]`. В Zen трёхминутная запись Twitch дала полный декодируемый VP8/Opus-файл. Это результат для конкретных материалов и условий. Версии браузеров, сценарии и ограничения находятся в [матрице площадок](docs/SITE_MATRIX.md) и отчётах проверок.
 
-Поддержка других браузеров и ОС отдельно не подтверждена. Следующий этап - [релизные проверки](docs/ROADMAP.md#фаза-4---публичный-выпуск); текущая версия пока предназначена для разработки.
+Поддержка других браузеров и ОС отдельно не подтверждена. [Релизные проверки](docs/ROADMAP.md#фаза-4---публичный-выпуск) продолжаются; текущая версия пока предназначена для разработки.
 
 ## Сохранить файл или пакет
 
@@ -39,7 +39,7 @@ MendoSave сохраняет медиа с поддерживаемых стра
 
 «Отменить пакет» останавливает текущую и оставшиеся позиции. Уже сохранённые отдельные файлы остаются на диске. При отмене ZIP готовые входы можно сохранить через кнопку восстановления в popup. Это временное хранилище расширения: выгрузи нужные файлы до очистки его данных или тестового профиля. Автоматического продолжения незавершённой обработки после закрытия браузера нет.
 
-Текущий guard - 20 позиций и 1 GiB на итоговый ZIP; реально измерены 128 MiB payload. Работа на верхней границе зависит от ресурсов браузера и пока не подтверждена. Физический Save As проверен для всех четырёх типов в Zen; для Chromium проверены завершение и отмена browser download, chooser требует отдельного UI-прохода.
+Текущий guard - 20 позиций и 1 GiB на итоговый ZIP. В Chromium проверен диагностический payload 1 GiB минус 64 KiB: готовый ZIP извлечён, все bytes совпали. В Zen проверены 128 MiB; одинаковый код не заменяет отдельного измерения. Физический Save As проверен для всех четырёх типов в Zen; для Chromium проверены завершение и отмена browser download, chooser требует отдельного UI-прохода. Фактическое заполнение квоты диска не проверено.
 
 ## Собрать локально
 
@@ -47,17 +47,12 @@ MendoSave сохраняет медиа с поддерживаемых стра
 
 ```powershell
 npm.cmd ci --ignore-scripts
-npm.cmd test
-npm.cmd run lint:js
-npm.cmd run build
-npm.cmd run check:build
-npm.cmd run lint:extension
-npm.cmd run check:outgoing
+npm.cmd run verify
 ```
 
 Сборка создаёт `dist/firefox` и `dist/chromium` из общего исходника. Используй manifest из соответствующей папки `dist`: `extension/manifest.json` служит входом сборки. Списки файлов с SHA-256 находятся в `dist/firefox-hashes.json` и `dist/chromium-hashes.json`.
 
-`lint:js` проверяет собственный JavaScript; `lint:extension` проверяет Firefox-сборку через Mozilla `web-ext`. `check:build` проверяет состав, manifest, локальные ссылки и хеши сборок, а `check:outgoing` ищет распространённые секреты и приватные пути в исходящих текстовых файлах. Полные границы этих проверок описаны в [DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Pipeline выполняет tests, lint, свежий dependency audit, сборку, проверки manifests/CSP/inventories, `web-ext`, исходящих файлов и Git history. Затем создаёт неподписанные Firefox XPI, Chromium ZIP и source ZIP с hashes и проверкой извлечённых bytes. Поставляемые vendor files сохраняют точные bytes на Windows/Linux. Полные границы проверок описаны в [DEVELOPMENT.md](docs/DEVELOPMENT.md), состав candidate - в [DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 ## Установить для разработки
 
@@ -78,7 +73,7 @@ npm.cmd run check:outgoing
 
 Автоматические regression tests дополняются браузерными проверками готовых файлов. Прохождение tests и lint само по себе не доказывает совместимость с площадкой или полноту сохранённого медиа.
 
-`web-ext` сообщает три vendor warnings: два у FFmpeg bundle и dynamic import у zip.js. Strict lint с запретом warnings пока не проходит. Сохранённый `npm audit` от 09-10-2026 сообщает три high entries одной цепочки dev dependencies через `node-forge`; эти пакеты не входят в расширение. Подробности и принятый узкий override находятся в [DEVELOPMENT.md](docs/DEVELOPMENT.md#audit-dev-tooling). Свежий audit, полный security scan и релизная приёмка предусмотрены перед публичным выпуском.
+`web-ext` сообщает три vendor warnings: два у FFmpeg bundle и dynamic import у zip.js. Strict lint с запретом warnings не проходит; `check:extension` допускает только рассмотренные locations и hashes. Свежий `npm audit` от 10-10-2026 сообщает три high entries одной цепочки tooling через `node-forge`; эти пакеты не входят в расширение. Registry audit закреплённых runtime packages вернул 0 entries, но не покрывает все C/C++ декодеры FFmpeg. Подробности, достижимость и узкие исключения находятся в [DEPENDENCIES.md](docs/DEPENDENCIES.md). [Security scan](docs/SECURITY_REVIEW.md) завершён с частичным покрытием и без открытых замечаний в проверенной области; он не заменяет подпись и релизную приёмку.
 
 Для продолжения работы в Codex открой локальную папку проекта и начни с [AGENTS.md](AGENTS.md), [требований](docs/PROJECT_SPEC.md) и [текущего состояния roadmap](docs/ROADMAP.md#текущее-состояние).
 
@@ -87,6 +82,14 @@ npm.cmd run check:outgoing
 - [PROJECT_SPEC.md](docs/PROJECT_SPEC.md) - требования, принятый подход и критерии приёмки.
 - [ROADMAP.md](docs/ROADMAP.md) - этапы, текущий результат и оставшаяся работа.
 - [SITE_MATRIX.md](docs/SITE_MATRIX.md) - фактическая совместимость площадок.
+- [INSTALLATION.md](docs/INSTALLATION.md) - установка, обновление и удаление.
+- [DISTRIBUTION.md](docs/DISTRIBUTION.md) - состав candidate и выбранный порядок распространения.
+- [DEPENDENCIES.md](docs/DEPENDENCIES.md) - версии, источники, лицензии и dependency audit.
+- [PRIVACY.md](PRIVACY.md) - локальные данные, сеть и хранение.
+- [SECURITY.md](SECURITY.md) - границы доверия и сообщение о проблемах.
+- [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) - результат scan, исправления и фактическое покрытие.
+- [CHANGELOG.md](CHANGELOG.md) - изменения версий.
+- [PHASE4_VERIFICATION.md](docs/PHASE4_VERIFICATION.md) - релизные проверки, реальные файлы и оставшиеся ограничения.
 - [PHASE3_VERIFICATION.md](docs/PHASE3_VERIFICATION.md) - сохранение, пакеты, ZIP и измеренные границы версии 0.3.0.
 - [PHASE2_VERIFICATION.md](docs/PHASE2_VERIFICATION.md) - проверки версии 0.2.0 и их ограничения.
 - [DEVELOPMENT.md](docs/DEVELOPMENT.md) - инструменты, локальные команды и границы QA.

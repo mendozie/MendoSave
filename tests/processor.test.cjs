@@ -32,7 +32,13 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
   Object.assign(context, { File, AbortController, AbortSignal, DOMException, WritableStream, ReadableStream, crypto, MendoArchive: require('../extension/archive.js') });
   vm.runInContext(fs.readFileSync('extension/package_host.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/package_io.js', 'utf8'), context);
-  vm.runInContext(fs.readFileSync('extension/offscreen.js', 'utf8'), context);
+  let processorSource = fs.readFileSync('extension/offscreen.js', 'utf8');
+  // Scale only the fixed byte budgets to exercise the real message boundary
+  // without allocating hundreds of megabytes. No behavior is replaced.
+  if (State.smallStagingBudget) processorSource = processorSource
+    .replace('const STAGING_TRACK_MAX_BYTES = 750_000_000;', 'const STAGING_TRACK_MAX_BYTES = 3;')
+    .replace('const STAGING_MAX_BYTES = 1_500_000_000;', 'const STAGING_MAX_BYTES = 5;');
+  vm.runInContext(processorSource, context);
   const message = (payload, tabId = 7) => new Promise((resolve) => {
     const accepted = listener(payload, { id: chrome.runtime.id, frameId: 0,
       tab: { id: tabId, url: 'https://www.youtube.com/watch?v=fixture' } }, resolve);
@@ -41,6 +47,56 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
   });
   return { message, close() { for (const timer of timers) clearInterval(timer); } };
 }
+
+test('staging enforces per-track and aggregate byte budgets and releases rejected data', async () => {
+  const processor = processorContext(undefined, undefined, Date, undefined, { smallStagingBudget: true });
+  try {
+    assert.equal((await processor.message({ t: 'mendosave-stage-open', jobId: 'budget' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'budget', track: 'video', b64: 'AQID' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'budget', track: 'audio', b64: 'AQI=' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'budget', track: 'audio', b64: 'AQ==' }, 8)).ok, false);
+    const aggregate = await processor.message({ t: 'mendosave-stage', jobId: 'budget', track: 'audio', b64: 'AQ==' });
+    assert.equal(aggregate.ok, false);
+    assert.match(aggregate.error, /лимит/i);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'budget', track: 'audio', b64: 'AQ==' })).ok, false);
+    assert.equal((await processor.message({ t: 'mendosave-stage-open', jobId: 'next' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'next', track: 'audio', b64: 'AQID' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'next', track: 'audio', b64: 'AQ==' })).ok, false);
+  } finally { processor.close(); }
+});
+
+test('new staged chunks cannot extend the absolute staging lifetime', async () => {
+  let clock = Date.now();
+  class Clock extends Date { static now() { return clock; } }
+  const processor = processorContext(undefined, undefined, Clock);
+  try {
+    assert.equal((await processor.message({ t: 'mendosave-stage-open', jobId: 'expiry' })).ok, true);
+    clock += 19 * 60_000;
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'expiry', track: 'audio', b64: 'AQ==' })).ok, true);
+    clock += 2 * 60_000;
+    const expired = await processor.message({ t: 'mendosave-stage', jobId: 'expiry', track: 'audio', b64: 'AQ==' });
+    assert.equal(expired.ok, false);
+    assert.match(expired.error, /срок/i);
+    assert.equal((await processor.message({ t: 'mendosave-stage-open', jobId: 'fresh' })).ok, true);
+  } finally { processor.close(); }
+});
+
+test('receiving RAM budgets include adopted staging and video prefixes and free the failed job', async () => {
+  const processor = processorContext(undefined, undefined, Date, undefined, { smallStagingBudget: true });
+  try {
+    assert.equal((await processor.message({ t: 'mendosave-stage-open', jobId: 'adopt' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-stage', jobId: 'adopt', track: 'video', b64: 'AQID' })).ok, true);
+    const begun = await processor.message({ t: 'mendosave-begin', jobId: 'adopt', videoSize: 3, staged: { video: true } });
+    assert.equal(begun.ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-chunk', jobId: 'adopt', track: 'audio', b64: 'AQI=' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-chunk', jobId: 'adopt', track: 'video-prefix', b64: 'AQ==' })).ok, false);
+    assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'fresh' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-chunk', jobId: 'fresh', track: 'audio', b64: 'AQID' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-chunk', jobId: 'fresh', track: 'audio', b64: 'AQ==' })).ok, false);
+    assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'after' })).ok, true);
+    await processor.message({ t: 'mendosave-abort', jobId: 'after' });
+  } finally { processor.close(); }
+});
 
 test('a different tab cannot append data to an existing media job', async () => {
   const processor = processorContext();

@@ -5,6 +5,9 @@ if (typeof importScripts === 'function') importScripts('browser-host.js', 'platf
 const LOG_KEY = 'nova_logs';
 const LOG_LIMIT = 400;
 const LOG_ENTRY_LIMIT = 4_000;
+const LOG_TAG_LIMIT = 128;
+const LOG_RAW_TEXT_LIMIT = 65_536;
+const LOG_PENDING_LIMIT = 32;
 const ERROR_DETAIL_LIMIT = 50_000;
 const ERROR_LOG_FILENAME = 'MendoSave-debug.txt';
 const RELOAD_DOWNLOAD_PREFIX = 'nova_reload_download:';
@@ -36,6 +39,7 @@ const HANDLED_MESSAGES = new Set([
 const RECOVERY_KEY = 'nova_recovered';
 
 let logWrite = Promise.resolve();
+let pendingLogWrites = 0;
 let reloadGuardWrite = Promise.resolve();
 
 function truncate(value, limit) {
@@ -59,7 +63,7 @@ const LOG_GAP_MARKER_MS = 2 * 60_000;
 function formatLogLines(logs) {
   const lines = [];
   let previousTs = 0;
-  for (const entry of logs) {
+  for (const entry of logs.slice(-LOG_LIMIT).map(boundedLogEntry)) {
     const ts = Number(entry?.ts) || 0;
     if (previousTs && ts - previousTs >= LOG_GAP_MARKER_MS) {
       const minutes = Math.round((ts - previousTs) / 60_000);
@@ -74,15 +78,26 @@ function formatLogLines(logs) {
   return lines;
 }
 
+function boundedLogEntry(entry) {
+  // Clip legacy fields before sanitizing, so an oversized old tag does not
+  // require scanning its entire contents on every new write or export.
+  return { ...entry,
+    tag: MendoDiagnostics.text(String(entry?.tag || '').slice(0, LOG_TAG_LIMIT)).slice(0, LOG_TAG_LIMIT),
+    text: MendoDiagnostics.text(String(entry?.text || '').slice(0, LOG_ENTRY_LIMIT)).slice(0, LOG_ENTRY_LIMIT),
+  };
+}
+
 function appendLog(entry) {
-  entry = { ...entry, tag: MendoDiagnostics.text(entry.tag), text: MendoDiagnostics.text(entry.text) };
+  if (pendingLogWrites >= LOG_PENDING_LIMIT) return Promise.resolve(false);
+  entry = boundedLogEntry(entry);
+  pendingLogWrites += 1;
   // Serialize read-modify-write operations so concurrent content-script logs
   // cannot overwrite one another in chrome.storage.local.
   logWrite = logWrite
     .catch(() => {})
     .then(async () => {
       const stored = await chrome.storage.local.get(LOG_KEY);
-      const logs = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
+      const logs = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY].slice(-LOG_LIMIT).map(boundedLogEntry) : [];
       // A retried operation writes the same line over and over (primers,
       // refill attempts, bridge timeouts). Counting them keeps the fact and
       // its cadence while spending one slot of the ring instead of dozens.
@@ -94,7 +109,8 @@ function appendLog(entry) {
         logs.push(entry);
       }
       await chrome.storage.local.set({ [LOG_KEY]: logs.slice(-LOG_LIMIT) });
-    });
+      return true;
+    }).finally(() => { pendingLogWrites -= 1; });
   return logWrite;
 }
 
@@ -344,15 +360,20 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
-    case 'mendosave-log':
-      await appendLog({
+    case 'mendosave-log': {
+      if (typeof message.tag !== 'string' || message.tag.length > LOG_TAG_LIMIT
+        || typeof message.text !== 'string' || message.text.length > LOG_RAW_TEXT_LIMIT) {
+        return { ok: false, error: 'Некорректная или слишком большая запись диагностики.' };
+      }
+      const written = await appendLog({
         ts: Date.now(),
         tag: message.tag,
         text: truncate(message.text, LOG_ENTRY_LIMIT),
         tab: sender?.tab?.id,
         frame: sender?.frameId,
       });
-      return { ok: true };
+      return written ? { ok: true } : { ok: false, error: 'Очередь диагностики заполнена.' };
+    }
 
     case 'mendosave-error':
       return downloadErrorLog(message, sender);

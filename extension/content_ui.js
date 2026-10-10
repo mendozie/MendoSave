@@ -697,11 +697,10 @@
 
     return sorted.map((cue, index) => {
       const next = sorted[index + 1];
-      const minimumDuration = Math.max(1.2, Math.min(6, cue.text.length * 0.07));
-      if (next && next.start <= cue.start) next.start = cue.start + 0.5;
-      const end = next
-        ? Math.max(cue.start + minimumDuration, Math.min(next.start, cue.start + 5))
-        : Math.max(cue.start + minimumDuration, cue.end || cue.start + 4);
+      // Supplied times describe the selected caption track. Readability
+      // heuristics must not move starts or extend ends into later cues.
+      const end = cue.end > cue.start ? cue.end
+        : next?.start > cue.start ? next.start : cue.start + 4;
       return { ...cue, end };
     });
   }

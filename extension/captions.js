@@ -7,6 +7,14 @@ function readTranscript(document, duration = 0) {
     rows.push(...root.querySelectorAll('ytd-transcript-segment-renderer, ytm-transcript-segment-renderer, transcript-segment-view-model'));
     for (const element of root.querySelectorAll('*')) if (element.shadowRoot) roots.push(element.shadowRoot);
   }
+  // YouTube can retain legacy rows alongside its current view models. These
+  // are parallel representations of the same speech, not additional cues.
+  const modern = rows.filter((row) => row.localName === 'transcript-segment-view-model');
+  const legacy = rows.filter((row) => row.localName !== 'transcript-segment-view-model');
+  return readTranscriptRows(modern, duration) || readTranscriptRows(legacy, duration);
+}
+
+function readTranscriptRows(rows, duration) {
   const cues = [];
   const seen = new Set();
   for (const row of rows) {
