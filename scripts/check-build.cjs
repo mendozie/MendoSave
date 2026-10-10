@@ -62,6 +62,7 @@ function checkBuild(root, target, version) {
   if (manifest.update_url || manifest.externally_connectable || (manifest.permissions || []).includes('nativeMessaging')) errors.push('unapproved external integration');
   if ((manifest.host_permissions || []).some((host) => /github\.com|githubusercontent\.com/.test(host))) errors.push('upstream update host permission');
   if (target === 'firefox') {
+    if (manifest.browser_specific_settings?.gecko?.id !== 'mendosave@mendozie') errors.push('Firefox add-on identity mismatch');
     if (manifest.background?.service_worker || !manifest.background?.scripts?.length || !manifest.browser_specific_settings?.gecko?.id || (manifest.permissions || []).includes('offscreen')) errors.push('Firefox host contract mismatch');
   } else if (target === 'chromium' && (!manifest.background?.service_worker || manifest.background?.scripts)) errors.push('Chromium host contract mismatch');
   const csp = manifest.content_security_policy?.extension_pages || '';

@@ -18,7 +18,7 @@ for (const target of ['firefox', 'chromium']) {
     manifest.permissions = manifest.permissions.filter((permission) => permission !== 'offscreen');
     manifest.background = { scripts: ['platform.js', 'diagnostics.js', 'background.js'] };
     manifest.browser_specific_settings = { gecko: {
-      id: 'mendosave-dev@mendozie.local', strict_min_version: '157.0',
+      id: 'mendosave@mendozie', strict_min_version: '157.0',
       data_collection_permissions: { required: ['none'] },
     } };
     delete manifest.cross_origin_embedder_policy;
