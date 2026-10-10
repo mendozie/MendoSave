@@ -43,7 +43,7 @@ ESLint не является type checker. Межфайловая типизац
 
 В фазе 3 набор 0.3.0 содержал 269 tests. Фаза 4 добавляет проверки dependency policy, release archives, warning inventory, RAM budgets и диагностики. Новые public-boundary проверки охватывают ZIP/CRC/имена, очередь и принадлежность позиции, схемы Blob/source messages, квоту, отмену Save As, восстановление, откат при ошибке recovery index или открытия writable и foreign buffer view Gecko. Реальный браузерный harness запускает отдельные профили и использует WebDriver/CDP; диагностические binary fixtures проверяют передачу и упаковку, а не качество медиа. Финальные browser/file receipts и screenshots находятся в игнорируемой `.local/qa/phase3/`. Перед Git проверь изображения глазами: текстовый outgoing scanner их содержимое не анализирует.
 
-Локальная zip.js закреплена вместе с BSD-3-Clause и SHA-256 в `extension/vendor/zipjs/`; установка npm не загружает runtime ZIP library. Измеренный ZIP payload - 128 MiB в обоих браузерах; guard 1 GiB не является результатом нагрузочного испытания. Полные сценарии и ограничения находятся в [PHASE3_VERIFICATION.md](PHASE3_VERIFICATION.md).
+Локальная zip.js закреплена вместе с BSD-3-Clause и SHA-256 в `extension/vendor/zipjs/`; установка npm не загружает runtime ZIP library. Измеренный ZIP payload - 128 MiB в обоих браузерах и 1 GiB минус 64 KiB в Chromium; верхняя граница Zen не измерена. Полные сценарии и ограничения находятся в [PHASE3_VERIFICATION.md](PHASE3_VERIFICATION.md) и [PHASE4_VERIFICATION.md](PHASE4_VERIFICATION.md).
 
 ## Audit dev tooling
 

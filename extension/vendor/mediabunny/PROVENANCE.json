@@ -33,23 +33,51 @@
     "url": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm",
     "rollup": "4.62.2",
     "esbuild": "0.28.1",
-    "exactDownloadMatch": true,
-    "bitRebuildVerified": false
+    "exactDownloadMatch": false,
+    "bitRebuildVerified": false,
+    "originalSha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68",
+    "originalExactDownloadMatch": true,
+    "modification": "Deterministic parser bounds; scripts/patch-mediabunny.cjs; corresponding full MPL source files and PATCH.md are included",
+    "transformRoundTripVerified": true
   },
   "files": [
-    {
-      "path": "mediabunny.min.mjs",
-      "bytes": 644573,
-      "sha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68",
-      "modified": false,
-      "source": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm"
-    },
     {
       "path": "LICENSE",
       "bytes": 16726,
       "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
       "modified": false,
       "source": "npm:mediabunny@1.51.0/LICENSE"
+    },
+    {
+      "path": "mediabunny.min.mjs",
+      "bytes": 645512,
+      "sha256": "30dedb32345d3ccc025df5ed6af5c518f79eb589fcf757022ae2af0eaffaec58",
+      "modified": true,
+      "source": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm",
+      "originalSha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68"
+    },
+    {
+      "path": "isobmff-demuxer.ts",
+      "bytes": 119742,
+      "sha256": "af656b17eb4d39454517a1ccb1af8ef3de6240cef92f9f835eca60a502dc446c",
+      "modified": true,
+      "source": "npm:mediabunny@1.51.0/src/isobmff/isobmff-demuxer.ts",
+      "originalSha256": "bde5d41fdd4db0c4574be69e2e02f4732ade675366efaf030f52215a80eb76a8"
+    },
+    {
+      "path": "adts-reader.ts",
+      "bytes": 2440,
+      "sha256": "44ff9726200e59716fe14334e3b32123a634c9a8a542edb030a25b761bfccdff",
+      "modified": true,
+      "source": "npm:mediabunny@1.51.0/src/adts/adts-reader.ts",
+      "originalSha256": "b2269b6e2218c16715ad33470560428e4cbab5c8e7c8301edaee6ace5564c2d3"
+    },
+    {
+      "path": "PATCH.md",
+      "bytes": 2423,
+      "sha256": "515884322009b2f10525129c1122f4e0daa4d0844a6d3799e60a41823e30a076",
+      "modified": false,
+      "source": "MendoSave local transformation documentation"
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Зависимости и исходный код
 
-Проверено: 10-10-2026. Runtime bytes не изменены в этом срезе. Добавлены лицензии и provenance для уже поставляемых библиотек, отдельный lockfile для их advisory audit и проверки supply chain.
+Проверено: 10-10-2026. FFmpeg и zip.js сохраняют закреплённые runtime bytes. В Mediabunny добавлены локальные ограничения парсера; поставляются соответствующие изменённые MPL-исходники и воспроизводимое преобразование bundle. Добавлены лицензии, provenance, отдельный lockfile для advisory audit и проверки supply chain.
 
 ## Закреплённая поставка
 
@@ -8,7 +8,7 @@
 |---|---|---|
 | FFmpeg wrapper | `@ffmpeg/ffmpeg` 0.12.10; Git `e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4` | `ffmpeg.js` совпал с npm `dist/umd/ffmpeg.js`. Worker совпал после одной унаследованной замены default CDN URL на локальный `new URL("ffmpeg-core.js", self.location.href).href`. |
 | FFmpeg core | `@ffmpeg/core` 0.12.6; тот же Git commit | JS и WASM совпали byte-for-byte с official npm package. Browser `-version` и `-buildconf` подтвердили FFmpeg 5.1.4, Emscripten 3.1.40 и GPL build flags. |
-| Mediabunny | 1.51.0; Git `634186fd5e2dac946bf994a955680b85aceb7709` | Bundle совпал с versioned jsDelivr `+esm`. Все 66 файлов `package/src/` из npm совпали с закреплённым Git source archive. |
+| Mediabunny | 1.51.0; Git `634186fd5e2dac946bf994a955680b85aceb7709` | Исходный bundle совпал с versioned jsDelivr `+esm`; все 66 npm source files совпали с Git source archive. Поставляемый bundle содержит локальные parser guards; обратное преобразование и повторное применение дают точные исходные и изменённые hashes. |
 | zip.js | `@zip.js/zip.js` 2.20.0; Git `38508528fe00b094447d9122b7725ab412149e2d` | Native bundle совпал с npm package; npm `gitHead` совпал с ранее проверенным Git commit. |
 
 Все npm tarballs скачаны без выполнения lifecycle scripts и проверены по registry SHA-512 integrity. Отдельно сохранены SHA-256 tarballs. Конкретные source URLs, versions, file sizes, SHA-256 и преобразование worker записаны в `extension/vendor/{ffmpeg,mediabunny,zipjs}/PROVENANCE.json`. Hash фиксирует полученные bytes; он не является доказательством доверенности npm publisher или воспроизводимой компиляции.
@@ -32,7 +32,7 @@ npm run audit:dependencies
 
 ## Три предупреждения web-ext
 
-`web-ext` 10.7.0 на Firefox build: 0 errors, 3 warnings. Исполняемые vendor bytes сохранены; предупреждения не скрыты и CSP не ослаблена.
+`web-ext` 10.7.0 на Firefox build: 0 errors, 3 warnings. Bytes библиотек, к которым относятся эти предупреждения, сохранены; предупреждения видимы, CSP не ослаблена.
 
 | Warning | Источник и проверенная граница |
 |---|---|
@@ -47,7 +47,7 @@ npm run audit:dependencies
 Для JS зафиксированы следующие независимые источники:
 
 - [FFmpeg wrapper/build recipe](https://github.com/ffmpegwasm/ffmpeg.wasm/tree/e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4), [wrapper npm source distribution](https://registry.npmjs.org/@ffmpeg/ffmpeg/-/ffmpeg-0.12.10.tgz). Унаследованная модификация worker полностью описана в provenance; `ffmpeg.js` официальный.
-- [Mediabunny source commit](https://github.com/Vanilagy/mediabunny/tree/634186fd5e2dac946bf994a955680b85aceb7709), [npm archive с `src/` и MPL-2.0](https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz). Generated jsDelivr bundle использует Rollup 4.62.2 и esbuild 0.28.1 по своему header. Исходники подтверждены, повторная bit-for-bit сборка generated bundle не выполнялась. Runtime не загружает код с CDN.
+- [Mediabunny source commit](https://github.com/Vanilagy/mediabunny/tree/634186fd5e2dac946bf994a955680b85aceb7709), [npm archive с `src/` и MPL-2.0](https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz). Generated jsDelivr bundle использует Rollup 4.62.2 и esbuild 0.28.1 по своему header. Локальные изменения ограничивают MP4 metadata expansion, проверяют PCM chunk ranges и минимальную длину ADTS frames. Полные изменённые MPL-файлы поставляются рядом с bundle; [PATCH.md](../extension/vendor/mediabunny/PATCH.md) описывает замену файлов в upstream source tree и детерминированное преобразование. Tests проверяют hashes обратного/прямого преобразования и настоящий `Input` parser. Повторная bit-for-bit компиляция generated bundle из TypeScript не выполнялась. Runtime не загружает код с CDN.
 - [zip.js source commit](https://github.com/gildas-lormeau/zip.js/tree/38508528fe00b094447d9122b7725ab412149e2d), [npm archive с `lib/`, license и native bundle](https://registry.npmjs.org/@zip.js/zip.js/-/zip.js-2.20.0.tgz). Bundle bytes воспроизводимо получены из versioned npm archive; компиляция из `lib/` не повторялась.
 
 ## Принятая сборка
