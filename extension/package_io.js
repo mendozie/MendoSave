@@ -130,7 +130,7 @@
       clearTransferTimer(entry);
       entry.controller.abort();
       await entry.chain.catch(() => {});
-      if (transfers.get(id) === entry && entry.writer) { await cleanup(entry); transfers.delete(id); }
+      try { if (transfers.get(id) === entry && entry.writer) { await cleanup(entry); transfers.delete(id); } } finally { effects.onActivity?.(); }
     }
     function metadata(message) {
       if (typeof message.filename !== 'string' || !message.filename.trim() || message.filename.length > 250
@@ -227,7 +227,7 @@
       await Promise.allSettled([...transfers.entries()].filter(([, entry]) => entry.packageId === message.packageId)
         .map(async ([id, entry]) => {
           await entry.chain.catch(() => {});
-          if (transfers.get(id) === entry && entry.writer) { await cleanup(entry); transfers.delete(id); }
+          try { if (transfers.get(id) === entry && entry.writer) { await cleanup(entry); transfers.delete(id); } } finally { effects.onActivity?.(); }
         }));
       return result;
     }
@@ -246,6 +246,10 @@
       return url.href;
     }
     async function sourceMessage(message, sender) {
+      if (sender?.url) {
+        try { const parsed = new URL(sender.url); parsed.hash = ''; sender = { ...sender, url: parsed.href }; }
+        catch { throw new Error('Invalid background URL'); }
+      }
       if (sender?.id !== effects.runtimeId || sender.tab
         || (sender.url && sender.url !== effects.getURL('_generated_background_page.html')
           && sender.url !== effects.getURL('background.js'))) throw new Error('Источник доступен только background');
@@ -334,7 +338,7 @@
       } catch { port.disconnect?.(); return false; }
       port.onDisconnect.addListener(() => {
         if (host.active !== p) return Promise.resolve();
-        return cancelPackage(currentOwner, { packageId: p.id }).catch(() => {});
+        return cancelPackage(currentOwner, { packageId: p.id }).catch(() => {}).finally(() => effects.onActivity?.());
       });
       return true;
     }

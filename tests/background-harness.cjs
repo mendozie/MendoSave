@@ -30,6 +30,7 @@ function browserContext(overrides = {}) {
     navigator: { userAgent: 'test' },
     fetch: async (url) => { network.push(url); throw new Error('unexpected network'); },
   });
+  vm.runInContext(fs.readFileSync('browser-hosts/firefox.js', 'utf8'), context);
   if (fs.existsSync('extension/platform.js')) vm.runInContext(fs.readFileSync('extension/platform.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/diagnostics.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/background.js', 'utf8'), context);
@@ -38,7 +39,11 @@ function browserContext(overrides = {}) {
       const accepted = listeners.message(payload, sender, resolve);
       if (!accepted) resolve(undefined);
     });
-  return { listeners, chrome, data, network, message };
+  return { listeners, chrome, data, network, message, processorSender() {
+    const url = chrome.runtime.getURL('offscreen.html') + '#mendosave-host=fixture';
+    context.MendoProcessorHost.instance = { id: 'fixture', url, ready: true, active: true, handle: { owned: false } };
+    return { id: chrome.runtime.id, url };
+  } };
 }
 
 module.exports = { browserContext };

@@ -15,11 +15,54 @@
 //     is streamed to the offscreen document slice by slice, so a two-hour
 //     audiobook never exists in the page in one piece.
 (() => {
-  const mendoSend = (message) => globalThis.MendoPackageUI
-    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
-  const mendoFetch = (url, options) => globalThis.MendoPackageUI
-    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
-  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  let processorTask = null;
+  const mendoSend = (message, task) => {
+    if (task?.error && !/abort|cancel|mendosave-log|mendosave-error/.test(message.t)) {
+      return Promise.reject(task.error);
+    }
+    if (task?.lease) return task.lease.send(message);
+    return globalThis.MendoPackageUI
+      ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  };
+  const mendoFetch = async (url, options = {}) => {
+    const task = processorTask;
+    if (task?.error) throw task.error;
+    if (task) options = { ...options, signal: options.signal
+      ? AbortSignal.any([options.signal, task.controller.signal]) : task.controller.signal };
+    try {
+      const response = await (globalThis.MendoPackageUI
+        ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options));
+      if (task?.error) throw task.error;
+      return response;
+    } catch (error) { throw task?.error || error; }
+  };
+  const mendoCheck = () => {
+    if (processorTask?.error) throw processorTask.error;
+    globalThis.MendoPackageUI?.check();
+  };
+  async function reserveProcessor() {
+    const task = { controller: new AbortController(), error: null, lease: null };
+    processorTask = task;
+    try {
+      task.lease = await globalThis.MendoPackageUI.acquireProcessor({
+        signal: globalThis.MendoPackageUI.signal || task.controller.signal,
+        onDisconnect(error) {
+          if (processorTask !== task) return;
+          task.error = error;
+          task.controller.abort();
+        },
+      });
+      mendoCheck();
+      return task;
+    } catch (error) {
+      releaseProcessor(task);
+      throw error;
+    }
+  }
+  function releaseProcessor(task) {
+    task?.lease?.release();
+    if (processorTask === task) processorTask = null;
+  }
   const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
   function downloadInterrupted(code) {
     if (globalThis.MendoPackageUI) globalThis.MendoPackageUI.interruption(code);
@@ -265,6 +308,7 @@
         if (method === 'GET') await response.body?.cancel().catch(() => {});
         if (response.ok && Number.isSafeInteger(total) && total > 0) return total;
       } catch (error) {
+        mendoCheck();
         if (error?.name === 'AbortError') throw error;
         /* try the next method */
       }
@@ -272,12 +316,12 @@
     return 0;
   }
 
-  async function sendChunk(jobId, track, bytes) {
+  async function sendChunk(jobId, track, bytes, producer) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track, b64: encodeBase64(slice),
-      });
+      }, producer);
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
     }
   }
@@ -301,6 +345,7 @@
       mendoCheck();
       await new Promise((resolve) => setTimeout(resolve, 700));
       const state = await mendoSend({ t: 'mendosave-download-state', id }).catch((error) => {
+        mendoCheck();
         if (error?.name === 'AbortError') throw error;
         return null;
       });
@@ -326,7 +371,7 @@
     }
   }
 
-  async function downloadAudio(info, audioFormat, notification) {
+  async function downloadAudio(info, audioFormat, notification, producer) {
     notification.stage('fetch', null, 'active', 'Читаю размер дорожки');
     const track = await loadAudioTrack(info.files);
     const total = await probeSize(track.url);
@@ -336,28 +381,6 @@
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const extension = audioFormat === 'mp3' ? '.mp3' : '.m4a';
     const filename = `VK - ${safeName(info.title)}${extension}`;
-    const ensured = await mendoSend({ t: 'mendosave-ensure' });
-    if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await mendoSend({ t: 'mendosave-register-job', jobId });
-    if (!registration?.ok || !Number.isInteger(registration.tabId)) {
-      throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
-    }
-    const started = await mendoSend({
-      t: 'mendosave-begin',
-      jobId,
-      tabId: registration.tabId,
-      filename,
-      // Audio-only job: the same shape the YouTube MP3 path uses.
-      format: 'mp3',
-      audioFormat,
-      audioQuality: 'best',
-      audioMime: 'audio/mp4',
-      audioSize: total,
-      videoSize: 0,
-      duration: info.duration,
-    });
-    if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
-
     // The mux stage has no number of its own until offscreen reports one, and a
     // long MP3 encode is exactly when the user needs to see something moving.
     const onProgress = (message) => {
@@ -368,25 +391,47 @@
     };
     chrome.runtime.onMessage.addListener(onProgress);
     try {
+      const ensured = await mendoSend({ t: 'mendosave-ensure' }, producer);
+      if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
+      const registration = await mendoSend({ t: 'mendosave-register-job', jobId }, producer);
+      if (!registration?.ok || !Number.isInteger(registration.tabId)) {
+        throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
+      }
+      const started = await mendoSend({
+        t: 'mendosave-begin',
+        jobId,
+        tabId: registration.tabId,
+        filename,
+        // Audio-only job: the same shape the YouTube MP3 path uses.
+        format: 'mp3',
+        audioFormat,
+        audioQuality: 'best',
+        audioMime: 'audio/mp4',
+        audioSize: total,
+        videoSize: 0,
+        duration: info.duration,
+      }, producer);
+      if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
+
       // Slice by slice, so the page holds 8 MB at a time instead of the file.
       let at = 0;
       while (at < total) {
         const end = Math.min(total - 1, at + SLICE_BYTES - 1);
         const bytes = await fetchRange(track.url, at, end, total);
         if (!bytes.length) throw new Error('сервер вернул пустой диапазон');
-        await sendChunk(jobId, 'audio', bytes);
+        await sendChunk(jobId, 'audio', bytes, producer);
         at += bytes.length;
         notification.stage('fetch', at / total, 'active', 'Скачивание звука');
       }
       notification.stage('fetch', 1, 'done', 'Скачивание звука');
       notification.stage('process', null, 'active', 'Сборка файла');
-      const finalized = await mendoSend({ t: 'mendosave-finalize', jobId });
+      const finalized = await mendoSend({ t: 'mendosave-finalize', jobId }, producer);
       if (!finalized?.ok) throw new Error(finalized?.error || 'не удалось собрать файл');
       notification.stage('process', 1, 'done', 'Сборка файла');
       log('audio', `saved; bitrate=${track.bandwidth} bytes=${total} format=${audioFormat}`);
       return finalized.filename || filename;
     } catch (error) {
-      await mendoSend({ t: 'mendosave-abort', jobId }).catch(() => {});
+      await mendoSend({ t: 'mendosave-abort', jobId }, producer).catch(() => {});
       throw error;
     } finally {
       chrome.runtime.onMessage.removeListener(onProgress);
@@ -400,8 +445,10 @@
   // an indeterminate stripe rather than a frozen empty bar — during a remux
   // there is nothing to count until offscreen reports back.
   let toastTimer;
+  let toastRevision = 0;
 
   function getToast() {
+    const revision = ++toastRevision;
     if (!toastBox) {
       toastBox = createElement('div', 'mendosave-vk-toast');
       const text = createElement('div', 'mendosave-vk-toast-text');
@@ -420,6 +467,7 @@
     };
     return {
       set(message, fraction) {
+        if (revision !== toastRevision) return;
         show();
         toastBox._text.textContent = message;
         toastBox._stages.replaceChildren();
@@ -428,6 +476,7 @@
         toastBox._bar.querySelector('i').style.width = `${Math.max(0, Math.min(1, Number(fraction) || 0)) * 100}%`;
       },
       begin(message, definitions) {
+        if (revision !== toastRevision) return;
         show();
         toastBox._text.textContent = message;
         toastBox._bar.hidden = true;
@@ -446,6 +495,7 @@
         toastBox._stages.classList.add('show');
       },
       stage(id, fraction, state = 'active', label) {
+        if (revision !== toastRevision) return;
         const row = toastBox?._stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
         row.className = `mendosave-vk-stage ${state}`;
@@ -464,8 +514,11 @@
         }
       },
       hide(delay) {
+        if (revision !== toastRevision) return;
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => toastBox?.classList.remove('show'), delay || 0);
+        toastTimer = setTimeout(() => {
+          if (revision === toastRevision) toastBox?.classList.remove('show');
+        }, delay || 0);
       },
     };
   }
@@ -514,7 +567,9 @@
     }
     busy = true;
     const notification = getToast();
+    let producer;
     try {
+      if (choice.kind !== 'video') producer = await reserveProcessor();
       let filename;
       if (choice.kind === 'video') {
         filename = `VK - ${safeName(info.title)} [${choice.rung.height}p].mp4`;
@@ -533,22 +588,24 @@
           { id: 'fetch', label: 'Скачивание звука' },
           { id: 'process', label: 'Сборка файла' },
         ]);
-        filename = await downloadAudio(info, choice.audioFormat, notification);
+        filename = await downloadAudio(info, choice.audioFormat, notification, producer);
         notification.set(`Готово: ${filename}`, 1);
       }
       notification.hide(4000);
       return filename;
     } catch (error) {
-      if (bundled) throw error;
       if (error?.name === 'AbortError') {
         notification.set('Загрузка отменена', 1);
         notification.hide(4000);
+        if (bundled) throw error;
         return;
       }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
+      if (bundled) throw error;
       void reportError('vk-download', error, { kind: choice.kind });
     } finally {
+      releaseProcessor(producer);
       busy = false;
     }
   }
@@ -587,7 +644,7 @@
         menu.append(item);
       }
       if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
-        title: info.title, close: closeMenu,
+        title: info.title, source: `vk:${info.oid}_${info.id}`, close: closeMenu,
         options: choices.map((choice, index) => ({
           id: `vk-${index}`, label: choice.text,
           run: () => runChoice(info, choice),

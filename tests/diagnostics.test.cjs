@@ -52,7 +52,7 @@ test('a diagnostic export removes credentials and signed links from every report
   browser.data.nvs_playlist_queue = { url: 'https://example.org/watch?token=queue-secret', cookie: 'queue-cookie' };
   browser.chrome.tabs.create = async () => ({ id: 19 });
   browser.chrome.runtime.sendMessage = async (message) => {
-    if (message.t === 'mendosave-host-probe') return { ok: true };
+    if (message.t === 'mendosave-host-probe') return { ok: true, instanceId: message.instanceId };
     assert.equal(message.t, 'mendosave-save-text');
     report = message.text;
     return { ok: true, id: 42 };

@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const espree = require('espree');
 const { parseHTML } = require('linkedom');
+const { producerPorts } = require('./producer-port-harness.cjs');
+const { create: createPackageUI } = require('../extension/package_ui.js');
 
 const source = fs.readFileSync('extension/content_ui.js', 'utf8');
 const tree = espree.parse(source, { ecmaVersion: 'latest', range: true });
@@ -26,13 +28,14 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
   const settings = { transcode: false };
   let captureSaves = 0, picker;
   const toast = { set: (text) => notifications.push(text), hide() {}, setCancel() {}, beginStages() {}, stage() {} };
-  const context = vm.createContext({ document, window, URL, Uint8Array, crypto, btoa,
+  const producerUI = createPackageUI({ runtime: { connect: producerPorts().connect } });
+  const context = vm.createContext({ document, window, URL, Uint8Array, crypto, btoa, AbortController,
     location: new URL('https://www.youtube.com/watch?v=fixtureVideo'),
     IS_MUSIC: false, IS_SHORTS: () => false, BUTTON_ID: 'download-button',
     console: { warn() {}, error() {} }, setTimeout() {},
     MendoMediaPlan: require('../extension/media_plan.js'),
     MendoMenu: { bind() {}, place() {} },
-    MendoPackageUI: { running: false, signal: null, add(_menu, value) { picker = value; } },
+    MendoPackageUI: { running: false, signal: null, acquireProcessor: options => producerUI.acquireProcessor(options), add(_menu, value) { picker = value; } },
     chrome: { storage: { local: {
       async get() { return { ...settings }; }, async set(value) { Object.assign(settings, value); },
     } }, runtime: { onMessage: { addListener() {}, removeListener() {} } } },
@@ -131,6 +134,65 @@ test('SRT download preserves actual cue times instead of extending short lines i
   assert.match(content, /00:00:02,000 --> 00:00:02,200/);
 });
 
+test('standalone SRT and timed TXT pass real shared-helper admission through the background save route', async t => {
+  for (const format of ['srt', 'timed-txt']) await t.test(format, async () => {
+    const h = harness(), producers = producerPorts(), packets = [];
+    h.context.MendoPackageUI = createPackageUI({ runtime: {
+      connect: producers.connect,
+      async sendMessage(message) {
+        packets.push(message);
+        assert.equal(message.t, 'mendosave-save', 'background owns forwarding text to its selected host');
+        assert.equal(message.instanceId, undefined);
+        assert.equal(message.packageId, undefined);
+        return { ok: true };
+      },
+    } });
+    h.context.callHook = async () => ({ lang: 'ru', timedText: '[00:01.125] Привет & <literal> 😀\n',
+      cues: [{ start: 1.125, end: 1.75, text: 'Привет & <literal> 😀' }] });
+    const transportNames = new Set(['sendRuntimeMessage', 'sendWorkerMessage', 'isWorkerAsleep']);
+    const transport = declarations.filter(node => (node.type === 'FunctionDeclaration' && transportNames.has(node.id.name))
+      || (node.type === 'VariableDeclaration' && node.declarations.some(item => item.id.name === 'WORKER_RETRY_DELAYS')))
+      .map(node => source.slice(...node.range)).join('\n');
+    vm.runInContext(transport, h.context);
+    assert.equal(await h.context.downloadSubtitles(h.info, format), format === 'srt' ? 'Fixture [ru].srt' : 'Fixture [ru] [timed].txt');
+    assert.equal(producers.ports.length, 0, 'standalone save uses background withHost admission rather than a direct processor command');
+    assert.equal(packets.length, 1);
+    const content = decodeURIComponent(packets[0].url.slice(packets[0].url.indexOf(',') + 1));
+    assert.equal(content, format === 'srt' ? '\uFEFF1\r\n00:00:01,125 --> 00:00:01,750\r\nПривет & <literal> 😀\r\n'
+      : '\uFEFF[00:01.125] Привет & <literal> 😀\n');
+    assert.match(h.notifications.at(-1), /Готово:/);
+  });
+});
+
+test('timed TXT is a separate package choice and saves actual timestamps and chapters as literal UTF-8', async () => {
+  const h = harness();
+  await h.openMenu();
+  const selected = h.snapshot().find(option => option.id === 'sub-timed-txt');
+  assert.ok(selected, 'the third format is additive');
+  assert.match(selected.label, /Расшифровка с таймкодами и главами/);
+  assert.match(h.snapshot().find(option => option.id === 'sub-txt').label, /без таймкодов/);
+  assert.match(h.snapshot().find(option => option.id === 'sub-srt').label, /с таймкодами/);
+  const literal = '[00:00] Начало\n\n[00:01.125] Привет & <literal> 😀\n';
+  h.context.callHook = async (command, payload) => {
+    assert.equal(command, 'subtitles'); assert.equal(payload.format, 'timed-txt');
+    return { lang: 'ru', timedText: literal, cues: [{ start: 1.125, end: 2, text: 'Привет & <literal> 😀' }] };
+  };
+  assert.equal(await selected.run(), 'Fixture [ru] [timed].txt');
+  const saved = h.messages.find(message => message.t === 'mendosave-save');
+  assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF' + literal);
+  assert.match(saved.filename, /\[timed\]\.txt$/);
+});
+
+test('timed TXT reports unavailable chapters after saving actual timestamped text without inventing chapters', async () => {
+  const h = harness();
+  h.context.callHook = async () => ({ lang: 'ru', timedText: '[00:01] Реальная реплика\n',
+    chaptersUnavailable: true, cues: [{ start: 1, end: 2, text: 'Реальная реплика' }] });
+  assert.equal(await h.context.downloadSubtitles(h.info, 'timed-txt'), 'Fixture [ru] [timed].txt');
+  assert.match(h.notifications.at(-1), /Главы на странице недоступны/);
+  const saved = h.messages.find(message => message.t === 'mendosave-save');
+  assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF[00:01] Реальная реплика\n');
+});
+
 test('package rejects changed SPA material before any video, audio or subtitle operation', async (t) => {
   for (const id of ['video-720', 'audio-mp3', 'sub-txt']) await t.test(id, async () => {
     const h = harness();
@@ -144,7 +206,7 @@ test('package rejects changed SPA material before any video, audio or subtitle o
   });
 });
 
-test('SABR user cancellation never falls back to capture or a second save with the shared module absent', async (t) => {
+test('SABR user cancellation never falls back to capture or a second save with the shared send shortcut absent', async (t) => {
   const variants = {
     AbortError() { const error = new Error('dialog canceled'); error.name = 'AbortError'; throw error; },
     cancelledFlag() { const error = new Error('dialog canceled'); error.cancelled = true; throw error; },
@@ -153,7 +215,7 @@ test('SABR user cancellation never falls back to capture or a second save with t
   };
   for (const [name, finalize] of Object.entries(variants)) await t.test(name, async () => {
     const h = harness(finalize);
-    delete h.context.MendoPackageUI;
+    delete h.context.MendoPackageUI.send;
     assert.equal(await h.context.startDownload({ format: 'mp4', height: 720 }, h.info), false);
     assert.equal(h.captureSaves(), 0, 'cancellation is terminal rather than a route refusal');
     assert.equal(h.hooks.includes('download'), false);
@@ -164,15 +226,15 @@ test('SABR user cancellation never falls back to capture or a second save with t
 
 test('ordinary SABR refusal retains the existing capture fallback', async () => {
   const h = harness(() => ({ ok: false, error: 'unsupported media' }));
-  delete h.context.MendoPackageUI;
+  delete h.context.MendoPackageUI.send;
   assert.equal(await h.context.startDownload({ format: 'mp4', height: 720 }, h.info), true);
   assert.equal(h.captureSaves(), 1);
   assert.ok(h.hooks.includes('download'));
 });
 
-test('capture response preserves native save cancellation when the shared module is absent', async () => {
+test('capture response preserves native save cancellation when the shared send shortcut is absent', async () => {
   const h = harness(() => ({ ok: false, error: 'unsupported media' }));
-  delete h.context.MendoPackageUI;
+  delete h.context.MendoPackageUI.send;
   h.context.muxViaOffscreen = async () => ({ ok: false, cancelled: true, error: 'dialog canceled' });
   assert.equal(await h.context.startDownload({ format: 'mp4', height: 720 }, h.info), false);
   assert.ok(h.hooks.includes('download'));
@@ -180,9 +242,9 @@ test('capture response preserves native save cancellation when the shared module
   assert.equal(h.notifications.some(text => text.startsWith('Готово:')), false);
 });
 
-test('subtitle response preserves native save cancellation when the shared module is absent', async () => {
+test('subtitle response preserves native save cancellation when the shared send shortcut is absent', async () => {
   const h = harness();
-  delete h.context.MendoPackageUI;
+  delete h.context.MendoPackageUI.send;
   h.context.sendWorkerMessage = async (message) => {
     h.messages.push(message);
     return { ok: false, cancelled: true, error: 'dialog canceled' };

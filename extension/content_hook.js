@@ -338,11 +338,41 @@
     }
     return `${u8.length}:${hash >>> 0}`;
   }
-  function rememberTimedText(text) {
+  function snapshotTimedCaptionSource() {
+    try { return { videoId: vidId(), playerVideoId: playerResponse()?.videoDetails?.videoId || null }; }
+    catch (e) { return null; }
+  }
+
+  function isTimedCaptionRequest(rawUrl) {
+    if (typeof rawUrl !== 'string' || rawUrl.length > 8192 || !rawUrl.includes('timedtext')) return false;
+    try {
+      const url = new URL(rawUrl, location.href);
+      return url.protocol === 'https:' && ['youtube.com', 'www.youtube.com', 'music.youtube.com'].includes(url.hostname) && url.pathname === '/api/timedtext';
+    } catch (e) { return false; }
+  }
+
+  function rememberTimedText(text, rawUrl, source, ok = false) {
     if (!text || text.length <= 5) return;
     const captured = window.__mendosave_captured_timedtext ||= [];
     captured.push(text);
     if (captured.length > 20) captured.splice(0, captured.length - 20);
+    // Preserve the legacy strings; strict TXT uses this separate bounded
+    // response receipt, including the material captured at request start.
+    if (!ok || typeof text !== 'string' || text.length > 4 * 1024 * 1024
+      || typeof rawUrl !== 'string' || rawUrl.length > 8192 || !source?.videoId
+      || source.playerVideoId !== source.videoId || vidId() !== source.videoId
+      || playerResponse()?.videoDetails?.videoId !== source.videoId) return;
+    try {
+      const url = new URL(rawUrl, location.href);
+      if (url.protocol !== 'https:' || !['youtube.com', 'www.youtube.com', 'music.youtube.com'].includes(url.hostname)
+        || url.pathname !== '/api/timedtext' || url.searchParams.get('v') !== source.videoId) return;
+      const entries = window.__mendosave_captured_timedtext_sources ||= [];
+      entries.push({ url: url.href, text, videoId: source.videoId, playerVideoId: source.playerVideoId });
+      let bytes = entries.reduce((sum, entry) => sum + (entry.text.length + entry.url.length) * 2, 0);
+      while (entries.length > 20 || bytes > 8 * 1024 * 1024) {
+        const removed = entries.shift(); bytes -= (removed.text.length + removed.url.length) * 2;
+      }
+    } catch (e) {}
   }
 
   function rememberTranscriptParams(text) {
@@ -402,10 +432,10 @@
     } catch (e) {}
   }
 
-  async function inspectFetchResponse(response, url) {
+  async function inspectFetchResponse(response, url, captionSource) {
     try {
-      if (/youtube\.com\/api\/timedtext/.test(url)) {
-        rememberTimedText(await response.clone().text());
+      if (isTimedCaptionRequest(url)) {
+        rememberTimedText(await response.clone().text(), response.url || url, captionSource, response.ok);
       } else if (/youtubei\/v1\/(?:next|engage)/.test(url)) {
         rememberTranscriptParams(await response.clone().text());
       }
@@ -416,10 +446,11 @@
   if (OrigFetch) {
     window.fetch = function (input, init) {
       const url = (typeof input === 'string') ? input : (input && input.url) || '';
+      const captionSource = isTimedCaptionRequest(url) ? snapshotTimedCaptionSource() : null;
       rememberObservedMediaFormat(url);
       rememberSabrRequest(url, input, init);
       return OrigFetch(input, init).then((response) => {
-        inspectFetchResponse(response, url);
+        inspectFetchResponse(response, url, captionSource);
         return response;
       });
     };
@@ -427,6 +458,7 @@
 
   try {
     const xhrUrl = Symbol('mendosaveUrl');
+    const xhrCaptionSource = Symbol('mendosaveCaptionSource');
     const xhrWrapped = Symbol('mendosaveWrapped');
     const OrigXHRSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function () {
@@ -434,8 +466,8 @@
         this.addEventListener('load', function () {
           const url = this[xhrUrl] || this.responseURL || '';
           try {
-            if (/youtube\.com\/api\/timedtext/.test(url)) {
-              rememberTimedText(this.responseText);
+            if (isTimedCaptionRequest(url)) {
+              rememberTimedText(this.responseText, this.responseURL || url, this[xhrCaptionSource], this.status >= 200 && this.status < 300);
             } else if (/youtubei\/v1\/(?:next|engage)/.test(url)) {
               rememberTranscriptParams(this.responseText);
             }
@@ -448,6 +480,7 @@
     const OrigXHROpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (_method, url) {
       this[xhrUrl] = String(url || '');
+      this[xhrCaptionSource] = isTimedCaptionRequest(this[xhrUrl]) ? snapshotTimedCaptionSource() : null;
       rememberObservedMediaFormat(this[xhrUrl]);
       return OrigXHROpen.apply(this, arguments);
     };
@@ -645,6 +678,17 @@
   // created after document_start and relay MSE appends back to this realm.
   const OrigWorker = window.Worker;
   if (typeof OrigWorker === 'function' && typeof URL?.createObjectURL === 'function') {
+    const workerCleanup = new WeakMap();
+    const originalTerminate = OrigWorker.prototype.terminate;
+    if (typeof originalTerminate === 'function') {
+      OrigWorker.prototype.terminate = function () {
+        // Call native first: incompatible receivers must still throw, and its
+        // return value/arguments remain unchanged, including prototype calls.
+        const result = originalTerminate.apply(this, arguments);
+        workerCleanup.get(this)?.();
+        return result;
+      };
+    }
     const wrappedWorkerBlobUrls = new Set();
     const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
     URL.revokeObjectURL = function (objectUrl) {
@@ -698,13 +742,26 @@
               };
             }
           } catch (e) {}
+          const mendosaveBuffers = new Map();
+          const mendosaveBufferSources = new WeakMap();
+          const mendosaveSources = new WeakMap();
+          const retireSourceBuffer = (sourceBuffer) => {
+            const streamId = sourceBuffer.__mendosaveStreamId;
+            if (mendosaveBuffers.get(streamId) !== sourceBuffer) return;
+            mendosaveBuffers.delete(streamId);
+            mendosaveBufferSources.get(sourceBuffer)?.delete(sourceBuffer);
+            mendosaveBufferSources.delete(sourceBuffer);
+            mendosavePostMessage({ __mendosaveMseStreamClosed: true,
+              streamId, kind: sourceBuffer.__mendosaveKind });
+          };
           const hookAppend = (proto) => {
             if (!proto || typeof proto.appendBuffer !== 'function' || proto.appendBuffer.__mendosaveWorkerWrapped) return;
             const originalAppend = proto.appendBuffer;
             const wrappedAppend = function (data) {
               try {
                 const kind = this.__mendosaveKind;
-                if (kind === 'audio' || kind === 'video') {
+                if ((kind === 'audio' || kind === 'video')
+                  && mendosaveBuffers.get(this.__mendosaveStreamId) === this) {
                   const view = data instanceof ArrayBuffer
                     ? new Uint8Array(data)
                     : new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
@@ -725,7 +782,6 @@
             wrappedAppend.__mendosaveWorkerWrapped = true;
             proto.appendBuffer = wrappedAppend;
           };
-          const mendosaveBuffers = new Map();
           const hookMediaSource = (Ctor) => {
             const proto = Ctor && Ctor.prototype;
             if (!proto || typeof proto.addSourceBuffer !== 'function' || proto.addSourceBuffer.__mendosaveWorkerWrapped) return;
@@ -737,10 +793,37 @@
                 ? 'audio' : (/video/i.test(sourceBuffer.__mendosaveMime) ? 'video' : null);
               sourceBuffer.__mendosaveStreamId = nextStreamId++;
               mendosaveBuffers.set(sourceBuffer.__mendosaveStreamId, sourceBuffer);
+              let sourceBuffers = mendosaveSources.get(this);
+              if (!sourceBuffers) {
+                sourceBuffers = new Set();
+                mendosaveSources.set(this, sourceBuffers);
+                // sourceended can reopen on append and is not terminal. On
+                // sourceclose native detaches its buffers, so retire those
+                // streams while allowing fresh buffers after reattachment.
+                this.addEventListener('sourceclose', () => {
+                  for (const buffer of [...sourceBuffers]) {
+                    // Events are queued: the source may already be reattached
+                    // with new buffers when an older sourceclose is delivered.
+                    if (Array.prototype.indexOf.call(this.sourceBuffers, buffer) === -1) {
+                      retireSourceBuffer(buffer);
+                    }
+                  }
+                });
+              }
+              sourceBuffers.add(sourceBuffer);
+              mendosaveBufferSources.set(sourceBuffer, sourceBuffers);
               return sourceBuffer;
             };
             wrappedAddSourceBuffer.__mendosaveWorkerWrapped = true;
             proto.addSourceBuffer = wrappedAddSourceBuffer;
+            const originalRemoveSourceBuffer = proto.removeSourceBuffer;
+            if (typeof originalRemoveSourceBuffer === 'function') {
+              proto.removeSourceBuffer = function (sourceBuffer) {
+                const result = originalRemoveSourceBuffer.apply(this, arguments);
+                retireSourceBuffer(sourceBuffer);
+                return result;
+              };
+            }
           };
           // Buffered-range removal requested by the page: the capture pass
           // relies on it to make SABR re-serve ranges the player already has.
@@ -803,7 +886,27 @@
       }
 
       const transports = new Map();
-      worker.addEventListener('message', (event) => {
+      let closed = false;
+      const removeTransport = (key) => {
+        const transport = transports.get(key);
+        if (!transport) return;
+        transports.delete(key);
+        store.workerTransports[transport.__mendosaveKind]?.delete(transport);
+        transport.__mendosaveClosed = true;
+        if (store.initFallback[transport.__mendosaveKind] === transport.__mendosaveLastInit) {
+          delete store.initFallback[transport.__mendosaveKind];
+        }
+        delete transport.__mendosaveLastInit;
+      };
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        for (const key of transports.keys()) removeTransport(key);
+        workerCleanup.delete(worker);
+        try { worker.removeEventListener('message', onMessage, true); } catch (e) {}
+      };
+      const onMessage = (event) => {
+        if (closed) return;
         const message = event.data;
         if (message?.__mendosaveMediaUrl && message.url) {
           event.stopImmediatePropagation();
@@ -820,6 +923,11 @@
           if (message.removed) store.workerRemoveAcks += 1;
           return;
         }
+        if (message?.__mendosaveMseStreamClosed) {
+          event.stopImmediatePropagation();
+          removeTransport(`${message.kind}:${message.streamId}`);
+          return;
+        }
         if (!message?.__mendosaveMseSegment || !message.bytes) return;
         event.stopImmediatePropagation();
         const key = `${message.kind}:${message.streamId}`;
@@ -831,8 +939,9 @@
             __mendosaveMime: String(message.mime || ''),
             __mendosaveStreamId: message.streamId,
             __mendosaveRequestRemove(start, end) {
+              if (closed || transport.__mendosaveClosed) return;
               worker.postMessage({
-                __mendosaveWorkerRemove: true, streamId: message.streamId, start, end,
+                __mendosaveWorkerRemove: true, streamId: transport.__mendosaveStreamId, start, end,
               });
             },
           };
@@ -844,7 +953,9 @@
             'mime=', message.mime || '');
         }
         observeMediaAppend(transport, new Uint8Array(message.bytes));
-      }, true);
+      };
+      workerCleanup.set(worker, cleanup);
+      worker.addEventListener('message', onMessage, true);
       if (bootstrapUrl) setTimeout(() => {
         try { URL.revokeObjectURL(bootstrapUrl); } catch (e) {}
       }, 60_000);
@@ -6749,19 +6860,23 @@
   }
   // Parse json3 into timed cues (start/end in seconds, text). Returns [] if the
   // payload has no timing info. This is what lets us emit SRT/VTT.
-  function parseJson3Cues(j) {
+  function parseJson3Cues(j, requireActualTiming = false) {
     const cues = [];
     for (const ev of (j.events || [])) {
       if (!ev.segs) continue;
-      const piece = ev.segs.map(s => s.utf8 || '').join(' ').replace(/\n/g, ' ').trim();
-      if (!piece) continue;
+      if (requireActualTiming && (!Number.isFinite(ev.tStartMs) || ev.tStartMs < 0
+        || !Array.isArray(ev.segs) || ev.segs.length > 1000
+        || (ev.dDurationMs !== undefined && (!Number.isFinite(ev.dDurationMs) || ev.dDurationMs < 0)))) continue;
+      const piece = requireActualTiming ? ev.segs.map((s) => typeof s.utf8 === 'string' ? s.utf8 : '').join('')
+        : ev.segs.map(s => s.utf8 || '').join(' ').replace(/\n/g, ' ').trim();
+      if (!piece.trim()) continue;
       const start = (ev.tStartMs || 0) / 1000;
       const end = ((ev.tStartMs || 0) + (ev.dDurationMs || 0)) / 1000;
       cues.push({ start, end, text: piece });
     }
     return cues;
   }
-  function parseVttOrSrt(text) {
+  function parseVttOrSrt(text, requireActualTiming = false) {
     if (!text || (!text.includes('-->') && !text.includes('WEBVTT'))) return null;
     const lines = text.split(/\r?\n/);
     const cues = [];
@@ -6774,6 +6889,7 @@
       const line = lines[i].trim();
       const m = timeRe.exec(line);
       if (m) {
+        if (requireActualTiming && [m[2], m[3], m[6], m[7]].some((part) => Number(part) >= 60)) { i++; continue; }
         const start = toSec(m[1], m[2], m[3], m[4]);
         const end = toSec(m[5], m[6], m[7], m[8]);
         i++;
@@ -6795,7 +6911,7 @@
     return cues.length ? { cues, lines: plainLines } : null;
   }
 
-  function parseXmlCues(text) {
+  function parseXmlCues(text, requireActualTiming = false) {
     if (!text || (!text.includes('<text') && !text.includes('<p') && !text.includes('<s '))) return null;
     const cues = [];
     const plainLines = [];
@@ -6815,16 +6931,22 @@
 
     while ((m = re.exec(text)) !== null) {
       const attrs = m[2];
-      const rawText = m[3].replace(/<[^>]+>/g, '')
-        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
-        .replace(/\s+/g, ' ').trim();
-      if (!rawText) continue;
+      const content = m[3].replace(/<[^>]+>/g, '');
+      const rawText = requireActualTiming ? decodeTimedCaptionEntities(content)
+        : content.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+          .replace(/\s+/g, ' ').trim();
+      if (!rawText.trim()) continue;
 
       let start = 0, end = 0;
       const startMatch = /start="([^"]+)"/i.exec(attrs) || /begin="([^"]+)"/i.exec(attrs) || /t="([^"]+)"/i.exec(attrs);
       const durMatch = /dur="([^"]+)"/i.exec(attrs) || /d="([^"]+)"/i.exec(attrs);
       const endMatch = /end="([^"]+)"/i.exec(attrs);
+      if (requireActualTiming) {
+        if (!startMatch || !/^(?:\d+(?:\.\d+)?s?|\d+:\d{2}(?::\d{2})?(?:\.\d+)?)$/.test(startMatch[1])) continue;
+        const parts = startMatch[1].split(':');
+        if (parts.slice(1).some((part) => Number(part) >= 60)) continue;
+      }
 
       if (startMatch) {
         start = parseTimeAttr(startMatch[1]);
@@ -6837,7 +6959,7 @@
       } else if (endMatch) {
         end = parseTimeAttr(endMatch[1]);
       } else {
-        end = start + 3.0;
+        end = requireActualTiming ? start : start + 3.0;
       }
 
       cues.push({ start, end, text: rawText });
@@ -6846,28 +6968,39 @@
     return cues.length ? { cues, lines: plainLines } : null;
   }
 
-  function tryParse(text, track) {
+  function decodeTimedCaptionEntities(text) {
+    const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+    return text.replace(/&(amp|lt|gt|quot|apos|#\d{1,8}|#x[\da-fA-F]{1,8});/g, (entity, code) => {
+      if (Object.hasOwn(named, code)) return named[code];
+      const value = code.startsWith('#x') ? Number.parseInt(code.slice(2), 16) : Number(code.slice(1));
+      return value > 0 && value <= 0x10ffff && (value < 0xd800 || value > 0xdfff) ? String.fromCodePoint(value) : entity;
+    });
+  }
+
+  function tryParse(text, track, requireActualTiming = false) {
     if (!text || typeof text !== 'string') return null;
+    if (requireActualTiming && text.length > 8 * 1024 * 1024) return null;
     const lang = getTrackLang(track);
 
     // 1. Try JSON3
     try {
       const j = JSON.parse(text);
       if (j && j.events) {
-        const cues = parseJson3Cues(j);
-        const lines = parseJson3(j);
+        if (requireActualTiming && (!Array.isArray(j.events) || j.events.length > 50000)) return null;
+        const cues = parseJson3Cues(j, requireActualTiming);
+        const lines = requireActualTiming ? cues.map((cue) => cue.text) : parseJson3(j);
         if (lines.length) return { cues, lines, lang };
       }
     } catch (e) {}
 
     // 2. Try WebVTT / SRT
-    const vttRes = parseVttOrSrt(text);
+    const vttRes = parseVttOrSrt(text, requireActualTiming);
     if (vttRes && vttRes.lines.length) {
       return { cues: vttRes.cues, lines: vttRes.lines, lang };
     }
 
     // 3. Try XML / TTML
-    const xmlRes = parseXmlCues(text);
+    const xmlRes = parseXmlCues(text, requireActualTiming);
     if (xmlRes && xmlRes.lines.length) {
       return { cues: xmlRes.cues, lines: xmlRes.lines, lang };
     }
@@ -7193,17 +7326,19 @@
     return null;
   }
 
-  async function fetchCaptionFromTrack(track) {
+  async function fetchCaptionFromTrack(track, requireSelectedTrack = false, tracks = []) {
     const lang = getTrackLang(track);
     const kind = getTrackKind(track);
     const vid = vidId();
     const rawUrl = track.baseUrl || track.url || '';
 
     const candidates = [];
-    if (rawUrl) {
+    const attributedUrl = !requireSelectedTrack || timedSubtitleTrackUrl(track, vid);
+    if (rawUrl && attributedUrl) {
       candidates.push(rawUrl); // PRESERVE EXACT RAW URL WITH SIGNATURE UNTOUCHED!
     }
-    if (vid && lang) {
+    const uniqueTuple = tracks.filter((candidate) => getTrackLang(candidate) === lang && getTrackKind(candidate) === kind).length === 1;
+    if (vid && lang && (!requireSelectedTrack || (attributedUrl && uniqueTuple))) {
       const direct = 'https://www.youtube.com/api/timedtext?v=' + vid + '&lang=' + encodeURIComponent(lang) + (kind ? '&kind=' + encodeURIComponent(kind) : '') + '&fmt=json3';
       candidates.push(direct);
     }
@@ -7219,7 +7354,7 @@
         if (r.ok) {
           const text = await r.text();
           if (text && text.length > 5) {
-            const parsed = tryParse(text, track);
+            const parsed = tryParse(text, track, requireSelectedTrack);
             if (parsed) return { parsed, diag: 'main_omit len=' + text.length };
             else failLog.push('omit_parse_fail(len=' + text.length + ')');
           } else failLog.push('omit_empty');
@@ -7234,7 +7369,7 @@
         if (r.ok) {
           const text = await r.text();
           if (text && text.length > 5) {
-            const parsed = tryParse(text, track);
+            const parsed = tryParse(text, track, requireSelectedTrack);
             if (parsed) return { parsed, diag: 'main_include len=' + text.length };
             else failLog.push('inc_parse_fail(len=' + text.length + ')');
           } else failLog.push('inc_empty');
@@ -7246,7 +7381,7 @@
     for (const u of uniqueCandidates) {
       const bg = await fetchViaBackground(u);
       if (bg && bg.ok && bg.text && bg.text.length > 5) {
-        const parsed = tryParse(bg.text, track);
+        const parsed = tryParse(bg.text, track, requireSelectedTrack);
         if (parsed) return { parsed, diag: 'bg len=' + bg.text.length };
         else failLog.push('bg_parse_fail(len=' + bg.text.length + ')');
       } else {
@@ -7255,6 +7390,19 @@
     }
 
     return { parsed: null, diag: 'all_failed[' + failLog.join(',') + ']' };
+  }
+
+  function timedSubtitleTrackUrl(track, videoId) {
+    const raw = track.baseUrl || track.url || '';
+    if (!raw) return true; // An explicit unique v/lang/kind request can follow.
+    if (typeof raw !== 'string' || raw.length > 8192) return false;
+    try {
+      const url = new URL(raw);
+      return url.protocol === 'https:' && ['youtube.com', 'www.youtube.com', 'music.youtube.com'].includes(url.hostname)
+        && url.pathname === '/api/timedtext' && url.searchParams.get('v') === videoId
+        && url.searchParams.get('lang') === getTrackLang(track)
+        && (url.searchParams.get('kind') || '') === getTrackKind(track) && !url.searchParams.get('tlang');
+    } catch (e) { return false; }
   }
 
   function transcriptPanels() {
@@ -7439,7 +7587,7 @@
     return cues;
   }
 
-  async function getSubtitles() {
+  async function getSubtitles(requireActualTiming = false) {
     const tracks = captionTracks();
     if (!tracks.length) {
       const pr = playerResponse();
@@ -7448,12 +7596,14 @@
     }
     const track = pickTrack(tracks);
     if (!track) throw new Error('субтитры недоступны');
+    if (requireActualTiming) return getTimedSubtitles(track, tracks);
     const lang = getTrackLang(track);
     let fetchDiag = '';
 
     // 0. Instant DOM check: if user already has transcript panel open in DOM
     const instantCues = extractTranscriptCuesFromDOM();
-    if (instantCues && instantCues.lines && instantCues.lines.length) {
+    if (instantCues && instantCues.lines && instantCues.lines.length
+      && (!requireActualTiming || instantCues.cues?.length)) {
       log('subs', 'got ' + instantCues.lines.length + ' lines directly from open DOM panel');
       const cues = (instantCues.cues && instantCues.cues.length) ? instantCues.cues : buildCuesFromLines(instantCues.lines);
       closeTranscriptPanelIfOpen();
@@ -7515,6 +7665,457 @@
     const diag = 'track=' + (track.languageCode || '?') + ' kind=' + (track.kind || '?') +
       ' fetch=[' + fetchDiag + '] panelDiag=[' + diagSink.join(' || ') + ']\n' + dump.slice(0, 4000);
     throw new Error('не удалось получить субтитры (' + diag + ')');
+  }
+
+  // Timed TXT needs track attribution, not just the language label chosen by
+  // pickTrack. Existing DOM/player transcript text does not provide that proof.
+  async function getTimedSubtitles(track, tracks) {
+    const videoId = vidId();
+    const identity = timedSubtitleTrackIdentity(track);
+    if (!videoId || playerResponse()?.videoDetails?.videoId !== videoId) throw new Error('Не удалось подтвердить материал выбранной дорожки субтитров');
+    let navigated = false;
+    const onNavigate = () => { navigated = true; };
+    document.addEventListener('yt-navigate-start', onNavigate);
+    try {
+      let parsed = readRememberedTimedCaptions(track, tracks, videoId);
+      if (!parsed) ({ parsed } = await fetchCaptionFromTrack(track, true, tracks));
+      if (!parsed && !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId) parsed = await fetchTimedInnertube(track, tracks, videoId);
+      if (!parsed) parsed = await triggerTimedPlayerCaptions(track, tracks, videoId,
+        () => !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId);
+      if (!parsed) parsed = await getTimedPanelSubtitles(track, tracks, videoId,
+        () => !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId);
+      if (!parsed) parsed = await fetchModernTimedTranscript(track, tracks, videoId,
+        () => !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId);
+      if (navigated || vidId() !== videoId || playerResponse()?.videoDetails?.videoId !== videoId) throw new Error('Материал изменился во время получения расшифровки');
+      if (timedSubtitleTrackIdentity(track) !== identity || !captionTracks().some((candidate) => timedSubtitleTrackIdentity(candidate) === identity)) throw new Error('Выбранная дорожка субтитров изменилась во время получения расшифровки');
+      if (!parsed?.cues?.length) throw new Error('Не удалось получить выбранную дорожку субтитров с реальными таймкодами. Язык и версия открытой расшифровки не подтверждены');
+      return { text: parsed.lines.join('\n'), cues: parsed.cues, lang: getTrackLang(track), videoId,
+        ...(parsed.attribution ? { attribution: parsed.attribution } : {}),
+        ...(parsed.chapterMetadata ? { chapterMetadata: parsed.chapterMetadata } : {}) };
+    } finally {
+      document.removeEventListener('yt-navigate-start', onNavigate);
+    }
+  }
+
+  function timedSubtitleTrackIdentity(track) {
+    return JSON.stringify([getTrackLang(track), getTrackKind(track), track.vssId || track.vss_id || '', track.baseUrl || track.url || '']);
+  }
+
+  function readRememberedTimedCaptions(track, tracks, videoId) {
+    const tuple = timedTranscriptTuple(track, videoId);
+    if (!tuple) return null;
+    const identity = JSON.stringify(tuple), exactUrl = track.baseUrl || track.url;
+    const unique = tracks.filter((candidate) => JSON.stringify(timedTranscriptTuple(candidate, videoId)) === identity).length === 1;
+    const entries = window.__mendosave_captured_timedtext_sources;
+    if (!Array.isArray(entries) || entries.length > 20) return null;
+    let bytes = 0;
+    for (const entry of entries) {
+      if (typeof entry?.text !== 'string' || typeof entry?.url !== 'string' || entry.url.length > 8192
+        || (bytes += (entry.text.length + entry.url.length) * 2) > 8 * 1024 * 1024) return null;
+    }
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry.videoId !== videoId || entry.playerVideoId !== videoId || (!unique && entry.url !== exactUrl)) continue;
+      const candidate = { languageCode: getTrackLang(track), kind: getTrackKind(track), baseUrl: entry.url };
+      if (JSON.stringify(timedTranscriptTuple(candidate, videoId)) !== identity) continue;
+      const parsed = tryParse(entry.text, track, true);
+      if (parsed?.cues?.length) return parsed;
+    }
+    return null;
+  }
+
+  function timedPlayerTrackMatches(actual, selected, tracks, videoId) {
+    if (!actual || typeof actual !== 'object' || !(actual.languageCode || actual.langCode || actual.language || actual.vssId || actual.vss_id)
+      || getTrackLang(actual) !== getTrackLang(selected) || getTrackKind(actual) !== getTrackKind(selected)) return false;
+    const actualVss = actual.vssId || actual.vss_id, selectedVss = selected.vssId || selected.vss_id;
+    const selectedTuple = timedTranscriptTuple(selected, videoId);
+    if (!selectedTuple || (typeof actual.name === 'string' && actual.name !== selectedTuple[3])) return false;
+    if (actualVss) return !!selectedVss && actualVss === selectedVss;
+    if (typeof actual.name !== 'string') return tracks.filter((track) => getTrackLang(track) === getTrackLang(actual) && getTrackKind(track) === getTrackKind(actual)).length === 1;
+    const tuple = JSON.stringify(selectedTuple);
+    return tracks.filter((track) => JSON.stringify(timedTranscriptTuple(track, videoId)) === tuple).length === 1;
+  }
+
+  async function triggerTimedPlayerCaptions(track, tracks, videoId, sourceCurrent) {
+    if (!sourceCurrent() || !timedTranscriptTuple(track, videoId)) return null;
+    const p = player();
+    if (typeof p?.setOption !== 'function' || typeof p.getOption !== 'function') return null;
+    try {
+      p.loadModule?.('captions');
+      p.setOption('captions', 'track', { ...track, translationLanguage: null });
+      p.toggleSubtitlesOn?.();
+    } catch (e) { return null; }
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(100);
+      if (!sourceCurrent()) return null;
+      let actual;
+      try { actual = p.getOption('captions', 'track'); } catch (e) { return null; }
+      if (!timedPlayerTrackMatches(actual, track, tracks, videoId)) continue;
+      const parsed = readRememberedTimedCaptions(track, tracks, videoId);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  // get_transcript params contain a video id and an encoded caption selector.
+  // Decode only this observed schema; substring matches do not bind a track.
+  function decodeTimedTranscriptParams(params) {
+    const fields = (encoded) => {
+      if (typeof encoded !== 'string' || encoded.length > 8192) throw new Error('params limit');
+      const binary = atob(decodeURIComponent(encoded).replace(/-/g, '+').replace(/_/g, '/'));
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      let offset = 0;
+      const result = new Map(), seenFields = new Set();
+      const integer = () => {
+        let value = 0, multiplier = 1;
+        for (let count = 0; count < 5 && offset < bytes.length; count++) {
+          const byte = bytes[offset++]; value += (byte & 127) * multiplier;
+          if (!(byte & 128)) return value;
+          multiplier *= 128;
+        }
+        throw new Error('invalid params integer');
+      };
+      while (offset < bytes.length) {
+        const tag = integer(), field = Math.floor(tag / 8), wire = tag % 8;
+        if (!field || seenFields.has(field)) throw new Error('invalid or duplicate params field');
+        seenFields.add(field);
+        if (wire === 0) { integer(); continue; }
+        if (wire !== 2) throw new Error('unsupported params wire');
+        const length = integer();
+        if (length > bytes.length - offset || result.has(field)) throw new Error('invalid params length or duplicate');
+        result.set(field, new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(offset, offset + length)));
+        offset += length;
+      }
+      return result;
+    };
+    try {
+      const top = fields(params), selector = fields(top.get(2));
+      if (!top.get(1) || !selector.has(1) || !selector.get(2) || !selector.has(3)) return null;
+      return [top.get(1), selector.get(2), selector.get(1), selector.get(3)];
+    } catch (e) { return null; }
+  }
+
+  function timedTranscriptTuple(track, videoId) {
+    if (!timedSubtitleTrackUrl(track, videoId)) return null;
+    let name = '';
+    try { if (track.baseUrl || track.url) name = new URL(track.baseUrl || track.url).searchParams.get('name') || ''; } catch (e) { return null; }
+    return [videoId, getTrackLang(track), getTrackKind(track), name];
+  }
+
+  function walkTimedMetadata(root, visit) {
+    const stack = [{ value: root, depth: 0 }], seen = new WeakSet();
+    let nodes = 0, edges = 0;
+    while (stack.length) {
+      const { value, depth } = stack.pop();
+      if (!value || typeof value !== 'object' || value instanceof Node || seen.has(value)) continue;
+      if (++nodes > 50000 || depth > 64) throw new RangeError('Transcript metadata limit');
+      seen.add(value); visit(value);
+      for (const key of Object.keys(value)) {
+        if (++edges > 100000) throw new RangeError('Transcript metadata limit');
+        stack.push({ value: value[key], depth: depth + 1 });
+      }
+    }
+  }
+
+  function findTimedTranscriptParams(track, tracks, videoId) {
+    const tuple = timedTranscriptTuple(track, videoId), identity = JSON.stringify(tuple);
+    if (!tuple || tracks.filter((candidate) => JSON.stringify(timedTranscriptTuple(candidate, videoId)) === identity).length !== 1) return null;
+    const roots = [window.ytInitialData, window.ytInitialPlayerResponse, playerResponse()];
+    const panels = document.querySelectorAll('ytd-engagement-panel-section-list-renderer');
+    if (panels.length > 32) return null;
+    for (const panel of panels) roots.push(panel.data, panel.__data);
+    let params = null;
+    try {
+      walkTimedMetadata(roots, (node) => {
+        const candidate = node.getTranscriptEndpoint?.params;
+        if (typeof candidate === 'string' && JSON.stringify(decodeTimedTranscriptParams(candidate)) === identity) params ||= candidate;
+      });
+    } catch (e) { return null; }
+    return params;
+  }
+
+  function parseTimedInnertube(data, tuple, requireFooter = false) {
+    const cues = [], identity = JSON.stringify(tuple);
+    let invalidSelection = false, totalText = 0, footers = 0;
+    const text = (value) => {
+      let result = '';
+      if (typeof value?.simpleText === 'string') result = value.simpleText;
+      else if (Array.isArray(value?.runs) && value.runs.length <= 1000) result = value.runs.map((run) => typeof run?.text === 'string' ? run.text : '').join('');
+      if (result.length > 65536 || (totalText += result.length) > 8 * 1024 * 1024) throw new RangeError('Transcript text limit');
+      return result;
+    };
+    const milliseconds = (value) => (typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value)))
+      && Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 7 * 86400 * 1000 ? Number(value) / 1000 : null;
+    try {
+      walkTimedMetadata(data, (node) => {
+        const items = node.transcriptFooterRenderer?.languageMenu?.sortFilterSubMenuRenderer?.subMenuItems;
+        if (items) {
+          if (++footers > 1 || !Array.isArray(items) || items.length > 200 || items.filter((item) => item.selected === true).length !== 1) invalidSelection = true;
+          else {
+            const selected = items.find((item) => item.selected === true);
+            let matches = false, mismatch = false;
+            walkTimedMetadata(selected, (part) => {
+              for (const token of [part.getTranscriptEndpoint?.params, part.reloadContinuationData?.continuation]) {
+                if (token === undefined) continue;
+                if (JSON.stringify(decodeTimedTranscriptParams(token)) === identity) matches = true;
+                else mismatch = true;
+              }
+            });
+            if (!matches || mismatch) invalidSelection = true;
+          }
+        }
+        const segment = node.transcriptSegmentRenderer, cue = node.transcriptCueRenderer;
+        if (!segment && !cue) return;
+        const start = milliseconds(segment ? segment.startMs : cue.startOffsetMs);
+        const end = milliseconds(segment ? segment.endMs : cue.durationMs);
+        if (start === null || end === null) return;
+        const value = text(segment ? segment.snippet : cue.cue);
+        const finish = segment ? end : start + end;
+        if (!value.trim() || finish < start) return;
+        if (cues.length >= 50000) throw new RangeError('Transcript cue limit');
+        cues.push({ start, end: finish, text: value });
+      });
+    } catch (e) { return null; }
+    if (invalidSelection || (requireFooter && footers !== 1) || !cues.length) return null;
+    cues.sort((left, right) => left.start - right.start);
+    return { cues, lines: cues.map((cue) => cue.text), chapterMetadata: data };
+  }
+
+  async function fetchTimedInnertube(track, tracks, videoId) {
+    const params = findTimedTranscriptParams(track, tracks, videoId);
+    if (!params) return null;
+    try {
+      const raw = getInnertubeCfg('INNERTUBE_CONTEXT');
+      const context = raw && typeof raw === 'object' ? JSON.parse(JSON.stringify(raw)) : {
+        client: { hl: getInnertubeCfg('HL') || navigator.language || 'en', gl: getInnertubeCfg('GL') || 'US', clientName: 'WEB',
+          clientVersion: getInnertubeCfg('INNERTUBE_CLIENT_VERSION') || '2.20240715.00.00' },
+      };
+      const headers = { 'Content-Type': 'application/json', 'X-YouTube-Client-Name': String(getInnertubeCfg('INNERTUBE_CONTEXT_CLIENT_NAME') || '1'),
+        'X-YouTube-Client-Version': context.client.clientVersion };
+      if (context.client.visitorData) headers['X-Goog-Visitor-Id'] = context.client.visitorData;
+      const key = getInnertubeCfg('INNERTUBE_API_KEY');
+      const url = 'https://www.youtube.com/youtubei/v1/get_transcript' + (key ? '?key=' + encodeURIComponent(key) : '');
+      for (const credentials of ['include', 'omit']) {
+        const response = await fetch(url, { method: 'POST', credentials, headers, body: JSON.stringify({ context, params }) });
+        if (!response.ok) continue;
+        const body = await response.text();
+        if (body.length > 8 * 1024 * 1024) return null;
+        return parseTimedInnertube(JSON.parse(body), timedTranscriptTuple(track, videoId));
+      }
+    } catch (e) { return null; }
+    return null;
+  }
+
+  async function getTimedPanelSubtitles(track, tracks, videoId, sourceCurrent) {
+    if (!sourceCurrent()) return null;
+    const params = findTimedTranscriptParams(track, tracks, videoId);
+    if (!params) return null;
+    const tuple = timedTranscriptTuple(track, videoId);
+    const read = () => {
+      const panels = document.querySelectorAll('ytd-engagement-panel-section-list-renderer');
+      if (panels.length > 32) return null;
+      for (const panel of panels) {
+        const parsed = parseTimedInnertube(panel.data, tuple, true) || parseTimedInnertube(panel.__data, tuple, true);
+        if (parsed) return parsed;
+      }
+      return null;
+    };
+    const existing = read();
+    if (existing) return existing;
+    const app = document.querySelector('ytd-app');
+    if (typeof app?.resolveCommand !== 'function') return null;
+    try {
+      let endpoint = { getTranscriptEndpoint: { params } };
+      for (const panel of document.querySelectorAll('ytd-engagement-panel-section-list-renderer')) {
+        const data = [panel.data, panel.__data].find((value) => value?.content?.continuationItemRenderer?.continuationEndpoint?.getTranscriptEndpoint?.params === params);
+        if (!data) continue;
+        const targetId = data.targetId || panel.getAttribute('target-id');
+        if (typeof targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(targetId) || !targetId.includes('transcript')) continue;
+        endpoint = data.content.continuationItemRenderer.continuationEndpoint;
+        // This native continuation is triggered only when its panel is shown.
+        app.resolveCommand({ changeEngagementPanelVisibilityAction: { targetId, visibility: 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED' } });
+        break;
+      }
+      app.resolveCommand(endpoint);
+    } catch (e) { return null; }
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(250);
+      if (!sourceCurrent()) return null;
+      const parsed = read();
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  // Modern get_panel has no caption selector. Its native captions can be
+  // attributed by exclusion only when the full current player response lists
+  // exactly one track, with translation off. Never apply this to multi-track
+  // videos, or infer a language from the text, UI locale or CC selection.
+  function modernTranscriptTrackCurrent(track, tracks, videoId) {
+    const response = playerResponse();
+    const completeTracks = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (response?.videoDetails?.videoId !== videoId || !Array.isArray(completeTracks) || completeTracks.length !== 1
+      || tracks.length !== 1 || captionTracks().length !== 1 || !timedTranscriptTuple(track, videoId)
+      || !(track.languageCode || track.langCode || track.language || track.vssId || track.vss_id)
+      || timedSubtitleTrackIdentity(tracks[0]) !== timedSubtitleTrackIdentity(track)
+      || timedSubtitleTrackIdentity(completeTracks[0]) !== timedSubtitleTrackIdentity(track)
+      || timedSubtitleTrackIdentity(captionTracks()[0]) !== timedSubtitleTrackIdentity(track)
+      || track.translationLanguage) return false;
+    try {
+      const actual = player()?.getOption?.('captions', 'track');
+      return !!actual && !actual.translationLanguage && timedPlayerTrackMatches(actual, track, tracks, videoId);
+    } catch (e) { return false; }
+  }
+
+  function decodeModernTranscriptVideo(params) {
+    try {
+      if (typeof params !== 'string' || params.length > 8192) return null;
+      const bytes = Uint8Array.from(atob(decodeURIComponent(params).replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0));
+      const fields = (data) => {
+        let offset = 0;
+        const seen = new Set(), result = new Map();
+        const integer = () => {
+          let value = 0, multiplier = 1;
+          for (let count = 0; count < 5 && offset < data.length; count++) {
+            const byte = data[offset++]; value += (byte & 127) * multiplier;
+            if (!(byte & 128)) return value;
+            multiplier *= 128;
+          }
+          throw new Error('invalid modern params integer');
+        };
+        while (offset < data.length) {
+          const tag = integer(), field = Math.floor(tag / 8), wire = tag % 8;
+          if (!field || seen.has(field)) throw new Error('invalid modern params field');
+          seen.add(field);
+          if (wire === 0) { integer(); continue; }
+          if (wire !== 2) throw new Error('unsupported modern params wire');
+          const length = integer();
+          if (length > data.length - offset) throw new Error('invalid modern params length');
+          result.set(field, data.subarray(offset, offset + length)); offset += length;
+        }
+        return result;
+      };
+      // Observed native updateEngagementPanelContentCommand schema. Field 3
+      // inside the panel payload is deliberately not assigned a meaning.
+      const top = fields(bytes);
+      if (top.size !== 1 || !top.has(149)) return null;
+      const panel = fields(top.get(149));
+      if (panel.size !== 1 || !panel.has(1)) return null;
+      return new TextDecoder('utf-8', { fatal: true }).decode(panel.get(1));
+    } catch (e) { return null; }
+  }
+
+  function findModernTranscriptRequest(videoId) {
+    const buttons = document.querySelectorAll('ytd-button-renderer');
+    if (buttons.length > 128) return null;
+    const roots = [window.ytInitialData, ...Array.from(buttons, (button) => button.data)];
+    const candidates = new Set();
+    try {
+      walkTimedMetadata(roots, (node) => {
+        const command = node.updateEngagementPanelContentCommand;
+        const params = command?.globalConfiguration?.params;
+        if (command?.contentSourcePanelIdentifier?.tag === 'PAmodern_transcript_view'
+          && command.contentSourcePanelIdentifier.surface === 'ENGAGEMENT_PANEL_SURFACE_WATCH'
+          && decodeModernTranscriptVideo(params) === videoId) candidates.add(params);
+      });
+    } catch (e) { return null; }
+    return candidates.size === 1 ? [...candidates][0] : null;
+  }
+
+  function parseModernTimedTranscript(data, track, tracks, videoId) {
+    const panel = data?.content?.engagementPanelSectionListRenderer;
+    if (panel?.identifier?.tag !== 'PAmodern_transcript_view'
+      || panel.identifier.surface !== 'ENGAGEMENT_PANEL_SURFACE_WATCH') return null;
+    const cues = [];
+    let invalid = false, totalText = 0;
+    try {
+      walkTimedMetadata(data, (node) => {
+        if (node.translationLanguage || node.tlang) invalid = true;
+        if ((node.languageCode || node.vssId || node.vss_id) && !timedPlayerTrackMatches(node, track, tracks, videoId)) invalid = true;
+        if (node.transcriptFooterRenderer) invalid = true; // This inference cannot override an explicit selector.
+      });
+      const sections = panel.content?.sectionListRenderer?.contents;
+      if (!Array.isArray(sections) || sections.length > 2000) return null;
+      for (const section of sections) {
+        const items = section?.itemSectionRenderer?.contents;
+        if (!Array.isArray(items) || items.length > 50000) return null;
+        for (const item of items) {
+          const row = item?.macroMarkersPanelItemViewModel;
+          const contents = row?.item?.timelineItemViewModel?.contentItems;
+          if (!contents) continue;
+          const endpoint = row.onTap?.innertubeCommand?.watchEndpoint;
+          if (row.panelId !== 'PAmodern_transcript_view' || endpoint?.videoId !== videoId) return null;
+          if (typeof endpoint.startTimeSeconds !== 'number' || !Number.isFinite(endpoint.startTimeSeconds)
+            || endpoint.startTimeSeconds < 0 || endpoint.startTimeSeconds > 7 * 86400) return null;
+          if (!Array.isArray(contents) || contents.length > 1000) return null;
+          for (const content of contents) {
+            const text = content?.transcriptSegmentViewModel?.simpleText;
+            if (typeof text !== 'string' || !text.trim()) continue;
+            if (text.length > 65536 || (totalText += text.length) > 8 * 1024 * 1024 || cues.length >= 50000) return null;
+            // The row's native watch endpoint supplies this actual cue time.
+            // No duration is synthesized from neighbouring rows or chapters.
+            cues.push({ start: endpoint.startTimeSeconds, end: endpoint.startTimeSeconds, text });
+          }
+        }
+      }
+    } catch (e) { return null; }
+    if (invalid || !cues.length) return null;
+    cues.sort((left, right) => left.start - right.start);
+    return { cues, lines: cues.map((cue) => cue.text), attribution: 'unique-native-caption-track', chapterMetadata: panel };
+  }
+
+  async function fetchModernTimedTranscript(track, tracks, videoId, sourceCurrent) {
+    if (!sourceCurrent() || !modernTranscriptTrackCurrent(track, tracks, videoId)) return null;
+    const params = findModernTranscriptRequest(videoId);
+    const rawContext = getInnertubeCfg('INNERTUBE_CONTEXT');
+    if (!params || !rawContext || typeof rawContext !== 'object') return null;
+    try {
+      const context = JSON.parse(JSON.stringify(rawContext));
+      const response = await fetch('https://www.youtube.com/youtubei/v1/get_panel', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context, panelId: 'PAmodern_transcript_view', params }),
+      });
+      if (!response.ok) return null;
+      const body = await response.text();
+      if (body.length > 8 * 1024 * 1024 || !sourceCurrent() || !modernTranscriptTrackCurrent(track, tracks, videoId)) return null;
+      return parseModernTimedTranscript(JSON.parse(body), track, tracks, videoId);
+    } catch (e) { return null; }
+  }
+
+  function readOwnedTimedChapters(videoId, duration) {
+    const roots = [];
+    const response = playerResponse();
+    if (response?.videoDetails?.videoId === videoId) roots.push(response);
+    if (window.ytInitialData?.currentVideoEndpoint?.watchEndpoint?.videoId === videoId) roots.push(window.ytInitialData);
+    // A watch page can retain the previous video's panel DOM during SPA
+    // navigation. Only a chapter's own structured watch endpoint proves its
+    // owner; current location/player or visible timestamp text do not.
+    const markers = document.querySelectorAll('ytd-macro-markers-list-item-renderer');
+    if (markers.length > 2000) throw new RangeError('Chapter DOM row limit');
+    for (const marker of markers) {
+      const target = marker.closest('[target-id*="chapters"], [panel-target-id*="chapters"]');
+      const targetId = target?.getAttribute('target-id') || target?.getAttribute('panel-target-id');
+      const data = marker.data || marker.__data?.data;
+      if (targetId && data?.onTap?.watchEndpoint?.videoId === videoId) roots.push({ targetId, macroMarkersListItemRenderer: data });
+    }
+    return MendoCaptions.readChapters(roots, null, duration, videoId);
+  }
+
+  function buildTimedTranscriptResult(res, duration) {
+    if (res.videoId !== vidId() || playerResponse()?.videoDetails?.videoId !== res.videoId) throw new Error('Материал изменился перед подготовкой расшифровки');
+    let chapters = [];
+    let chaptersUnavailable = false;
+    try {
+      if (res.chapterMetadata) chapters = MendoCaptions.readChapters(res.chapterMetadata, null, duration, res.videoId);
+      if (!chapters.length) chapters = readOwnedTimedChapters(res.videoId, duration);
+    } catch (error) {
+      if (error?.name !== 'RangeError') throw error;
+      chaptersUnavailable = true;
+      log('subs', 'optional chapter metadata exceeded its input limit; exporting actual timed captions without chapters');
+    }
+    const timedText = MendoCaptions.formatTimedTranscript(res.cues, chapters, duration);
+    if (!timedText) throw new Error('Нет доступной расшифровки с реальными таймкодами');
+    return { timedText, chaptersUnavailable };
   }
 
   function subsAvailable() {
@@ -8436,8 +9037,15 @@
           await restoreQuality(previousQuality);
         }
       } else if (cmd === 'subtitles') {
-        const res = await getSubtitles();
-        reply({ ok: true, done: true, text: res.text, cues: res.cues || null, lang: res.lang });
+        const timedTranscript = format === 'timed-txt';
+        const res = await getSubtitles(timedTranscript);
+        let timedResult;
+        if (timedTranscript) {
+          const duration = Number(video()?.duration) || Number(playerResponse()?.videoDetails?.lengthSeconds) || 0;
+          timedResult = buildTimedTranscriptResult(res, duration);
+        }
+        reply({ ok: true, done: true, text: res.text, cues: res.cues || null, lang: res.lang, ...(timedTranscript ? timedResult : {}),
+          ...(timedTranscript && res.attribution ? { attribution: res.attribution } : {}) });
       } else if (cmd === 'subs-available') {
         const a = subsAvailable();
         reply({ ok: true, available: a.available, lang: a.lang });

@@ -3,12 +3,20 @@
   border-radius: 7px; background: #183e2b; color: #e5fff0; cursor: pointer; font: 600 13px system-ui, sans-serif;
 }
 .mendo-package-dialog {
+  position: fixed; inset: 12px; height: fit-content; z-index: 2147483647;
   box-sizing: border-box; width: min(480px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
   overflow: auto; margin: auto; padding: 20px; border: 1px solid #3e6551; border-radius: 12px;
   background: #171b19; color: #f1f5f2; font: 14px/1.45 system-ui, sans-serif;
   box-shadow: 0 8px 48px #0008;
 }
-.mendo-package-dialog::backdrop { background: #0009; }
+.mendo-package-resume {
+  position: fixed; left: 20px; bottom: 20px; z-index: 2147483646;
+  box-sizing: border-box; max-width: min(420px, calc(100vw - 40px)); padding: 12px 16px;
+  border: 1px solid #41835d; border-radius: 10px; background: #183e2b; color: #ecfff3;
+  box-shadow: 0 6px 24px #0006; font: 600 13px/1.4 system-ui, sans-serif;
+  overflow-wrap: anywhere; text-align: left; cursor: pointer;
+}
+.mendo-package-resume[hidden] { display: none !important; }
 .mendo-package-dialog h2 { font: 600 19px/1.3 system-ui, sans-serif; margin: 0 0 8px; }
 .mendo-package-dialog p { margin: 12px 0; overflow-wrap: anywhere; color: #ced8d1; }
 .mendo-package-list { display: grid; gap: 3px; }
@@ -20,5 +28,5 @@
 .mendo-package-actions button { flex: 1 1 120px; padding: 10px; color: #ecfff3; background: #21583b; border: 1px solid #41835d; border-radius: 7px; font: inherit; cursor: pointer; }
 .mendo-package-actions button:last-child { background: #282f2b; border-color: #5b6860; }
 .mendo-package-dialog button:disabled { opacity: .5; cursor: default; }
-.mendo-package-dialog :focus-visible, .mendo-package-open:focus-visible { outline: 2px solid #78e4a8; outline-offset: 3px; }
+.mendo-package-dialog :focus-visible, .mendo-package-open:focus-visible, .mendo-package-resume:focus-visible { outline: 2px solid #78e4a8; outline-offset: 3px; }
 @media (max-width: 400px) { .mendo-package-dialog { padding: 14px; } .mendo-package-actions button { flex-basis: 100%; } }

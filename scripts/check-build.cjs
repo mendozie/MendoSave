@@ -52,16 +52,17 @@ function checkBuild(root, target, version) {
       }
     }
     compare(source);
-    if (target === 'chromium') {
-      const backend = path.join(root, 'browser-hosts', 'chromium.js');
-      if (!files.get('browser-host.js')?.equals(fs.readFileSync(backend))) errors.push('browser-host.js: stale or missing Chromium backend');
-    }
+    const backend = path.join(root, 'browser-hosts', `${target}.js`);
+    if (!fs.existsSync(backend) || !files.get('browser-host.js')?.equals(fs.readFileSync(backend))) errors.push(`browser-host.js: stale or missing ${target} backend`);
   }
   for (const name of ['LICENSE', 'THIRD_PARTY_NOTICES.md']) if (!files.has(name)) errors.push(`${name}: missing license`);
   if (manifest.manifest_version !== 3 || manifest.name !== 'MendoSave' || manifest.version !== version) errors.push('manifest identity/version mismatch');
-  if (manifest.update_url || manifest.externally_connectable || (manifest.permissions || []).includes('nativeMessaging')) errors.push('unapproved external integration');
+  if (manifest.update_url || manifest.externally_connectable || (manifest.permissions || []).some(permission => ['nativeMessaging', 'tabHide'].includes(permission))) errors.push('unapproved external integration');
   if ((manifest.host_permissions || []).some((host) => /github\.com|githubusercontent\.com/.test(host))) errors.push('upstream update host permission');
   if (target === 'firefox') {
+    if (files.has('platform.js') && (manifest.background?.scripts?.[0] !== 'browser-host.js'
+      || manifest.background.scripts.indexOf('platform.js') < 1
+      || manifest.background.scripts.indexOf('background.js') < manifest.background.scripts.indexOf('platform.js'))) errors.push('Firefox backend script order mismatch');
     if (manifest.browser_specific_settings?.gecko?.id !== 'mendosave@mendozie') errors.push('Firefox add-on identity mismatch');
     if (manifest.background?.service_worker || !manifest.background?.scripts?.length || !manifest.browser_specific_settings?.gecko?.id || (manifest.permissions || []).includes('offscreen')) errors.push('Firefox host contract mismatch');
   } else if (target === 'chromium' && (!manifest.background?.service_worker || manifest.background?.scripts)) errors.push('Chromium host contract mismatch');

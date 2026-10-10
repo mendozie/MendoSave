@@ -50,3 +50,16 @@ test('cancellation keeps completed files and never starts a following format or 
   assert.deepEqual(result.results, [{ id: 'video', filename: 'video.mp4' }]);
   assert.deepEqual(calls, ['done:0', 'cancel']);
 });
+
+test('cancellation while final saving settles cannot report a completed package', async () => {
+  const controller = new AbortController();
+  let reason;
+  const result = await run([{ id: 'text', async run() { return 'text.txt'; } }], {
+    signal: controller.signal, async start() {}, async next() {}, async complete() {},
+    async finish() { controller.abort(); return { filename: 'bundle.zip' }; },
+    async cancel(value) { reason = value; },
+  });
+  assert.equal(result.phase, 'cancelled');
+  assert.equal(reason, 'cancelled');
+  assert.deepEqual(result.results, [{ id: 'text', filename: 'text.txt' }]);
+});

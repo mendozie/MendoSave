@@ -79,6 +79,7 @@
           const blob = await this.effects.archive(p.entries, p.controller.signal, p);
           this.owned(owner, p.id);
           await this.effects.save(blob, filename, { get cancelled() { return p.controller.signal.aborted; } });
+          this.owned(owner, p.id);
           await this.effects.discard(p.entries);
         }
         p.phase = 'complete';

@@ -50,11 +50,16 @@ test('a native download failure remains an error and a foreign sender cannot tri
 });
 
 test('Chromium user cancellation errors are also terminal user actions', async () => {
+  let attempts = 0;
   const browser = browserContext({ downloads: {
-    async download() { throw new Error('USER_CANCELED'); },
+    async download() { attempts++; throw new Error('USER_CANCELED'); },
   } });
   const response = await browser.message({ t: 'mendosave-save',
     url: 'blob:moz-extension://test/output', filename: 'audio.mp3' },
-  { id: browser.chrome.runtime.id, url: 'moz-extension://test/offscreen.html' });
+  browser.processorSender());
+  assert.equal(response.ok, false);
   assert.equal(response.cancelled, true);
+  assert.equal(attempts, 1);
+  assert.deepEqual(browser.network, []);
+  assert.equal(Object.keys(browser.data).some((key) => key.startsWith('mendo_download_owner:')), false);
 });

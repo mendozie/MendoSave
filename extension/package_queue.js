@@ -27,6 +27,7 @@
       check();
       effects.onChange?.({ phase: 'saving', index: items.length, results: [...results] });
       const output = await effects.finish();
+      check();
       return { phase: 'complete', results, ...output };
     } catch (error) {
       const cancelled = effects.signal?.aborted || error?.name === 'AbortError' || error?.cancelled;

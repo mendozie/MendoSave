@@ -139,8 +139,9 @@
     return sendWorkerMessage({ t: 'mendosave-error', context, error: text, details }, 30_000).catch(() => null);
   }
 
-  function sendRuntimeMessage(message, timeoutMs) {
-    const send = () => globalThis.MendoPackageUI ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  function sendRuntimeMessage(message, timeoutMs, producer) {
+    const send = () => producer ? producer.send(message)
+      : globalThis.MendoPackageUI ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
     // A native Save As dialog and an active browser save have user-owned
     // lifetimes. Timing out here could claim failure while a file is saving.
     if (!timeoutMs || ['mendosave-save', 'mendosave-finalize'].includes(message.t)) return send();
@@ -462,11 +463,12 @@
 
     const language = availability.lang || 'доступный';
     const formats = [
-      ['.srt', 'srt', 'SRT (с тайм-кодами)'],
-      ['.txt', 'txt', 'простой текст (без тайм-кодов)'],
+      ['.srt', 'srt', 'SRT с таймкодами'],
+      ['.txt', 'txt', 'TXT без таймкодов'],
+      ['.txt', 'timed-txt', 'Расшифровка с таймкодами и главами'],
     ];
     for (const [extension, format, description] of formats) {
-      packageOptions.push({ id: `sub-${format}`, label: `Субтитры ${extension} · ${language}`,
+      packageOptions.push({ id: `sub-${format}`, label: `${description} · ${extension} · ${language}`,
         run: () => downloadSubtitles(info, format) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, extension, `${language} · ${description}`);
@@ -558,7 +560,7 @@
         addSubtitleItems(info, availability);
         if (!artTrackOnly) addFormatSelector(settings.transcode);
         const availableOptions = packageOptions.slice();
-        globalThis.MendoPackageUI?.add(menu, { title: info.title,
+        globalThis.MendoPackageUI?.add(menu, { title: info.title, source: `youtube:${info.videoId || videoIdFromLocation()}`,
           options: () => snapshotPackageOptions(info, availableOptions), close: closeMenu });
       }
       document.body.append(menu);
@@ -598,12 +600,22 @@
     const progress = legacyBar.querySelector('i');
     const stages = box.querySelector('.mendosave-toast-stages');
     const cancel = box.querySelector('.mendosave-toast-cancel');
+    // Each operation leases this shared box. Old progress and already-queued
+    // dismissal callbacks cannot mutate a later operation's notification.
+    const owner = {};
+    box.__mendosaveToastOwner = owner;
+    clearTimeout(toastHideTimer);
+    let sealed = false;
+    const owns = () => box.__mendosaveToastOwner === owner;
+    const active = () => owns() && !sealed;
     const hideCancel = () => {
       box.__mendosaveCancel = null;
       cancel.hidden = true;
     };
+    hideCancel();
     return {
       set(message, fraction = 0) {
+        if (!active()) return;
         clearTimeout(toastHideTimer);
         text.textContent = message;
         stages.replaceChildren();
@@ -614,6 +626,7 @@
         box.classList.add('show');
       },
       setCancel(handler, label = 'Отменить загрузку') {
+        if (!active()) return;
         if (!handler) {
           hideCancel();
           return;
@@ -623,6 +636,7 @@
         cancel.hidden = false;
       },
       beginStages(message, definitions) {
+        if (!active()) return;
         clearTimeout(toastHideTimer);
         text.textContent = message;
         legacyBar.hidden = true;
@@ -641,6 +655,7 @@
         box.classList.add('show');
       },
       stage(id, fraction, state = 'active', label) {
+        if (!active()) return;
         const row = stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
         row.className = `mendosave-stage ${state}`;
@@ -657,8 +672,16 @@
         }
       },
       hide(delay = 0) {
+        if (!active()) return;
         clearTimeout(toastHideTimer);
-        toastHideTimer = setTimeout(() => box.classList.remove('show'), delay);
+        hideCancel();
+        sealed = true;
+        toastHideTimer = setTimeout(() => { if (owns()) box.classList.remove('show'); }, delay);
+      },
+      seal() {
+        if (!active()) return;
+        hideCancel();
+        sealed = true;
       },
     };
   }
@@ -720,6 +743,7 @@
     srt: { extension: 'srt', mime: 'application/x-subrip', timed: true },
     vtt: { extension: 'vtt', mime: 'text/vtt', timed: true },
     txt: { extension: 'txt', mime: 'text/plain', timed: false },
+    'timed-txt': { extension: 'txt', mime: 'text/plain', timed: true, transcript: true },
   });
 
   function mediaResponseError(result, fallback) {
@@ -737,38 +761,45 @@
     try {
       const output = SUBTITLE_OUTPUTS[format];
       if (!output) throw new Error(`неизвестный формат субтитров: ${format}`);
-      const response = await callHook('subtitles');
+      const response = await callHook('subtitles', { format });
       const language = response.lang || 'txt';
       if (output.timed && !response.cues?.length) {
         throw new Error(`не удалось сформировать .${output.extension}: отсутствуют таймкоды`);
       }
-      const content = output.timed ? buildTimedSubtitles(response.cues, output.extension) : response.text;
-      const filename = `${safeFilename(info.title)} [${language}].${output.extension}`;
+      const content = output.transcript ? response.timedText
+        : output.timed ? buildTimedSubtitles(response.cues, output.extension) : response.text;
+      if (typeof content !== 'string' || !content.trim()) throw new Error('Нет доступной расшифровки с реальными таймкодами');
+      const filename = `${safeFilename(info.title)} [${language}]${output.transcript ? ' [timed]' : ''}.${output.extension}`;
       const url = `data:${output.mime};charset=utf-8,${encodeURIComponent(`\uFEFF${content}`)}`;
       const saved = await sendWorkerMessage({ t: 'mendosave-save', url, filename }, 30_000);
       if (!saved?.ok) throw mediaResponseError(saved, 'не удалось сохранить субтитры');
-      notification.set(`Готово: ${filename}`, 1);
+      notification.set(`Готово: ${filename}${output.transcript && response.chaptersUnavailable
+        ? ' · Главы на странице недоступны; сохранены реальные таймкоды.' : ''}`, 1);
       notification.hide(4000);
       return filename;
     } catch (error) {
-      if (globalThis.MendoPackageUI?.running) throw error;
       if (error?.cancelled || error?.name === 'AbortError') {
-        notification.set('Сохранение отменено', 1); notification.hide(4000); return false;
+        notification.set('Сохранение отменено', 1); notification.hide(1500);
+        if (globalThis.MendoPackageUI?.running) throw error;
+        return false;
       }
       notification.set(`Ошибка: ${error.message || error}`, 1);
       notification.hide(6000);
+      if (globalThis.MendoPackageUI?.running) throw error;
       await reportError('ui/subtitles', error, { format, videoId: info.videoId });
     }
   }
 
   async function startDownload({ format, height, audioFormat = 'mp3' }, info, options = {}) {
-    const notification = getToast();
+    // A refused duplicate must not take the active operation's toast lease.
     if (downloadInProgress) {
       if (globalThis.MendoPackageUI?.running) throw new Error('Другая загрузка уже выполняется');
-      notification.set('Другая загрузка уже выполняется', 1);
-      notification.hide(4000);
       return 'busy';
     }
+    const notification = getToast();
+    const packageUI = globalThis.MendoPackageUI;
+    const packageSignal = packageUI?.signal;
+    const packageDownload = Boolean(packageSignal || packageUI?.running);
     downloadInProgress = true;
     if (!options.freshPageResume) await clearReloadGuard();
 
@@ -823,31 +854,53 @@
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     // Declared out here so every exit path can stop the capture-time shipper.
     let staging = null;
+    let producer = null;
+    const producerController = new AbortController();
+    let producerFailure;
+    let cancelCleanup = Promise.resolve();
 
     let cancelRequested = false;
+    let finished = false;
+    const checkCancelled = () => {
+      if (producerFailure) throw producerFailure;
+      if (!cancelRequested && !packageSignal?.aborted) return;
+      const error = new Error('загрузка отменена пользователем');
+      error.name = 'AbortError';
+      error.cancelled = true;
+      error.details = { cancelled: true };
+      throw error;
+    };
     const cancelDownload = () => {
-      if (cancelRequested) return;
+      if (cancelRequested || finished) return;
       cancelRequested = true;
-      notification.setCancel(null);
+      producerController.abort();
+      notification.set('Отмена загрузки…', 0);
       // Cancelling one item of a running playlist queue stops the whole queue.
-      if (!globalThis.MendoPackageUI?.running) {
-        void clearQueue();
+      if (!packageDownload) {
+        cancelCleanup = clearQueue();
         try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
         document.getElementById('mendosave-queue')?.remove();
       }
-      void callHook('download-cancel').catch(() => {});
-      if (IS_MUSIC) void callHook('music-mute', { mute: false }).catch(() => {});
-      void sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
-      void sendRuntimeMessage({ t: 'mendosave-abort', jobId: `${jobId}-sabr` }, 10_000).catch(() => {});
+      if (producer) cancelCleanup = Promise.allSettled([
+        cancelCleanup,
+        callHook('download-cancel'), callHook('sabr-cancel'),
+        ...(IS_MUSIC ? [callHook('music-mute', { mute: false })] : []),
+        sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000, producer),
+        sendRuntimeMessage({ t: 'mendosave-abort', jobId: `${jobId}-sabr` }, 10_000, producer),
+      ]);
     };
-    notification.setCancel(cancelDownload);
-    const packageSignal = globalThis.MendoPackageUI?.signal;
+    const cancelFromNotification = () => {
+      if (packageDownload) void packageUI?.cancel?.();
+      cancelDownload();
+    };
+    notification.setCancel(cancelFromNotification);
     packageSignal?.addEventListener('abort', cancelDownload, { once: true });
+    if (packageSignal?.aborted) cancelDownload();
 
     const onFfmpegProgress = (message) => {
       // The SABR attempt runs under its own id; its encode progress is this
       // download's progress too (a 5 h MP3 encodes for minutes).
-      if (message?.t !== 'mendosave-progress'
+      if (cancelRequested || finished || message?.t !== 'mendosave-progress'
         || (message.jobId !== jobId && message.jobId !== `${jobId}-sabr`)) return;
       const value = Math.max(0, Math.min(1, message.value || 0));
       const fallback = isMp3
@@ -858,7 +911,15 @@
     chrome.runtime.onMessage.addListener(onFfmpegProgress);
 
     try {
+      producer = await packageUI.acquireProcessor({ signal: producerController.signal,
+        onDisconnect(error) {
+          if (finished) return;
+          producerFailure = error;
+          cancelDownload();
+        } });
+      checkCancelled();
       const stored = await chrome.storage.local.get(['transcode']);
+      checkCancelled();
       const transcode = options.transcode ?? stored.transcode ?? false;
       // SABR first: it is the only route that can hand over a whole track, and
       // it costs seconds instead of the video's own length. Its own job id
@@ -877,34 +938,35 @@
           jobId: `${jobId}-sabr`, info, height, transcode,
           audioFormat: sabrAudio ? audioFormat : null,
           notification,
-          isCancelled: () => cancelRequested,
-        });
+          isCancelled: () => cancelRequested || finished,
+          keepCancel: packageDownload,
+        }, producer);
+        checkCancelled();
         if (viaSabr) {
           restorePrimedMedia();
           notification.setCancel(null);
           notification.stage('engine', 1, 'done');
           notification.stage('process', 1, 'done', isMp3 ? 'Кодирование аудио' : 'Склейка дорожек');
           await clearReloadGuard();
+          checkCancelled();
           notification.set(`Готово: ${viaSabr.filename}`, 1);
           notification.hide(4000);
           return true;
         }
-        if (cancelRequested) {
-          notification.set('Загрузка отменена', 1);
-          notification.hide(4000);
-          return false;
-        }
+        // SABR processing hides single-download cancellation. A refusal returns
+        // to cancellable MSE capture, including after an automatic page reload.
+        notification.setCancel(cancelFromNotification);
         notification.stage('capture', 0, 'active', 'Получение сегментов');
       }
       // Loading the wasm core is expensive. Start it in parallel with segment
       // capture; actual ffmpeg execution still waits for a complete container.
-      const warmup = warmupMediaProcessor().then(
-        () => notification.stage('engine', 1, 'done'),
-        () => notification.stage('engine', null, 'queued', 'Повторный запуск медиадвижка'),
+      void warmupMediaProcessor({ signal: producerController.signal }).then(
+        () => { if (!cancelRequested && !finished) notification.stage('engine', 1, 'done'); },
+        () => { if (!cancelRequested && !finished) notification.stage('engine', null, 'queued', 'Повторный запуск медиадвижка'); },
       );
       // Runs alongside the capture and hands over what has already been
       // captured; stopped in every exit path below.
-      staging = isMp3 ? null : startTrackStaging(jobId);
+      staging = isMp3 ? null : startTrackStaging(jobId, producer);
       let stagingReport = { failed: true, shippedBytes: 0 };
       const captured = await callHook('download', {
         height,
@@ -913,6 +975,7 @@
         freshPageResume: Boolean(options.freshPageResume),
         reloadCount: Math.max(0, Number(options.reloadCount) || 0),
       }, (message) => {
+        if (cancelRequested || finished) return;
         // A direct download builds its tracks from googlevideo, not from the
         // MSE capture, so the shipped bytes can never match the finished file —
         // the byte-for-byte check refuses them every time. Shipping them anyway
@@ -940,14 +1003,11 @@
       restorePrimedMedia();
       // The hook may have finished a phase without a cancellation checkpoint;
       // never save a file the user has already cancelled.
-      if (cancelRequested) {
-        const cancelledError = new Error('загрузка отменена пользователем');
-        cancelledError.details = { cancelled: true };
-        throw cancelledError;
-      }
+      checkCancelled();
       notification.stage('capture', 1, 'done');
-      // Transfer/processing cannot be interrupted mid-ffmpeg; hide the button.
-      notification.setCancel(null);
+      // A package can cancel its current processor job and remaining items.
+      // Preserve the single-download processing control policy.
+      if (!packageDownload) notification.setCancel(null);
 
       const actualHeight = !isMp3 && Number(captured.actualHeight) > 0 ? Number(captured.actualHeight) : height;
       scaleDown = !isMp3 && actualHeight > height;
@@ -973,7 +1033,7 @@
         for (const [track, key] of [['audio', '_tailA'], ['video', '_tailV']]) {
           if (!captured.staged?.[track]) continue;
           const tail = captured[key];
-          staged[track] = tail?.byteLength ? await stageBuffer(jobId, track, tail) : true;
+          staged[track] = tail?.byteLength ? await stageBuffer(jobId, track, tail, producer) : true;
         }
       }
       const job = {
@@ -1003,9 +1063,11 @@
       captured._v = null;
       captured._vp = null;
       captured._a = null;
+      checkCancelled();
       const result = await muxViaOffscreen(job, (stage, fraction, state, stageLabel) => {
-        notification.stage(stage, fraction, state, stageLabel);
-      });
+        if (!cancelRequested && !finished) notification.stage(stage, fraction, state, stageLabel);
+      }, producer);
+      checkCancelled();
       if (!result?.ok) {
         throw mediaResponseError(result, 'не удалось собрать файл');
       }
@@ -1013,16 +1075,31 @@
       notification.stage('transfer', 1, 'done');
       notification.stage('process', 1, 'done', processStatus);
       await clearReloadGuard();
+      checkCancelled();
       notification.set(`Готово: ${result.filename || filename}`, 1);
       notification.hide(4000);
       return true;
     } catch (caughtError) {
       let error = caughtError;
-      if (globalThis.MendoPackageUI?.running) throw error;
-      if (cancelRequested || error?.details?.cancelled || error?.cancelled || error?.name === 'AbortError') {
+      if (!producerFailure && (cancelRequested || packageSignal?.aborted || error?.details?.cancelled || error?.cancelled || error?.name === 'AbortError')) {
         notification.set('Загрузка отменена', 1);
         notification.hide(4000);
+        if (packageDownload) {
+          error.name = 'AbortError';
+          error.cancelled = true;
+          throw error;
+        }
         return false;
+      }
+      if (packageDownload) {
+        if (error?.details?.reloadRequired) {
+          const terminal = new Error('Пакет остановлен: получение медиаданных прервано. Автоматическое обновление и продолжение не выполнялись. Уже сохранённые файлы остаются. Для повторной попытки обновите исходную страницу и запустите пакет заново.', { cause: error });
+          terminal.details = error.details;
+          error = terminal;
+        }
+        notification.set(`Ошибка: ${String(error?.message || error)}`, 1);
+        notification.hide(9000);
+        throw error;
       }
       const reloadCount = Math.max(0, Number(options.reloadCount) || 0);
       // Whether the automatic reload ran is invisible in reports otherwise: in
@@ -1035,7 +1112,7 @@
           text: `download failed; reloadRequired= ${Boolean(error?.details?.reloadRequired)}`
             + ` reason= ${error?.details?.reason || 'unknown'} reloadCount= ${reloadCount}`
             + ` willReload= ${Boolean(error?.details?.reloadRequired) && reloadCount < 2}`,
-        }).catch(() => {});
+        }, undefined, producer).catch(() => {});
       }
       if (error?.details?.reloadRequired && reloadCount < 2) {
         try {
@@ -1053,7 +1130,7 @@
               playerState: primedState,
               reloadCount: reloadCount + 1,
             },
-          }, 10_000);
+          }, 10_000, producer);
           if (!queued?.ok) {
             throw new Error(queued?.error || 'не удалось сохранить загрузку перед обновлением');
           }
@@ -1091,7 +1168,7 @@
             reloadRequest = { t: 'mendosave-navigate-tab', url: target.href };
           }
           setTimeout(() => {
-            sendRuntimeMessage(reloadRequest, 5_000)
+            sendRuntimeMessage(reloadRequest, 5_000, producer)
               .then((response) => { if (!response?.ok) location.reload(); })
               .catch(() => location.reload());
           }, 100);
@@ -1100,7 +1177,7 @@
           void sendRuntimeMessage({
             t: 'mendosave-log', tag: 'download',
             text: `automatic reload could not be scheduled: ${String(reloadError?.message || reloadError)}`,
-          }).catch(() => {});
+          }, undefined, producer).catch(() => {});
           error = reloadError;
         }
       }
@@ -1118,12 +1195,22 @@
       });
       return false;
     } finally {
+      finished = true;
       packageSignal?.removeEventListener('abort', cancelDownload);
+      chrome.runtime.onMessage.removeListener(onFfmpegProgress);
+      notification.setCancel(null);
+      notification.seal?.();
       // Also on the error paths: the pump keeps polling the hook otherwise.
       if (staging) await staging.stop().catch(() => {});
-      notification.setCancel(null);
+      await cancelCleanup;
+      if (producer) {
+        await Promise.allSettled([
+          sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000, producer),
+          sendRuntimeMessage({ t: 'mendosave-abort', jobId: `${jobId}-sabr` }, 10_000, producer),
+        ]);
+        producer.release();
+      }
       if (!reloadScheduled) restorePrimedMedia();
-      chrome.runtime.onMessage.removeListener(onFfmpegProgress);
       downloadInProgress = false;
     }
   }
@@ -1143,18 +1230,18 @@
     return new Uint8Array(new Uint8Array(buffer, offset, length));
   }
 
-  async function stageBuffer(jobId, track, buffer) {
+  async function stageBuffer(jobId, track, buffer, producer) {
     for (let offset = 0; offset < buffer.byteLength; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = ownedTransferChunk(buffer, offset);
       const response = await sendRuntimeMessage({
         t: 'mendosave-stage', jobId, track, b64: encodeBase64(chunk),
-      }, 60_000).catch(() => null);
+      }, 60_000, producer).catch(() => null);
       if (!response?.ok) return false;
     }
     return true;
   }
 
-  function startTrackStaging(jobId) {
+  function startTrackStaging(jobId, producer) {
     let stopped = false;
     let failed = false;
     let shippedBytes = 0;
@@ -1166,17 +1253,12 @@
       try {
         const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
         if (!ensured?.ok) { give(`offscreen unavailable: ${ensured?.error || 'no answer'}`); return; }
-        // `mendosave-ensure` resolves as soon as the document is created, and the
-        // document registers its message listener only after ffmpeg.js and
-        // offscreen.js have both parsed. A request sent into that window is
-        // answered by nobody — the service worker sees an unknown type and
-        // returns nothing, so the send resolves with `undefined` instead of
-        // failing. That is exactly what killed staging in the field
-        // (`stage-open refused: no answer`), so wait the document out.
+        // The caller owns a ready producer throughout this pump. Keep the
+        // bounded stage-open retry for a transient refusal on that same host.
         let opened = null;
         for (let attempt = 0; attempt < 6 && !opened?.ok && !stopped; attempt++) {
           if (attempt) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
-          opened = await sendRuntimeMessage({ t: 'mendosave-stage-open', jobId }, 10_000).catch(() => null);
+          opened = await sendRuntimeMessage({ t: 'mendosave-stage-open', jobId }, 10_000, producer).catch(() => null);
         }
         if (!opened?.ok) { give(`stage-open refused: ${opened?.error || 'no answer'}`); return; }
       } catch (error) { give(`setup failed: ${String(error?.message || error)}`); return; }
@@ -1190,7 +1272,7 @@
         for (const track of ['audio', 'video']) {
           const buffer = drained?.tracks?.[track];
           if (!buffer?.byteLength) continue;
-          if (!await stageBuffer(jobId, track, buffer)) { give(`stage chunk refused (${track})`); return; }
+          if (!await stageBuffer(jobId, track, buffer, producer)) { give(`stage chunk refused (${track})`); return; }
           shippedBytes += buffer.byteLength;
         }
       }
@@ -1213,7 +1295,7 @@
             text: `staging stopped; shippedBytes= ${shippedBytes} drains= ${drains}`
               + ` seconds= ${((Date.now() - openedAt) / 1000).toFixed(1)}`
               + `${failed ? ` failed= ${reason}` : ''}`,
-          }).catch(() => {});
+          }, undefined, producer).catch(() => {});
           return { failed, shippedBytes };
         })();
         return stopPromise;
@@ -1242,21 +1324,35 @@
     return btoa(binary);
   }
 
-  async function warmupMediaProcessor() {
-    const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
-    if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const warmed = await sendRuntimeMessage({ t: 'mendosave-warmup' }, 120_000);
-    if (!warmed?.ok) throw new Error(warmed?.error || 'не удалось загрузить медиадвижок');
+  async function warmupMediaProcessor({ signal = globalThis.MendoPackageUI?.signal } = {}) {
+    // This work is detached from capture and may finish after its caller. Its
+    // own producer covers the readiness-to-warmup admission gap as well.
+    let disconnected;
+    const producer = await globalThis.MendoPackageUI.acquireProcessor({ signal,
+      onDisconnect(error) { disconnected = error; } });
+    const checkWarmup = () => {
+      if (disconnected) throw disconnected;
+      if (signal?.aborted) { const error = new Error('Подготовка медиадвижка отменена'); error.name = 'AbortError'; throw error; }
+    };
+    try {
+      checkWarmup();
+      const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
+      checkWarmup();
+      if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
+      const warmed = await sendRuntimeMessage({ t: 'mendosave-warmup' }, 120_000, producer);
+      checkWarmup();
+      if (!warmed?.ok) throw new Error(warmed?.error || 'не удалось загрузить медиадвижок');
+    } finally { producer.release(); }
   }
 
-  async function muxViaOffscreen(job, onStage) {
+  async function muxViaOffscreen(job, onStage, producer) {
     const jobId = job.jobId;
     let begun = false;
     try {
       const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
 
-      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000);
+      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000, producer);
       if (!registration?.ok || !Number.isInteger(registration.tabId)) {
         throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
       }
@@ -1277,7 +1373,7 @@
         videoPrefixBoundary: job.videoPrefixBoundary,
         transcode: job.transcode, scaleHeight: job.scaleHeight, duration: job.duration,
         audioCaptureRate: job.audioCaptureRate,
-      }, 30_000);
+      }, 30_000, producer);
       if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
       begun = true;
 
@@ -1292,7 +1388,7 @@
           const chunk = ownedTransferChunk(buffer, offset);
           const response = await sendRuntimeMessage({
             t: 'mendosave-chunk', jobId, track, b64: encodeBase64(chunk),
-          }, 60_000);
+          }, 60_000, producer);
           if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${track})`);
           transferredBytes += chunk.length;
           onStage?.('transfer', totalBytes ? transferredBytes / totalBytes : 1, 'active', 'Передача и сборка');
@@ -1322,12 +1418,12 @@
         text: `tracks handed to offscreen; bytes= ${totalBytes}`
           + ` staged= ${job.staged?.audio ? 'audio' : ''}${job.staged?.video ? '+video' : ''}`
           + ` seconds= ${((Date.now() - transferStartedAt) / 1000).toFixed(1)}`,
-      }).catch(() => {});
+      }, undefined, producer).catch(() => {});
       onStage?.('transfer', 1, 'done', 'Передача и сборка');
       onStage?.('process', 0, 'active');
-      return await sendRuntimeMessage({ t: 'mendosave-finalize', jobId }, 2 * 60 * 60_000);
+      return await sendRuntimeMessage({ t: 'mendosave-finalize', jobId }, 2 * 60 * 60_000, producer);
     } catch (error) {
-      if (begun) await sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
+      if (begun) await sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000, producer).catch(() => {});
       throw error;
     }
   }
@@ -1337,7 +1433,7 @@
   // come from the player response and the bytes arrive while the offscreen
   // muxer is already parsing them. The page holds no more than its outbox, so
   // a 300 MB video never exists in one piece anywhere on this side either.
-  async function downloadViaSabr(job, onStage, isCancelled) {
+  async function downloadViaSabr(job, onStage, isCancelled, producer) {
     const jobId = job.jobId;
     let begun = false;
     const stopIfCancelled = () => {
@@ -1349,7 +1445,7 @@
     try {
       const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000);
+      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000, producer);
       if (!registration?.ok || !Number.isInteger(registration.tabId)) {
         throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
       }
@@ -1376,7 +1472,7 @@
         ...MendoMediaPlan.processingOptions({ format: job.format, transcode: job.transcode,
           requestedHeight: job.height, sourceHeight: tracks.video?.height || 0 }),
         duration: job.duration,
-      }, 30_000);
+      }, 30_000, producer);
       if (!begin?.ok) throw new Error(begin?.error || 'не удалось начать обработку');
       begun = true;
 
@@ -1395,7 +1491,7 @@
             const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
             const response = await sendRuntimeMessage({
               t: 'mendosave-chunk', jobId, track: chunk.track, b64: encodeBase64(slice),
-            }, 60_000);
+            }, 60_000, producer);
             if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${chunk.track})`);
             transferred += slice.length;
             if (chunk.track in transferredByTrack) transferredByTrack[chunk.track] += slice.length;
@@ -1417,10 +1513,10 @@
       // toast's abort names the base job id, not this one — a press here used
       // to be ignored and followed by "Готово". Minutes long for a 5 h MP3.
       job.onProcessing?.();
-      return await sendRuntimeMessage({ t: 'mendosave-finalize', jobId }, 2 * 60 * 60_000);
+      return await sendRuntimeMessage({ t: 'mendosave-finalize', jobId }, 2 * 60 * 60_000, producer);
     } catch (error) {
       void callHook('sabr-cancel').catch(() => {});
-      if (begun) await sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
+      if (begun) await sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000, producer).catch(() => {});
       throw error;
     }
   }
@@ -1429,7 +1525,7 @@
   // is the only path not capped at 60 s of media. Anything it cannot do — no
   // intercepted template yet, an odd container, a refusal mid-way — returns
   // `null` and the old route runs as before, so this can only add outcomes.
-  async function tryDownloadViaSabr({ jobId, info, height, transcode, audioFormat, notification, isCancelled }) {
+  async function tryDownloadViaSabr({ jobId, info, height, transcode, audioFormat, notification, isCancelled, keepCancel = false }, producer) {
     const started = Date.now();
     const isAudio = Boolean(audioFormat);
     try {
@@ -1448,20 +1544,30 @@
         filename: (tracks) => (isAudio
           ? `${safeFilename(info.title)}${audioFormatMeta(audioFormat, info).extension}`
           : `${safeFilename(info.title)} [${Math.min(tracks.video?.height || height, height)}p].mp4`),
-        onProcessing: () => notification.setCancel(null),
+        onProcessing: () => { if (!keepCancel && !isCancelled?.()) notification.setCancel(null); },
       }, (stage, fraction, state, label) => {
-        notification.stage(stage, fraction, state, label);
-      }, isCancelled);
+        if (!isCancelled?.()) notification.stage(stage, fraction, state, label);
+      }, isCancelled, producer);
+      if (isCancelled?.()) {
+        const error = new Error('загрузка отменена пользователем');
+        error.name = 'AbortError';
+        throw error;
+      }
       if (!result?.ok) throw mediaResponseError(result, 'не удалось собрать файл');
       return result;
     } catch (error) {
+      if (isCancelled?.()) {
+        error.name = 'AbortError';
+        error.cancelled = true;
+        throw error;
+      }
       if (error?.details?.cancelled || error?.cancelled || error?.name === 'AbortError') throw error;
       const reason = `sabr path declined after ${((Date.now() - started) / 1000).toFixed(1)}s:`
         + ` ${String(error?.message || error)}`;
       // Also to the console: a silent fall-through to the capture looks like the
       // SABR path was never tried, and the journal is not visible while testing.
       console.warn('[MendoSave]', reason);
-      void sendRuntimeMessage({ t: 'mendosave-log', tag: 'sabr', text: reason }).catch(() => {});
+      void sendRuntimeMessage({ t: 'mendosave-log', tag: 'sabr', text: reason }, undefined, producer).catch(() => {});
       return null;
     }
   }
@@ -1679,18 +1785,15 @@
   }
 
   async function startLiveRecording(info, from) {
-    const notification = getToast();
-    if (downloadInProgress) {
-      notification.set('Другая загрузка уже выполняется', 1);
-      notification.hide(4000);
-      return false;
-    }
+    if (downloadInProgress) return false;
+    let notification = getToast();
     downloadInProgress = true;
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const chains = { video: Promise.resolve(), audio: Promise.resolve() };
+    let producer, acceptingChunks = false, acceptingProgress = true, captureStarted = false;
     liveJob = { jobId, failed: '', queuedBytes: 0, sentBytes: 0 };
     const failLiveTransfer = (reason) => {
-      if (liveJob && !liveJob.failed) {
+      if (liveJob?.jobId === jobId && !liveJob.failed) {
         liveJob.failed = reason;
         void callHook('live-stop').catch(() => {});
       }
@@ -1699,7 +1802,7 @@
       if (event.source !== window || event.origin !== location.origin) return;
       const data = event.data;
       if (!data || data.__mendosave_live_chunk !== true || !data.buffer) return;
-      if (!liveJob || liveJob.jobId !== jobId || liveJob.failed) return;
+      if (!acceptingChunks || !liveJob || liveJob.jobId !== jobId || liveJob.failed) return;
       const buffer = data.buffer;
       liveJob.queuedBytes += buffer.byteLength;
       if (liveJob.queuedBytes - liveJob.sentBytes > 192 * 1024 * 1024) {
@@ -1708,12 +1811,13 @@
       }
       const track = data.kind === 'audio' ? 'audio' : 'video';
       chains[track] = chains[track].then(async () => {
-        if (!liveJob || liveJob.failed) return;
+        if (!liveJob || liveJob.jobId !== jobId || liveJob.failed) return;
         for (let offset = 0; offset < buffer.byteLength; offset += TRANSFER_CHUNK_SIZE) {
+          if (liveJob?.jobId !== jobId || liveJob.failed) return;
           const part = ownedTransferChunk(buffer, offset);
           const response = await sendRuntimeMessage({
             t: 'mendosave-live-chunk', jobId, track, mime: data.mime || '', b64: encodeBase64(part),
-          }, 60_000);
+          }, 60_000, producer);
           if (!response?.ok) throw new Error(response?.error || 'сегмент не принят обработчиком');
         }
         liveJob.sentBytes += buffer.byteLength;
@@ -1721,30 +1825,45 @@
     };
     window.addEventListener('message', onLiveChunk);
     const onFfmpegProgress = (message) => {
-      if (message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
+      if (!acceptingProgress || message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
       notification.set(message.status || 'Сборка записи эфира…', Math.max(0, Math.min(1, message.value || 0)));
     };
     chrome.runtime.onMessage.addListener(onFfmpegProgress);
     try {
       notification.set('Подготовка записи эфира…', 0.05);
+      producer = await globalThis.MendoPackageUI.acquireProcessor({
+        signal: globalThis.MendoPackageUI.signal,
+        onDisconnect: error => failLiveTransfer(String(error?.message || error)),
+      });
+      const checkLive = () => { if (liveJob.failed) throw new Error(liveJob.failed); };
+      checkLive();
       const ensured = await sendWorkerMessage({ t: 'mendosave-ensure' }, 30_000);
+      checkLive();
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000);
+      const registration = await sendRuntimeMessage({ t: 'mendosave-register-job', jobId }, 10_000, producer);
+      checkLive();
       if (!registration?.ok || !Number.isInteger(registration.tabId)) {
         throw new Error(registration?.error || 'не удалось определить вкладку записи');
       }
       const begun = await sendRuntimeMessage({
         t: 'mendosave-live-begin', jobId, tabId: registration.tabId,
-      }, 30_000);
+      }, 30_000, producer);
+      checkLive();
       if (!begun?.ok) throw new Error(begun?.error || 'не удалось начать запись эфира');
       notification.hide(800);
       renderLivePanel({
         seconds: 0, bytes: 0, behind: 0, caughtUp: from !== 'start',
       });
+      acceptingChunks = true;
+      captureStarted = true;
       const result = await callHook('live-start', { from }, (message) => {
+        if (!acceptingChunks) return;
         if (message.live) renderLivePanel(message.live);
       });
+      acceptingChunks = false;
+      window.removeEventListener('message', onLiveChunk);
       removeLivePanel();
+      notification = getToast();
       if (liveJob.failed) throw new Error(liveJob.failed);
       notification.set('Эфир записан, передаю остаток данных…', 0.15);
       await Promise.allSettled([chains.video, chains.audio]);
@@ -1758,13 +1877,14 @@
         duration: Number(result.durationSeconds) || 0,
         videoMime: result.videoMime || '',
         audioMime: result.audioMime || '',
-      }, 60 * 60_000);
+      }, 60 * 60_000, producer);
       if (!finalized?.ok) {
         const failure = new Error(finalized?.error || 'не удалось собрать запись эфира');
         failure.recovered = Boolean(finalized?.recovered);
         failure.logged = Boolean(finalized?.logged);
         throw failure;
       }
+      acceptingProgress = false;
       notification.set(finalized.split
         ? 'Готово: запись сохранена двумя файлами (видео + звук): она слишком велика для склейки в браузере'
         : (finalized.singleTrack
@@ -1773,17 +1893,28 @@
       notification.hide(9000);
       return true;
     } catch (error) {
+      acceptingChunks = false;
+      acceptingProgress = false;
+      window.removeEventListener('message', onLiveChunk);
+      if (liveJob?.jobId === jobId && !liveJob.failed) liveJob.failed = String(error?.message || error);
       removeLivePanel();
-      await sendRuntimeMessage({ t: 'mendosave-live-abort', jobId }, 10_000).catch(() => {});
+      if (captureStarted) await callHook('live-stop').catch(() => {});
+      await Promise.allSettled([chains.video, chains.audio]);
+      if (producer) await sendRuntimeMessage({ t: 'mendosave-live-abort', jobId }, 10_000, producer).catch(() => {});
       const detail = String(error?.message || error);
+      notification = getToast();
       notification.set(error?.recovered ? detail : `Ошибка записи эфира: ${detail.slice(0, 240)}`, 1);
       notification.hide(error?.recovered ? 25_000 : 9000);
       if (!error?.logged) await reportError('ui/live', error, { videoId: info.videoId, from });
       return false;
     } finally {
+      acceptingChunks = false;
+      acceptingProgress = false;
       window.removeEventListener('message', onLiveChunk);
       chrome.runtime.onMessage.removeListener(onFfmpegProgress);
-      liveJob = null;
+      await Promise.allSettled([chains.video, chains.audio]);
+      producer?.release();
+      if (liveJob?.jobId === jobId) liveJob = null;
       downloadInProgress = false;
     }
   }
