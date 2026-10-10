@@ -28,6 +28,9 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
     setInterval(fn, delay) { const timer = setInterval(fn, delay); timer.unref(); timers.add(timer); return timer; },
     clearInterval(timer) { clearInterval(timer); timers.delete(timer); },
   });
+  Object.assign(context, { File, AbortController, AbortSignal, DOMException, WritableStream, ReadableStream, crypto, MendoArchive: require('../extension/archive.js') });
+  vm.runInContext(fs.readFileSync('extension/package_host.js', 'utf8'), context);
+  vm.runInContext(fs.readFileSync('extension/package_io.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/offscreen.js', 'utf8'), context);
   const message = (payload, tabId = 7) => new Promise((resolve) => {
     const accepted = listener(payload, { id: chrome.runtime.id, tab: { id: tabId, url: 'https://www.youtube.com/watch?v=fixture' } }, resolve);
@@ -320,7 +323,7 @@ test('unreachable worker still parks exact ready bytes and recovery flush saves 
     return { async getFileHandle(id, options) {
       if (!options?.create && !files.has(id)) throw new Error('NotFoundError');
       return { async createWritable() { return {
-        async write(blob) { files.set(id, blob); }, async close() {}, async abort() {},
+        async write(blob) { files.set(id, new Blob([files.get(id) || [], blob])); }, async close() {}, async abort() {},
       }; }, async getFile() { return files.get(id); } };
     }, async removeEntry(id) { files.delete(id); } };
   } }; } };
@@ -350,4 +353,122 @@ test('unreachable worker still parks exact ready bytes and recovery flush saves 
     assert.equal(results.every(response => response.ok), true);
     assert.equal(saves, 1); assert.ok(state.entries[0].savedAt);
   } finally { clearTimeout(keepAlive); processor.close(); }
+});
+
+function recoveryFixture(onSave, onIndexWrite = () => {}) {
+  const files = new Map(), state = { entries: [], fastTimers: true };
+  state.storage = { async getDirectory() { return { async getDirectoryHandle(name) {
+    if (name !== 'nvs-recovered') throw new Error('NotFoundError');
+    return { async getFileHandle(id, options) {
+      if (!options?.create && !files.has(id)) throw new Error('NotFoundError');
+      return { async createWritable() { return {
+        async write(blob) { files.set(id, new Blob([files.get(id) || [], blob])); }, async close() {}, async abort() {},
+      }; }, async getFile() { return files.get(id); } };
+    }, async removeEntry(id) { files.delete(id); } };
+  } }; } };
+  const processor = processorContext(message => {
+    if (message.t === 'mendosave-save') return onSave(message);
+    if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
+    if (message.t === 'mendosave-recovery-write') { onIndexWrite(message); state.entries = message.entries; }
+    return { ok: true };
+  }, undefined, Date, undefined, state);
+  function park(id) {
+    files.set(id, new Blob(['ready bytes']));
+    state.entries.push({ id, filename: `${id}.mp4`, createdAt: Date.now(), savedAt: 0 });
+  }
+  return { processor, files, state, park };
+}
+
+test('cancelling recovery stops further native dialogs and automatic retry of the remaining files', async () => {
+  let saves = 0;
+  const { processor, state, park } = recoveryFixture(() => { saves++; return { ok: false, cancelled: true, error: 'Download canceled by the user' }; });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    park('first'); park('second');
+    const result = await processor.message({ t: 'mendosave-flush', manual: true });
+    assert.equal(result.cancelled, true);
+    assert.equal(saves, 1);
+    assert.equal(state.entries.length, 2);
+    assert.ok(state.entries.every(entry => entry.manualOnly && !entry.savedAt));
+    await processor.message({ t: 'mendosave-flush' });
+    assert.equal(saves, 1);
+  } finally { processor.close(); }
+});
+
+test('recovery flush preserves a ready file prepared while an earlier native save is pending', async () => {
+  let entered, finish;
+  const started = new Promise(resolve => { entered = resolve; });
+  const pending = new Promise(resolve => { finish = resolve; });
+  const { processor, state, files, park } = recoveryFixture(async message => {
+    if (message.filename === 'first.mp4') { entered(); await pending; return { ok: true, id: 42 }; }
+    throw new Error('Could not establish connection. Receiving end does not exist.');
+  });
+  const keepAlive = setTimeout(() => {}, 2000);
+  try {
+    await new Promise(resolve => setImmediate(resolve)); park('first');
+    const flushing = processor.message({ t: 'mendosave-flush', manual: true });
+    await started;
+    await processor.message({ t: 'mendosave-begin', jobId: 'new', filename: 'new.mp3', format: 'mp3', audioMime: 'audio/mpeg' });
+    await processor.message({ t: 'mendosave-chunk', jobId: 'new', track: 'audio', b64: '//uQAAECAw==' });
+    const result = await processor.message({ t: 'mendosave-finalize', jobId: 'new' });
+    assert.equal(result.recovered, true);
+    assert.equal(state.entries.length, 2);
+    const newId = state.entries.find(entry => entry.filename === 'new.mp3').id;
+    finish(); await flushing;
+    assert.equal(state.entries.some(entry => entry.id === newId && !entry.savedAt), true);
+    assert.equal(files.has(newId), true);
+    assert.ok(state.entries.find(entry => entry.id === 'first').savedAt);
+  } finally { finish(); clearTimeout(keepAlive); processor.close(); }
+});
+
+test('recovery records the saved prefix before waiting for the next native dialog', async () => {
+  let entered, cancel;
+  const second = new Promise(resolve => { entered = resolve; });
+  const pending = new Promise(resolve => { cancel = resolve; });
+  const { processor, state, park } = recoveryFixture(async message => {
+    if (message.filename === 'first.mp4') return { ok: true, id: 42 };
+    entered(); return pending;
+  });
+  try {
+    await new Promise(resolve => setImmediate(resolve)); park('first'); park('second');
+    const flushing = processor.message({ t: 'mendosave-flush', manual: true });
+    await second;
+    assert.ok(state.entries.find(entry => entry.id === 'first').savedAt);
+    cancel({ ok: false, cancelled: true, error: 'Download canceled by the user' });
+    const result = await flushing;
+    assert.equal(result.saved, 1); assert.equal(result.pending, 1); assert.equal(result.cancelled, true);
+  } finally { cancel({ ok: false, cancelled: true }); processor.close(); }
+});
+
+test('a transient recovery index failure after a saved file does not download it again', async () => {
+  let saves = 0, writes = 0;
+  const { processor, state, park } = recoveryFixture(() => { saves++; return { ok: true, id: 42 }; }, () => {
+    if (++writes === 1) throw new Error('storage temporarily unavailable');
+  });
+  try {
+    await new Promise(resolve => setImmediate(resolve)); park('first');
+    const result = await processor.message({ t: 'mendosave-flush', manual: true });
+    assert.equal(result.saved, 1); assert.equal(result.pending, 0);
+    assert.ok(state.entries[0].savedAt);
+    await processor.message({ t: 'mendosave-flush', manual: true });
+    assert.equal(saves, 1);
+  } finally { processor.close(); }
+});
+
+test('unsaved manual recovery survives automatic expiry and remains explicitly saveable', async () => {
+  let saves = 0;
+  const { processor, state, files, park } = recoveryFixture(() => { saves++; return { ok: true, id: 42 }; });
+  try {
+    await new Promise(resolve => setImmediate(resolve)); park('ready-package');
+    Object.assign(state.entries[0], { manualOnly: true, createdAt: Date.now() - 8 * 24 * 60 * 60 * 1000 });
+    const automatic = await processor.message({ t: 'mendosave-flush' });
+    assert.equal(automatic.pending, 1);
+    assert.equal(saves, 0);
+    assert.equal(files.has('ready-package'), true);
+    assert.equal(state.entries.length, 1);
+    const manual = await processor.message({ t: 'mendosave-flush', manual: true });
+    assert.equal(manual.saved, 1);
+    assert.equal(manual.pending, 0);
+    assert.ok(state.entries[0].savedAt);
+  } finally { processor.close(); }
 });

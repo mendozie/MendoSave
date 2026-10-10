@@ -11,6 +11,19 @@
 // keeps the saved file clean. Video-only and audio-only saves never enter the
 // extension at all: the URL goes straight to chrome.downloads.
 (() => {
+  const mendoSend = (message) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  const mendoFetch = (url, options) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
+  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
+  function downloadInterrupted(code) {
+    if (globalThis.MendoPackageUI) globalThis.MendoPackageUI.interruption(code);
+    const error = new Error(`Сохранение прервано: ${code || 'причина не указана'}`);
+    if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') error.name = 'AbortError';
+    throw error;
+  }
+
   const BUTTON_CLASS = 'mendosave-coub-btn';
   const MENU_ID = 'mendosave-coub-menu';
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
@@ -23,12 +36,12 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `coub/${tag}`, text }).catch(() => {});
+    mendoSend({ t: 'mendosave-log', tag: `coub/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
     console.error('[MendoSave]', error);
-    return chrome.runtime.sendMessage({
+    return mendoSend({
       t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
@@ -66,7 +79,7 @@
   async function loadCoub(permalink) {
     // Same origin, and with the session: an age-restricted or private coub is
     // only described to a signed-in visitor.
-    const response = await fetch(`${location.origin}/api/v2/coubs/${encodeURIComponent(permalink)}`,
+    const response = await mendoFetch(`${location.origin}/api/v2/coubs/${encodeURIComponent(permalink)}`,
       { credentials: 'include' });
     if (!response.ok) throw new Error(`Coub API ответил ${response.status}`);
     const payload = await response.json();
@@ -131,7 +144,7 @@
     for (let attempt = 0; attempt < MEDIA_ATTEMPTS; attempt++) {
       if (attempt) await new Promise((resolve) => { setTimeout(resolve, 400 * attempt); });
       try {
-        const response = await fetch(url, {
+        const response = await mendoFetch(url, {
           credentials: 'omit',
           cache: 'no-store',
           ...(received ? { headers: { Range: `bytes=${received}-` } } : {}),
@@ -152,6 +165,7 @@
         } else {
           const reader = response.body.getReader();
           for (;;) {
+            mendoCheck();
             const { done, value } = await reader.read();
             if (done) break;
             parts.push(value);
@@ -173,6 +187,7 @@
         onProgress?.(1);
         return merged;
       } catch (error) {
+        if (error?.name === 'AbortError') throw error;
         lastError = error;
         log('fetch', `attempt ${attempt + 1}/${MEDIA_ATTEMPTS} failed at ${received} bytes:`
           + ` ${String(error?.message || error)}`);
@@ -247,7 +262,7 @@
   async function sendTrack(jobId, track, bytes, onProgress) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
-      const response = await chrome.runtime.sendMessage({
+      const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track, b64: encodeBase64(chunk),
       });
       if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${track})`);
@@ -256,13 +271,13 @@
   }
 
   async function muxViaOffscreen(job, tracks, onStage) {
-    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+    const ensured = await mendoSend({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId: job.jobId });
+    const registration = await mendoSend({ t: 'mendosave-register-job', jobId: job.jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
-    const started = await chrome.runtime.sendMessage({
+    const started = await mendoSend({
       t: 'mendosave-begin',
       jobId: job.jobId,
       tabId: registration.tabId,
@@ -293,9 +308,9 @@
         report();
       });
       onStage?.('transfer', 1);
-      return await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId: job.jobId });
+      return await mendoSend({ t: 'mendosave-finalize', jobId: job.jobId });
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
+      await mendoSend({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
       throw error;
     }
   }
@@ -309,19 +324,24 @@
   }
 
   async function saveDirect(url, filename) {
-    const saved = await chrome.runtime.sendMessage({ t: 'mendosave-save', url, filename });
+    const saved = await mendoSend({ t: 'mendosave-save', url, filename });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
+    if (saved.collected) return saved.filename || filename;
     let misses = 0;
     for (;;) {
+      mendoCheck();
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id: saved.id }).catch(() => null);
+      const state = await mendoSend({ t: 'mendosave-download-state', id: saved.id }).catch((error) => {
+        if (error?.name === 'AbortError') throw error;
+        return null;
+      });
       if (!state?.ok) {
         if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
         continue;
       }
       misses = 0;
       if (state.state === 'complete') break;
-      if (state.state === 'interrupted') throw new Error(`браузер прервал загрузку (${state.error || 'причина не указана'})`);
+      if (state.state === 'interrupted') downloadInterrupted(state.error);
     }
     return filename;
   }
@@ -374,7 +394,12 @@
   }
 
   async function runChoice(info, choice) {
-    if (busy) return;
+    const bundled = packageRunning();
+    mendoCheck();
+    if (busy) {
+      if (bundled) throw new Error('Другая загрузка уже выполняется');
+      return;
+    }
     busy = true;
     const notification = getToast();
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -400,7 +425,14 @@
       }
       notification.set(`Готово: ${filename}`, 1);
       notification.hide(5000);
+      return filename;
     } catch (error) {
+      if (bundled) throw error;
+      if (error?.name === 'AbortError') {
+        notification.set('Загрузка отменена', 1);
+        notification.hide(5000);
+        return;
+      }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 160)}`, 1);
       notification.hide(11000);
       await reportError('coub/download', error, { permalink: info.permalink, choice: choice.kind });
@@ -508,6 +540,7 @@
   async function openMenu(button, event) {
     event.preventDefault();
     event.stopPropagation();
+    if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
     menu = document.createElement('div');
     menu.className = 'mendosave-coub-menu';
@@ -549,6 +582,14 @@
         });
         menu.append(item);
       }
+      if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
+        title: info.title || info.permalink,
+        close: closeMenu,
+        options: choices.map((choice, index) => ({
+          id: `coub-${index}`, label: choice.text,
+          run: () => runChoice(info, choice),
+        })),
+      });
       positionMenu(button);
     } catch (error) {
       if (!menu) return;

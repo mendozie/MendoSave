@@ -55,7 +55,7 @@ function logToWorker(tag, text) {
 let busyFinalizers = 0;
 
 function jobsActive() {
-  return Boolean(activeJob) || liveJobs.size > 0 || busyFinalizers > 0;
+  return Boolean(activeJob) || liveJobs.size > 0 || busyFinalizers > 0 || packageIO.jobsActive();
 }
 
 function updateKeepAlive() {
@@ -708,6 +708,10 @@ function beginJob(message) {
   activeJob = {
     id: message.jobId,
     tabId: message.tabId,
+    frameId: message.frameId,
+    documentId: message.documentId,
+    packageId: message.packageId,
+    packageIndex: message.packageIndex,
     phase: 'receiving',
     cancelWait, rejectCancel,
     lastActivity: Date.now(),
@@ -1478,24 +1482,34 @@ async function writeRecoveryIndex(entries) {
   if (!response?.ok) throw new Error(response?.error || 'Recovery index could not be saved');
 }
 
-async function stashForRecovery(blob, filename) {
+let recoveryChanges = Promise.resolve();
+function changeRecovery(update) {
+  const result = recoveryChanges.catch(() => {}).then(async () => {
+    const entries = await readRecoveryIndex();
+    await writeRecoveryIndex(await update(entries));
+  });
+  recoveryChanges = result;
+  return result;
+}
+
+async function stashForRecovery(blob, filename, options = {}) {
   const dir = await recoveryDirectory();
   const id = `${Date.now()}-${Math.round(Math.random() * 1e9).toString(36)}.bin`;
   const handle = await dir.getFileHandle(id, { create: true });
   const writable = await handle.createWritable();
   try {
-    await writable.write(blob);
-    await writable.close();
+    await blob.stream().pipeTo(new WritableStream({
+      write: bytes => writable.write(bytes), close: () => writable.close(), abort: () => writable.abort(),
+    }), { signal: options.signal });
   } catch (error) {
     await writable.abort?.().catch(() => {});
     await dir.removeEntry(id).catch(() => {});
     throw error;
   }
-  const entries = await readRecoveryIndex();
-  entries.push({
+  await changeRecovery(entries => [...entries, {
     id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
-  });
-  await writeRecoveryIndex(entries);
+    ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
+  }]);
   logToWorker('recovery', `parked finished file for later saving; file=${filename} bytes=${blob.size}`);
   return id;
 }
@@ -1509,12 +1523,12 @@ let recoveryFlush = Promise.resolve();
 // Creating this document starts a flush on its own, and the worker asks for
 // one right after: overlapping passes would read the same index and hand the
 // same file to chrome.downloads twice.
-function flushRecoveredFiles() {
-  recoveryFlush = recoveryFlush.catch(() => {}).then(() => runRecoveryFlush());
+function flushRecoveredFiles(manual = false) {
+  recoveryFlush = recoveryFlush.catch(() => {}).then(() => runRecoveryFlush(manual));
   return recoveryFlush;
 }
 
-async function runRecoveryFlush() {
+async function runRecoveryFlush(manual = false) {
   const entries = await readRecoveryIndex();
   if (!entries.length) return { ok: true, saved: 0, pending: 0 };
   let dir;
@@ -1526,8 +1540,12 @@ async function runRecoveryFlush() {
   const remaining = [];
   let saved = 0;
   let failed = '';
-  for (const entry of entries) {
-    const expired = Date.now() - Number(entry.createdAt || 0) > RECOVERY_MAX_AGE_MS;
+  let cancelled = false;
+  for (const [index, entry] of entries.entries()) {
+    // A cancelled package is an explicit recovery choice: keep its ready bytes
+    // until the user saves them, rather than silently expiring the result.
+    const expired = !(entry.manualOnly && !entry.savedAt)
+      && Date.now() - Number(entry.createdAt || 0) > RECOVERY_MAX_AGE_MS;
     const handedOver = entry.savedAt && Date.now() - Number(entry.savedAt) > RECOVERY_KEEP_MS;
     if (expired || handedOver) {
       await dir.removeEntry(entry.id).catch(() => {});
@@ -1537,6 +1555,7 @@ async function runRecoveryFlush() {
       remaining.push(entry);
       continue;
     }
+    if (entry.manualOnly && !manual) { remaining.push(entry); continue; }
     let file;
     try {
       file = await (await dir.getFileHandle(entry.id)).getFile();
@@ -1546,25 +1565,44 @@ async function runRecoveryFlush() {
       logToWorker('recovery', `parked file missing, dropping entry; file=${entry.filename}`);
       continue;
     }
+    let nativeSaved = false;
     try {
       if (!file.size) throw new Error('файл восстановления пуст');
       await saveBlob(file, entry.filename);
       saved++;
-      remaining.push({ ...entry, savedAt: Date.now() });
+      nativeSaved = true;
+      const savedAt = Date.now();
+      remaining.push({ ...entry, savedAt });
+      await changeRecovery(current => current.map(item => item.id === entry.id ? { ...item, savedAt } : item));
       logToWorker('recovery', `saved parked file; file=${entry.filename} bytes=${file.size}`);
     } catch (error) {
       failed = String(error?.message || error);
-      remaining.push(entry);
+      if (nativeSaved) continue;
+      cancelled = error?.cancelled === true || error?.name === 'AbortError';
+      remaining.push(cancelled ? { ...entry, manualOnly: true } : entry);
+      if (cancelled) {
+        remaining.push(...entries.slice(index + 1).map(next => next.savedAt ? next : { ...next, manualOnly: true }));
+        break;
+      }
     }
   }
-  await writeRecoveryIndex(remaining);
-  const pending = remaining.filter((entry) => !entry.savedAt).length;
-  return { ok: !pending, saved, pending, ...(failed ? { error: failed } : {}) };
+  const previousIds = new Set(entries.map(entry => entry.id));
+  const updates = new Map(remaining.map(entry => [entry.id, entry]));
+  let pending = 0;
+  await changeRecovery(current => {
+    const merged = current.filter(entry => !previousIds.has(entry.id) || updates.has(entry.id))
+      .map(entry => updates.has(entry.id) ? { ...entry, ...updates.get(entry.id) } : entry);
+    pending = merged.filter(entry => !entry.savedAt).length;
+    return merged;
+  });
+  return { ok: !pending, saved, pending, ...(cancelled ? { cancelled: true } : {}), ...(failed ? { error: failed } : {}) };
 }
 
 // Single exit for every finished file: retry the handover, and only if the
 // browser stays unreachable park the result instead of discarding it.
 async function deliverOutput(blob, filename, job) {
+  if (job?.packageId) return packageIO.output({ tabId: job.tabId, frameId: job.frameId, documentId: job.documentId },
+    job.packageId, job.packageIndex, blob, filename, job);
   try {
     await saveBlob(blob, filename, job);
     return;
@@ -2105,7 +2143,10 @@ async function saveBlob(blob, filename, job) {
   try {
     const response = await sendToWorker({ t: 'mendosave-save', url, filename },
       { retries: WORKER_RETRY_DELAYS.length });
-    if (!response?.ok) throw new Error(response?.error || 'не удалось сохранить файл');
+    if (!response?.ok) {
+      const error = new Error(response?.error || 'не удалось сохранить файл');
+      error.cancelled = Boolean(response?.cancelled); throw error;
+    }
     if (!Number.isInteger(response.id)) throw new Error('Browser returned no download id');
     // Once accepted, the browser owns the download lifetime. A user pause or
     // slow disk can outlast any elapsed deadline. Retain the ready bytes and
@@ -2118,7 +2159,10 @@ async function saveBlob(blob, filename, job) {
       const state = await sendToWorker({ t: 'mendosave-download-state', id: response.id }, { retries: 3 });
       if (!state?.ok) throw new Error(state?.error || 'Состояние сохранения недоступно');
       if (state.state === 'complete') break;
-      if (state.state === 'interrupted') throw new Error(`Сохранение прервано: ${state.error || 'ошибка браузера'}`);
+      if (state.state === 'interrupted') {
+        const error = new Error(`Сохранение прервано: ${state.error || 'ошибка браузера'}`);
+        error.cancelled = ['USER_CANCELED', 'USER_CANCELLED'].includes(state.error); throw error;
+      }
       await wait(250);
     }
     return response.id;
@@ -2736,6 +2780,7 @@ async function muxLiveTracks(job, tracks, baseName) {
 }
 
 async function reportError(error) {
+  if (error?.cancelled || error?.name === 'AbortError') return { ok: false, cancelled: true, error: 'Сохранение отменено' };
   // A recovered job already carries a human-readable explanation; the raw
   // stack would only bury it in the toast.
   const detail = error?.recovered
@@ -2750,9 +2795,45 @@ async function reportError(error) {
   return { ok: false, error: detail, logged: true, ...(error?.recovered ? { recovered: true } : {}) };
 }
 
+const packageIO = globalThis.MendoPackageIO.create({
+  runtimeId: chrome.runtime.id, getURL: path => chrome.runtime.getURL(path), storage: navigator.storage,
+  archive: globalThis.MendoArchive, saveBlob,
+  positionBusy(p) { return (activeJob?.packageId === p.id && activeJob.packageIndex === p.index)
+    || (staging?.packageId === p.id && staging.packageIndex === p.index); },
+  async prepare(blob, filename, signal, packageId) {
+    const estimate = await navigator.storage.estimate();
+    if (!Number.isFinite(estimate.quota) || estimate.quota - estimate.usage < blob.size + 65536) {
+      throw new Error('Недостаточно места для подготовленного файла');
+    }
+    const id = await stashForRecovery(blob, filename, { signal, manualOnly: true, packageId });
+    const file = await (await (await recoveryDirectory()).getFileHandle(id)).getFile();
+    return { id, filename, blob: file, size: file.size };
+  },
+  async discard(entries) {
+    const ids = new Set(entries.map(entry => entry.id));
+    await changeRecovery(current => current.filter(entry => !ids.has(entry.id)));
+    const dir = await recoveryDirectory();
+    for (const id of ids) await dir.removeEntry(id).catch(() => {});
+  },
+  async cancelWork(p) {
+    if (activeJob?.packageId === p.id) abortJob({ jobId: activeJob.id });
+    if (staging?.packageId === p.id) abortJob({ jobId: staging.id });
+  },
+  notify(p, progress, status) {
+    const value = typeof progress === 'number' ? progress : progress.totalBytes ? progress.completedBytes / progress.totalBytes : 0;
+    return notifyWorker({ t: 'mendosave-package-progress', packageId: p.id, tabId: p.owner.tabId,
+      value, status: status === 'archiving' ? 'Упаковка ZIP' : status });
+  },
+});
+
+const packageStartup = typeof navigator.storage.getDirectory === 'function'
+  ? packageIO.initialize().catch(error => { logToWorker('package/storage', String(error?.message || error)); })
+  : Promise.resolve();
+
 // This connection is owned by the extension host, so its disconnect callback
 // survives source-page teardown and does not depend on recorder.stop events.
 chrome.runtime.onConnect?.addListener((port) => {
+  if (packageIO.connect(port)) return;
   const match = /^mendosave-twitch-recording:([A-Za-z0-9_-]{1,100})$/.exec(port.name || '');
   if (!match) return;
   const job = liveJobs.get(match[1]);
@@ -2776,9 +2857,19 @@ chrome.runtime.onConnect?.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.t !== 'string') return false;
 
+  if (message.t === 'mendosave-package-begin' && activeJob) {
+    sendResponse({ ok: false, error: 'Другая загрузка уже обрабатывается' }); return false;
+  }
+  const packageResult = packageIO.handle(message, _sender);
+  if (packageResult) {
+    packageResult.then(sendResponse, error => sendResponse({ ok: false, error: String(error?.message || error) }))
+      .finally(updateKeepAlive);
+    return true;
+  }
+
   if (message.t === 'mendosave-host-probe') {
-    sendResponse({ ok: true });
-    return false;
+    packageStartup.then(() => sendResponse({ ok: true }));
+    return true;
   }
 
   if (message.t === 'mendosave-save-text') {
@@ -2793,7 +2884,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     saveBlob(new Blob([message.text], { type: `${message.type};charset=utf-8` }), message.filename)
       .then((id) => sendResponse({ ok: true, id }))
-      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error), ...(error?.cancelled ? { cancelled: true } : {}) }));
     return true;
   }
 
@@ -2808,6 +2899,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           && Date.now() - activeJob.lastActivity > STALE_JOB_MS ? null : activeJob));
     const stagedOwner = ['mendosave-stage-open', 'mendosave-stage', 'mendosave-begin', 'mendosave-abort'].includes(message.t)
       && staging && Date.now() - staging.at < STAGING_TTL_MS ? staging : null;
+    if (message.packageId || owner?.packageId || stagedOwner?.packageId) {
+      try {
+        const p = packageIO.host.owned({ tabId, frameId: _sender.frameId ?? 0, documentId: _sender.documentId }, message.packageId,
+          message.t === 'mendosave-abort');
+        if (message.t !== 'mendosave-abort' && (p.index < 0 || message.packageIndex !== p.index
+          || (owner?.packageId && (owner.packageId !== p.id || owner.packageIndex !== p.index))
+          || (stagedOwner?.packageId && (stagedOwner.packageId !== p.id || stagedOwner.packageIndex !== p.index)))) throw new Error('Позиция пакета изменилась');
+        if (['mendosave-begin', 'mendosave-stage-open', 'mendosave-live-begin'].includes(message.t)) {
+          packageIO.positionAvailable(p.owner, p.id, message.packageIndex);
+        }
+      } catch (error) {
+        sendResponse({ ok: false, error: String(error.message), ...(error.cancelled ? { cancelled: true } : {}) }); return false;
+      }
+    }
     if (_sender?.id !== chrome.runtime.id || !Number.isInteger(tabId)
       || (owner && owner.tabId !== tabId)
       || (owner?.rawRecording && ((_sender?.frameId ?? 0) !== owner.frameId
@@ -2855,7 +2960,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.t === 'mendosave-stage-open') {
     const result = openStaging(message);
-    if (result.ok && staging) staging.tabId = message.tabId;
+    if (result.ok && staging) {
+      staging.tabId = message.tabId; staging.frameId = message.frameId; staging.documentId = message.documentId;
+      staging.packageId = message.packageId; staging.packageIndex = message.packageIndex;
+    }
     sendResponse(result);
     return false;
   }
@@ -2905,7 +3013,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.t === 'mendosave-flush') {
-    flushRecoveredFiles()
+    if (packageIO.host.active) { sendResponse({ ok: false, error: 'Пакет ещё выполняется. Восстановление доступно после завершения или отмены.' }); return false; }
+    flushRecoveredFiles(Boolean(message.manual))
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;

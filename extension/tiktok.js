@@ -17,6 +17,13 @@
 // honours Range. Original files use a cookie-bearing page fetch and a Blob;
 // MP3 conversion streams the file into the extension media processor.
 (() => {
+  const mendoSend = (message) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  const mendoFetch = (url, options) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
+  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
+
   const BUTTON_CLASS = 'mendosave-tiktok-btn';
   const VIDEO_HREF = /\/video\/(\d+)/;
   const SLICE_BYTES = 4 * 1024 * 1024;
@@ -36,12 +43,12 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `tiktok/${tag}`, text }).catch(() => {});
+    mendoSend({ t: 'mendosave-log', tag: `tiktok/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
     console.error('[MendoSave]', error);
-    return chrome.runtime.sendMessage({
+    return mendoSend({
       t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
@@ -197,7 +204,7 @@
       }
     }
     if (!href) throw new Error('не удалось определить адрес этого видео');
-    const response = await fetch(new URL(href, location.origin).href, { cache: 'no-store' });
+    const response = await mendoFetch(new URL(href, location.origin).href, { cache: 'no-store' });
     if (!response.ok) throw new Error(`страница видео не открылась (HTTP ${response.status})`);
     const item = itemFromUniversal(parseUniversalData(await response.text()));
     if (!item) throw new Error('в странице нет данных видео (TikTok мог потребовать вход)');
@@ -225,7 +232,7 @@
   async function sendChunk(jobId, track, bytes) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const slice = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
-      const response = await chrome.runtime.sendMessage({
+      const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track, b64: encodeBase64(slice),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
@@ -237,7 +244,7 @@
   // of that, because the page's own player has already pulled the same URL in
   // no-cors mode and that cache entry is unreadable to a CORS request (G5/I3).
   async function fetchRange(url, from, to, total) {
-    const response = await fetch(url, {
+    const response = await mendoFetch(url, {
       credentials: 'include',
       cache: 'no-store',
       headers: { Range: `bytes=${from}-${to}` },
@@ -272,7 +279,7 @@
   // `Content-Range` is not CORS-safelisted, so it reads as null even on a good
   // 206; the length of an unranged response is (N26).
   async function probeSize(url) {
-    const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store' });
     const total = Number(response.headers.get('content-length')) || 0;
     const mime = (response.headers.get('content-type') || '').split(';')[0].toLowerCase();
     await response.body?.cancel().catch(() => {});
@@ -281,13 +288,13 @@
   }
 
   async function beginJob(jobId, filename, options) {
-    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+    const ensured = await mendoSend({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId });
+    const registration = await mendoSend({ t: 'mendosave-register-job', jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
-    const started = await chrome.runtime.sendMessage({
+    const started = await mendoSend({
       t: 'mendosave-begin', jobId, tabId: registration.tabId, filename, ...options,
     });
     if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
@@ -313,7 +320,7 @@
   // has a real number to show. `credentials: 'include'` is what makes the CDN
   // answer at all (G27).
   async function fetchWholeFile(url, notification, stage, label) {
-    const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store' });
     if (!response.ok) throw new Error(`сервер отказал (HTTP ${response.status})`);
     const declared = Number(response.headers.get('content-length')) || 0;
     const type = (response.headers.get('content-type') || '').toLowerCase();
@@ -325,6 +332,7 @@
     const chunks = [];
     let received = 0;
     for (;;) {
+      mendoCheck();
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);
@@ -339,18 +347,12 @@
     return { chunks, bytes: received, type };
   }
 
-  // Nothing here needs assembling, so the file never leaves the page: a blob
-  // and an anchor click save the CDN's own bytes untouched — the same route the
-  // Twitch recorder uses for a finished recording.
-  function saveBlob(chunks, type, filename) {
-    const url = URL.createObjectURL(new Blob(chunks, { type }));
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 120_000);
+  // Keep the cookie-bearing fetch here, then hand its exact bytes to the
+  // extension host for normal Save As or archive collection.
+  async function saveBlob(chunks, type, filename) {
+    mendoCheck();
+    if (!globalThis.MendoPackageUI) throw new Error('Обработчик сохранения недоступен');
+    await globalThis.MendoPackageUI.saveBlob(new Blob(chunks, { type }), filename);
   }
 
   // One route, not two. Handing the URL to chrome.downloads was tried first in
@@ -362,16 +364,19 @@
     const filename = `${info.base} [${rung.height || '?'}p].mp4`;
     let lastError = null;
     for (const url of rung.urls) {
+      let file;
       try {
-        const file = await fetchWholeFile(url, notification, 'file', 'Скачивание видео');
-        saveBlob(file.chunks, file.type || 'video/mp4', filename);
-        notification.stage('file', 1, 'done', 'Скачивание видео');
-        log('video', `saved ${info.id}; rung=${rung.label} bytes=${file.bytes}`);
-        return filename;
+        file = await fetchWholeFile(url, notification, 'file', 'Скачивание видео');
       } catch (error) {
+        if (error?.name === 'AbortError') throw error;
         lastError = error;
         log('video', `mirror failed: ${String(error?.message || error)}`);
+        continue;
       }
+      await saveBlob(file.chunks, file.type || 'video/mp4', filename);
+      notification.stage('file', 1, 'done', 'Скачивание видео');
+      log('video', `saved ${info.id}; rung=${rung.label} bytes=${file.bytes}`);
+      return filename;
     }
     throw lastError || new Error('ни одно зеркало CDN не ответило');
   }
@@ -395,7 +400,7 @@
     else if (file.type.includes('audio/aac')) format = 'aac';
     else throw new Error('TikTok отдал неизвестный формат звука; сохранение отменено');
     const filename = `${soundName(info)}.${format}`;
-    saveBlob(file.chunks, file.type, filename);
+    await saveBlob(file.chunks, file.type, filename);
     notification.stage('file', 1, 'done', 'Скачивание звука');
     log('sound', `saved ${info.id}; bytes=${file.bytes} format=${format}`);
     return filename;
@@ -431,12 +436,12 @@
       });
       notification.stage('file', 1, 'done', 'Скачивание звука');
       notification.stage('process', null, 'active', 'Сборка файла');
-      const finalized = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId });
+      const finalized = await mendoSend({ t: 'mendosave-finalize', jobId });
       if (!finalized?.ok) throw new Error(finalized?.error || 'не удалось собрать файл');
       notification.stage('process', 1, 'done', 'Сборка файла');
       return finalized.filename || filename;
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId }).catch(() => {});
+      await mendoSend({ t: 'mendosave-abort', jobId }).catch(() => {});
       throw error;
     } finally {
       chrome.runtime.onMessage.removeListener(onProgress);
@@ -444,7 +449,12 @@
   }
 
   async function runChoice(entry, choice) {
-    if (busy) return;
+    const bundled = packageRunning();
+    mendoCheck();
+    if (busy) {
+      if (bundled) throw new Error('Другая загрузка уже выполняется');
+      return;
+    }
     busy = true;
     const notification = getToast();
     try {
@@ -467,7 +477,14 @@
         : await downloadVideo(info, choice.rung || info.rungs[0], notification);
       notification.set(`Готово: ${filename}`, 1);
       notification.hide(4000);
+      return filename;
     } catch (error) {
+      if (bundled) throw error;
+      if (error?.name === 'AbortError') {
+        notification.set('Загрузка отменена', 1);
+        notification.hide(4000);
+        return;
+      }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
       void reportError('tiktok-download', error, { kind: choice.kind, id: entry.id });
@@ -618,6 +635,7 @@
   async function openMenu(button, entry, event) {
     event.preventDefault();
     event.stopPropagation();
+    if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
     menu = createElement('div', 'mendosave-tiktok-menu');
     menu.append(createElement('div', 'mendosave-tiktok-head',
@@ -632,6 +650,7 @@
     try {
       const info = await loadItem(entry.id, entry.href);
       if (!menu) return;
+      entry.info = info;
       loading.remove();
       menu.append(createElement('div', 'mendosave-tiktok-menu-note',
         `${info.author}${info.title && info.title !== info.id ? ` — ${info.title}` : ''}`));
@@ -653,6 +672,19 @@
         addItem('Только звук · MP3', 'перекодирование',
           () => void runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }));
       }
+      const options = info.rungs.map((rung, index) => ({
+        id: `tiktok-video-${index}`, label: `Видео · ${rung.label}`,
+        run: () => runChoice(entry, { kind: 'video', rung }),
+      }));
+      if (info.music.url) options.push(
+        { id: 'tiktok-sound-original', label: 'Только звук · исходный файл',
+          run: () => runChoice(entry, { kind: 'sound', audioFormat: 'original' }) },
+        { id: 'tiktok-sound-mp3', label: 'Только звук · MP3',
+          run: () => runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }) },
+      );
+      if (options.length > 1) globalThis.MendoPackageUI?.add(menu, {
+        title: info.title || info.id, options, close: closeMenu,
+      });
       positionMenu(button);
     } catch (error) {
       if (!menu) return;

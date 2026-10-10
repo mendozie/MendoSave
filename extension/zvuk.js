@@ -19,6 +19,19 @@
 // `preview` — a 30-second excerpt. That is the account's entitlement, not a
 // failure, so the menu says so instead of pretending otherwise.
 (() => {
+  const mendoSend = (message) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  const mendoFetch = (url, options) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
+  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
+  function downloadInterrupted(code) {
+    if (globalThis.MendoPackageUI) globalThis.MendoPackageUI.interruption(code);
+    const error = new Error(`Сохранение прервано: ${code || 'причина не указана'}`);
+    if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') error.name = 'AbortError';
+    throw error;
+  }
+
   const BUTTON_CLASS = 'mendosave-zvuk-btn';
   const GQL_URL = '/api/v1/graphql';
   const TRACK_HREF = /^\/track\/(\d+)/;
@@ -41,12 +54,12 @@
   let toastBox;
 
   function log(tag, text) {
-    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: `zvuk/${tag}`, text }).catch(() => {});
+    mendoSend({ t: 'mendosave-log', tag: `zvuk/${tag}`, text }).catch(() => {});
   }
 
   function reportError(context, error, details) {
     console.error('[MendoSave]', error);
-    return chrome.runtime.sendMessage({
+    return mendoSend({
       t: 'mendosave-error', context, error: String(error?.stack || error?.message || error), details,
     }).catch(() => null);
   }
@@ -88,7 +101,7 @@
   }
 
   async function gql(operationName, query, variables) {
-    const response = await fetch(GQL_URL, {
+    const response = await mendoFetch(GQL_URL, {
       method: 'POST',
       cache: 'no-store',
       headers: { 'content-type': 'application/json', 'x-auth-token': authToken() },
@@ -187,25 +200,30 @@
   }
 
   async function saveDirect(url, filename) {
-    const saved = await chrome.runtime.sendMessage({ t: 'mendosave-save', url, filename });
+    const saved = await mendoSend({ t: 'mendosave-save', url, filename });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
-    return saved.id;
+    return saved.collected ? saved : saved.id;
   }
 
   // The browser pulls the file itself, so its progress has to be polled:
   // downloads.onChanged fires on state changes, not on bytes.
   async function followBrowserDownload(id, notification, stage) {
+    if (id?.collected) return;
     let misses = 0;
     for (;;) {
+      mendoCheck();
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id }).catch(() => null);
+      const state = await mendoSend({ t: 'mendosave-download-state', id }).catch((error) => {
+        if (error?.name === 'AbortError') throw error;
+        return null;
+      });
       if (!state?.ok) {
         if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
         continue;
       }
       misses = 0;
       if (state.state === 'interrupted') {
-        throw new Error(`браузер прервал загрузку (${state.error || 'причина не указана'})`);
+        downloadInterrupted(state.error);
       }
       if (state.state === 'complete') return;
       const total = Number(state.totalBytes) || 0;
@@ -226,7 +244,12 @@
   }
 
   async function runOne(track) {
-    if (busy) return;
+    const bundled = packageRunning();
+    mendoCheck();
+    if (busy) {
+      if (bundled) throw new Error('Другая загрузка уже выполняется');
+      return;
+    }
     busy = true;
     const notification = getToast();
     try {
@@ -238,7 +261,14 @@
         ? `Готово (доступный фрагмент): ${result.filename}`
         : `Готово: ${result.filename}`, 1);
       notification.hide(result.isPreview ? 8000 : 4000);
+      return result.filename;
     } catch (error) {
+      if (bundled) throw error;
+      if (error?.name === 'AbortError') {
+        notification.set('Загрузка отменена', 1);
+        notification.hide(4000);
+        return;
+      }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
       void reportError('zvuk-download', error, { id: track.id });
@@ -269,6 +299,7 @@
           const result = await downloadOne(track, notification, 'file');
           if (result.isPreview) previews += 1;
         } catch (error) {
+          if (error?.name === 'AbortError') throw error;
           failed += 1;
           log('batch', `track ${track.id} failed: ${String(error?.message || error)}`);
         }
@@ -282,6 +313,11 @@
       notification.set(parts.join(' · '), 1);
       notification.hide(9000);
     } catch (error) {
+      if (error?.name === 'AbortError') {
+        notification.set(`Очередь отменена: сохранено ${done - failed} из ${tracks.length}`, 1);
+        notification.hide(8000);
+        return;
+      }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
       void reportError('zvuk-batch', error, { count: tracks.length });
@@ -407,6 +443,7 @@
   async function openMenu(button, trackId, event) {
     event.preventDefault();
     event.stopPropagation();
+    if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
     menu = createElement('div', 'mendosave-zvuk-menu');
     menu.append(createElement('div', 'mendosave-zvuk-head',

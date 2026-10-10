@@ -8,6 +8,19 @@
 // VOD is HLS with MPEG-TS segments, which the shared offscreen muxer already
 // accepts as one pre-muxed input (`muxed: true`, the Rutube path).
 (() => {
+  const mendoSend = (message) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  const mendoFetch = (url, options) => globalThis.MendoPackageUI
+    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
+  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
+  function downloadInterrupted(code) {
+    if (globalThis.MendoPackageUI) globalThis.MendoPackageUI.interruption(code);
+    const error = new Error(`Сохранение прервано: ${code || 'причина не указана'}`);
+    if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') error.name = 'AbortError';
+    throw error;
+  }
+
   const BUTTON_ID = 'mendosave-twitch-record';
   const MENU_ID = 'mendosave-twitch-menu';
   const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -76,13 +89,14 @@
   async function gql(query) {
     let response;
     try {
-      response = await fetch(GQL_URL, {
+      response = await mendoFetch(GQL_URL, {
         method: 'POST',
         headers: { 'Client-ID': GQL_CLIENT_ID, 'Content-Type': 'application/json' },
         body: JSON.stringify({ query }),
         credentials: 'omit',
       });
     } catch (error) {
+      if (error?.name === 'AbortError') throw error;
       // Distinguish the one failure that needs a different fix: a blocked
       // cross-origin request has to be moved into the service worker, while
       // everything else is a Twitch-side answer we can read.
@@ -144,7 +158,7 @@
     master.searchParams.set('player', 'twitchweb');
     master.searchParams.set('sig', token.signature);
     master.searchParams.set('token', token.value);
-    const response = await fetch(master.href, { credentials: 'omit' });
+    const response = await mendoFetch(master.href, { credentials: 'omit' });
     if (!response.ok) throw new Error(`плейлист недоступен (HTTP ${response.status})`);
     const qualities = parseMasterPlaylist(await response.text(), response.url || master.href);
     if (!qualities.length) throw new Error('в плейлисте нет ни одной ступени качества');
@@ -196,7 +210,7 @@
   }
 
   async function loadVodSegments(playlistUrl) {
-    const response = await fetch(playlistUrl, { credentials: 'omit' });
+    const response = await mendoFetch(playlistUrl, { credentials: 'omit' });
     if (!response.ok) throw new Error(`медиаплейлист недоступен (HTTP ${response.status})`);
     const text = await response.text();
     if (!/^#EXT-X-ENDLIST\s*$/m.test(text)) {
@@ -227,7 +241,7 @@
 
   async function fetchSegment(url, attempt = 0) {
     try {
-      const response = await fetch(url, { credentials: 'omit' });
+      const response = await mendoFetch(url, { credentials: 'omit' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const fetchedBytes = new Uint8Array(await response.arrayBuffer());
       // A Gecko Xray view cannot safely perform the species lookup in subarray.
@@ -236,6 +250,7 @@
       if (!bytes.length) throw new Error('пустой сегмент');
       return bytes;
     } catch (error) {
+      if (error?.name === 'AbortError') throw error;
       if (attempt >= 2) throw error;
       await new Promise((resolve) => { setTimeout(resolve, 300 * (attempt + 1)); });
       return fetchSegment(url, attempt + 1);
@@ -261,7 +276,7 @@
   async function sendChunks(jobId, bytes) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
-      const response = await chrome.runtime.sendMessage({
+      const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track: 'video', b64: encodeBase64(chunk),
       });
       if (!response?.ok) throw new Error(response?.error || 'передача данных прервалась');
@@ -276,13 +291,13 @@
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const filename = `Twitch - ${safeName(info.channel)} - ${safeName(info.title)} [${quality.label}].mp4`;
 
-    const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+    const ensured = await mendoSend({ t: 'mendosave-ensure' });
     if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId });
+    const registration = await mendoSend({ t: 'mendosave-register-job', jobId });
     if (!registration?.ok || !Number.isInteger(registration.tabId)) {
       throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
     }
-    const started = await chrome.runtime.sendMessage({
+    const started = await mendoSend({
       t: 'mendosave-begin',
       jobId,
       tabId: registration.tabId,
@@ -312,11 +327,11 @@
           toast(`MendoSave: скачано ${start + offset + 1} из ${segments.length} сегментов`, true);
         }
       }
-      const result = await chrome.runtime.sendMessage({ t: 'mendosave-finalize', jobId });
+      const result = await mendoSend({ t: 'mendosave-finalize', jobId });
       if (!result?.ok) throw new Error(result?.error || 'не удалось собрать файл');
       return result.filename || filename;
     } catch (error) {
-      await chrome.runtime.sendMessage({ t: 'mendosave-abort', jobId }).catch(() => {});
+      await mendoSend({ t: 'mendosave-abort', jobId }).catch(() => {});
       throw error;
     }
   }
@@ -325,21 +340,26 @@
   // keeps the bytes out of the page entirely — no fetch, no CORS, no copy.
   async function downloadClip(info, quality) {
     const filename = `Twitch - ${safeName(info.channel)} - ${safeName(info.title)} [${quality.label}].mp4`;
-    const saved = await chrome.runtime.sendMessage({
+    const saved = await mendoSend({
       t: 'mendosave-save', url: quality.url, filename,
     });
     if (!saved?.ok) throw new Error(saved?.error || 'браузер не принял файл на сохранение');
+    if (saved.collected) return saved.filename || filename;
     let misses = 0;
     for (;;) {
+      mendoCheck();
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const state = await chrome.runtime.sendMessage({ t: 'mendosave-download-state', id: saved.id }).catch(() => null);
+      const state = await mendoSend({ t: 'mendosave-download-state', id: saved.id }).catch((error) => {
+        if (error?.name === 'AbortError') throw error;
+        return null;
+      });
       if (!state?.ok) {
         if (++misses > 8) throw new Error(state?.error || 'браузер потерял загрузку');
         continue;
       }
       misses = 0;
       if (state.state === 'complete') break;
-      if (state.state === 'interrupted') throw new Error(`браузер прервал загрузку (${state.error || 'причина не указана'})`);
+      if (state.state === 'interrupted') downloadInterrupted(state.error);
     }
     return filename;
   }
@@ -390,6 +410,13 @@
       });
       menu.append(item);
     }
+    if (info.qualities.length > 1) globalThis.MendoPackageUI?.add(menu, {
+      title: info.title, close: closeMenu,
+      options: info.qualities.map((quality, index) => ({
+        id: `twitch-${index}`, label: quality.label,
+        run: () => runDownload(info, quality),
+      })),
+    });
     document.body.append(menu);
     document.addEventListener('keydown', onMenuKeydown, true);
     const box = button.getBoundingClientRect();
@@ -405,7 +432,12 @@
   }
 
   async function runDownload(info, quality) {
-    if (busy) return;
+    const bundled = packageRunning();
+    mendoCheck();
+    if (busy) {
+      if (bundled) throw new Error('Другая загрузка уже выполняется');
+      return;
+    }
     busy = true;
     try {
       toast(`MendoSave: скачиваю ${quality.label}…`, true);
@@ -413,7 +445,13 @@
         ? await downloadClip(info, quality)
         : await downloadVod(info, quality);
       toast(`MendoSave: готово — ${filename}`);
+      return filename;
     } catch (error) {
+      if (bundled) throw error;
+      if (error?.name === 'AbortError') {
+        toast('MendoSave: загрузка отменена');
+        return;
+      }
       toast(`MendoSave: ${String(error?.message || error)}`);
     } finally {
       busy = false;
@@ -421,6 +459,7 @@
   }
 
   async function onButtonClick(button) {
+    if (packageRunning()) return;
     const page = pageKind();
     if (page.kind === 'live') {
       if (recorder) stopRecording('остановлено пользователем');
@@ -528,7 +567,7 @@
       const blobBytes = new Uint8Array(await blob.arrayBuffer());
       const bytes = new Uint8Array(blobBytes);
       for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
-        const response = await chrome.runtime.sendMessage({
+        const response = await mendoSend({
           t: 'mendosave-live-chunk', jobId: session.jobId, track: 'video',
           mime: session.mime, b64: encodeBase64(bytes.subarray(offset, offset + TRANSFER_CHUNK_SIZE)),
         });
@@ -582,11 +621,11 @@
         mime: active.mimeType || recorderMime,
         chain: Promise.resolve(), queuedBytes: 0, sentBytes: 0, failed: '', finished: false,
       };
-      const ensured = await chrome.runtime.sendMessage({ t: 'mendosave-ensure' });
+      const ensured = await mendoSend({ t: 'mendosave-ensure' });
       if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик записи');
-      const registration = await chrome.runtime.sendMessage({ t: 'mendosave-register-job', jobId: session.jobId });
+      const registration = await mendoSend({ t: 'mendosave-register-job', jobId: session.jobId });
       if (!registration?.ok || !Number.isInteger(registration.tabId)) throw new Error(registration?.error || 'вкладка записи не определена');
-      const begun = await chrome.runtime.sendMessage({
+      const begun = await mendoSend({
         t: 'mendosave-live-begin', jobId: session.jobId, tabId: registration.tabId,
         rawRecording: true, filename: session.filename, mime: session.mime,
       });
@@ -625,7 +664,7 @@
       recorder = null;
       recordingSession = null;
       if (session) session.finished = true;
-      if (session?.begun) await chrome.runtime.sendMessage({ t: 'mendosave-live-abort', jobId: session.jobId }).catch(() => {});
+      if (session?.begun) await mendoSend({ t: 'mendosave-live-abort', jobId: session.jobId }).catch(() => {});
       session?.port?.disconnect();
       toast(`MendoSave: ${error?.message || error}`);
     } finally { recordingStarting = false; }
@@ -651,7 +690,7 @@
     try {
       await session.chain;
       if (session.failed) throw new Error(session.failed);
-      const result = await chrome.runtime.sendMessage({
+      const result = await mendoSend({
         t: 'mendosave-live-finalize', jobId: session.jobId, interrupted: Boolean(session.interrupted),
       });
       if (!result?.ok) throw new Error(result?.error || 'не удалось сохранить запись');
@@ -784,7 +823,7 @@
   };
 
   function qualityLog(text) {
-    chrome.runtime.sendMessage({ t: 'mendosave-log', tag: 'twitch/quality', text }).catch(() => {});
+    mendoSend({ t: 'mendosave-log', tag: 'twitch/quality', text }).catch(() => {});
   }
 
   function readStoredQuality() {

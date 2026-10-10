@@ -140,12 +140,15 @@
   }
 
   function sendRuntimeMessage(message, timeoutMs) {
-    if (!timeoutMs) return chrome.runtime.sendMessage(message);
+    const send = () => globalThis.MendoPackageUI ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+    // A native Save As dialog and an active browser save have user-owned
+    // lifetimes. Timing out here could claim failure while a file is saving.
+    if (!timeoutMs || ['mendosave-save', 'mendosave-finalize'].includes(message.t)) return send();
     let timer;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`extension message timed out (${message.t})`)), timeoutMs);
     });
-    return Promise.race([chrome.runtime.sendMessage(message), timeout]).finally(() => clearTimeout(timer));
+    return Promise.race([send(), timeout]).finally(() => clearTimeout(timer));
   }
 
   // The MV3 service worker can be mid-shutdown when a message arrives; the
@@ -387,11 +390,14 @@
       || { id: audioFormat, title: String(audioFormat || 'mp3').toUpperCase(), extension: '.mp3' };
   }
 
+  let packageOptions = [];
   function addDownloadItems(info, { videoAllowed = true } = {}) {
     if (videoAllowed) {
       menu.append(createHeading('Видео'));
       const heights = [...new Set(info.heights || [])].sort((a, b) => b - a);
       for (const height of heights) {
+        packageOptions.push({ id: `video-${height}`, label: `Видео ${height}p`,
+          run: (transcode) => startDownload({ format: 'mp4', height }, info, { transcode }) });
         const item = createElement('div', 'mendosave-menu-item');
         setItemLabel(item, `${height}p`, 'MP4 video');
         item.addEventListener('click', () => {
@@ -404,6 +410,8 @@
 
     menu.append(createHeading('Аудио'));
     for (const audio of audioFormatsFor(info)) {
+      packageOptions.push({ id: `audio-${audio.id}`, label: `Аудио ${audio.title} · ${audio.note}`,
+        run: () => startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, audio.title, audio.note);
       item.addEventListener('click', () => {
@@ -458,6 +466,8 @@
       ['.txt', 'txt', 'простой текст (без тайм-кодов)'],
     ];
     for (const [extension, format, description] of formats) {
+      packageOptions.push({ id: `sub-${format}`, label: `Субтитры ${extension} · ${language}`,
+        run: () => downloadSubtitles(info, format) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, extension, `${language} · ${description}`);
       item.addEventListener('click', () => {
@@ -479,6 +489,7 @@
       row.addEventListener('click', (event) => {
         event.stopPropagation();
         selected = option.value;
+        if (storageKey === 'transcode') packageTranscode = Boolean(selected);
         chrome.storage.local.set({ [storageKey]: selected }).catch((error) => reportError('ui/settings', error));
         rows.forEach((item, index) => {
           const checked = options[index].value === selected;
@@ -498,8 +509,26 @@
     ], Boolean(transcode));
   }
 
+  let packageTranscode = false;
+  function snapshotPackageOptions(info, availableOptions) {
+    const transcode = packageTranscode;
+    const sourceVideoId = info.videoId;
+    return Object.freeze(availableOptions.map((option) => Object.freeze({
+      id: option.id,
+      label: option.id.startsWith('video-')
+        ? `${option.label} · ${transcode ? 'H.264/AAC' : 'исходные кодеки'}` : option.label,
+      run: () => {
+        if (!sourceVideoId || videoIdFromLocation() !== sourceVideoId) {
+          throw new Error('Материал на странице изменился. Откройте меню заново.');
+        }
+        return option.run(transcode);
+      },
+    })));
+  }
+
   async function openMenu(event) {
     event.stopPropagation();
+    if (globalThis.MendoPackageUI?.running) return;
     if (menu) {
       closeMenu();
       return;
@@ -514,6 +543,8 @@
         chrome.storage.local.get(['transcode']),
       ]);
       menu = createElement('div', 'mendosave-menu');
+      packageOptions = [];
+      packageTranscode = Boolean(settings.transcode);
       menu.append(createBrandHeading());
       if (info.isLive) {
         addLiveSection(info);
@@ -526,6 +557,9 @@
         if (playlistItems.length > 1) addPlaylistSection(info, playlistItems);
         addSubtitleItems(info, availability);
         if (!artTrackOnly) addFormatSelector(settings.transcode);
+        const availableOptions = packageOptions.slice();
+        globalThis.MendoPackageUI?.add(menu, { title: info.title,
+          options: () => snapshotPackageOptions(info, availableOptions), close: closeMenu });
       }
       document.body.append(menu);
 
@@ -689,6 +723,15 @@
     txt: { extension: 'txt', mime: 'text/plain', timed: false },
   });
 
+  function mediaResponseError(result, fallback) {
+    const error = new Error(result?.error || fallback);
+    error.logged = Boolean(result?.logged);
+    error.recovered = Boolean(result?.recovered);
+    error.cancelled = Boolean(result?.cancelled);
+    if (error.cancelled) error.name = 'AbortError';
+    return error;
+  }
+
   async function downloadSubtitles(info, format) {
     const notification = getToast();
     notification.set(`Загружаю субтитры (${format || 'txt'})…`, 0.3);
@@ -704,10 +747,15 @@
       const filename = `${safeFilename(info.title)} [${language}].${output.extension}`;
       const url = `data:${output.mime};charset=utf-8,${encodeURIComponent(`\uFEFF${content}`)}`;
       const saved = await sendWorkerMessage({ t: 'mendosave-save', url, filename }, 30_000);
-      if (!saved?.ok) throw new Error(saved?.error || 'не удалось сохранить субтитры');
+      if (!saved?.ok) throw mediaResponseError(saved, 'не удалось сохранить субтитры');
       notification.set(`Готово: ${filename}`, 1);
       notification.hide(4000);
+      return filename;
     } catch (error) {
+      if (globalThis.MendoPackageUI?.running) throw error;
+      if (error?.cancelled || error?.name === 'AbortError') {
+        notification.set('Сохранение отменено', 1); notification.hide(4000); return false;
+      }
       notification.set(`Ошибка: ${error.message || error}`, 1);
       notification.hide(6000);
       await reportError('ui/subtitles', error, { format, videoId: info.videoId });
@@ -717,6 +765,7 @@
   async function startDownload({ format, height, audioFormat = 'mp3' }, info, options = {}) {
     const notification = getToast();
     if (downloadInProgress) {
+      if (globalThis.MendoPackageUI?.running) throw new Error('Другая загрузка уже выполняется');
       notification.set('Другая загрузка уже выполняется', 1);
       notification.hide(4000);
       return 'busy';
@@ -777,18 +826,24 @@
     let staging = null;
 
     let cancelRequested = false;
-    notification.setCancel(() => {
+    const cancelDownload = () => {
       if (cancelRequested) return;
       cancelRequested = true;
       notification.setCancel(null);
       // Cancelling one item of a running playlist queue stops the whole queue.
-      void clearQueue();
-      try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
-      document.getElementById('mendosave-queue')?.remove();
+      if (!globalThis.MendoPackageUI?.running) {
+        void clearQueue();
+        try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
+        document.getElementById('mendosave-queue')?.remove();
+      }
       void callHook('download-cancel').catch(() => {});
       if (IS_MUSIC) void callHook('music-mute', { mute: false }).catch(() => {});
       void sendRuntimeMessage({ t: 'mendosave-abort', jobId }, 10_000).catch(() => {});
-    });
+      void sendRuntimeMessage({ t: 'mendosave-abort', jobId: `${jobId}-sabr` }, 10_000).catch(() => {});
+    };
+    notification.setCancel(cancelDownload);
+    const packageSignal = globalThis.MendoPackageUI?.signal;
+    packageSignal?.addEventListener('abort', cancelDownload, { once: true });
 
     const onFfmpegProgress = (message) => {
       // The SABR attempt runs under its own id; its encode progress is this
@@ -804,7 +859,8 @@
     chrome.runtime.onMessage.addListener(onFfmpegProgress);
 
     try {
-      const { transcode = false } = await chrome.storage.local.get(['transcode']);
+      const stored = await chrome.storage.local.get(['transcode']);
+      const transcode = options.transcode ?? stored.transcode ?? false;
       // SABR first: it is the only route that can hand over a whole track, and
       // it costs seconds instead of the video's own length. Its own job id
       // keeps a refusal from disturbing the capture job that may follow.
@@ -952,10 +1008,7 @@
         notification.stage(stage, fraction, state, stageLabel);
       });
       if (!result?.ok) {
-        const error = new Error(result?.error || 'не удалось собрать файл');
-        error.logged = Boolean(result?.logged);
-        error.recovered = Boolean(result?.recovered);
-        throw error;
+        throw mediaResponseError(result, 'не удалось собрать файл');
       }
       notification.stage('engine', 1, 'done');
       notification.stage('transfer', 1, 'done');
@@ -966,7 +1019,8 @@
       return true;
     } catch (caughtError) {
       let error = caughtError;
-      if (cancelRequested || error?.details?.cancelled) {
+      if (globalThis.MendoPackageUI?.running) throw error;
+      if (cancelRequested || error?.details?.cancelled || error?.cancelled || error?.name === 'AbortError') {
         notification.set('Загрузка отменена', 1);
         notification.hide(4000);
         return false;
@@ -1065,6 +1119,7 @@
       });
       return false;
     } finally {
+      packageSignal?.removeEventListener('abort', cancelDownload);
       // Also on the error paths: the pump keeps polling the hook otherwise.
       if (staging) await staging.stop().catch(() => {});
       notification.setCancel(null);
@@ -1398,10 +1453,10 @@
       }, (stage, fraction, state, label) => {
         notification.stage(stage, fraction, state, label);
       }, isCancelled);
-      if (!result?.ok) throw new Error(result?.error || 'не удалось собрать файл');
+      if (!result?.ok) throw mediaResponseError(result, 'не удалось собрать файл');
       return result;
     } catch (error) {
-      if (error?.details?.cancelled) throw error;
+      if (error?.details?.cancelled || error?.cancelled || error?.name === 'AbortError') throw error;
       const reason = `sabr path declined after ${((Date.now() - started) / 1000).toFixed(1)}s:`
         + ` ${String(error?.message || error)}`;
       // Also to the console: a silent fall-through to the capture looks like the
