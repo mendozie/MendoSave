@@ -1,0 +1,45 @@
+{
+  "source": "https://coub.com/api/v2/coubs/or1i6abuay",
+  "observed": "09-10-2026",
+  "sanitized": true,
+  "payload": {
+    "permalink": "or1i6abuay",
+    "title": "Sanitized Coub",
+    "duration": 10,
+    "has_sound": true,
+    "dimensions": {
+      "big": [
+        880,
+        720
+      ],
+      "med": [
+        880,
+        720
+      ]
+    },
+    "file_versions": {
+      "html5": {
+        "video": {
+          "high": {
+            "url": "https://media.invalid/video-high.mp4",
+            "size": 3329944
+          },
+          "med": {
+            "url": "https://media.invalid/video-med.mp4",
+            "size": 2406769
+          }
+        },
+        "audio": {
+          "high": {
+            "url": "https://media.invalid/audio-high.mp3",
+            "size": 1052674
+          },
+          "med": {
+            "url": "https://media.invalid/audio-med.mp3",
+            "size": 701797
+          }
+        }
+      }
+    }
+  }
+}

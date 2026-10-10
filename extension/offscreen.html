@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MendoSave media processor</title>
+<script src="media_plan.js"></script>
+<!-- ffmpeg.js derives its worker path (814.ffmpeg.js) from its own <script src>,
+     so it must be loaded with a normal same-origin script tag. -->
+<script src="vendor/ffmpeg/ffmpeg.js"></script>
+<script src="offscreen.js"></script>
+<body>
+  <h1>MendoSave</h1>
+  <p>Эта служебная вкладка обрабатывает медиа. Не закрывайте её до завершения загрузки.</p>
+  <p>Если вкладка закрыта, повторите загрузку: расширение откроет новый обработчик.</p>
+</body>
