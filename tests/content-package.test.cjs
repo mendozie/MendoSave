@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const espree = require('espree');
 const { parseHTML } = require('linkedom');
 const { producerPorts } = require('./producer-port-harness.cjs');
+const { fixture: packageIO } = require('./package-io-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
 
 const source = fs.readFileSync('extension/content_ui.js', 'utf8');
@@ -15,7 +16,7 @@ const declarations = tree.body[0].expression.callee.body.body;
 const names = new Set(['addDownloadItems', 'addSubtitleItems', 'addRadioSelector', 'addFormatSelector',
   'openMenu', 'videoIdFromLocation', 'startDownload', 'tryDownloadViaSabr', 'downloadViaSabr',
   'downloadSubtitles', 'encodeBase64', 'snapshotPackageOptions', 'mediaResponseError',
-  'buildTimedSubtitles', 'normalizeCues', 'formatCueTime']);
+  'buildTimedSubtitles', 'normalizeCues', 'formatCueTime', 'safeFilename']);
 const constants = new Set(['TRANSFER_CHUNK_SIZE', 'HAS_NATIVE_BASE64', 'SUBTITLE_OUTPUTS']);
 const flowSource = declarations.filter(node => (node.type === 'FunctionDeclaration' && names.has(node.id.name))
   || (node.type === 'VariableDeclaration' && node.declarations.some(item => constants.has(item.id.name))))
@@ -29,7 +30,7 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
   let captureSaves = 0, picker;
   const toast = { set: (text) => notifications.push(text), hide() {}, setCancel() {}, beginStages() {}, stage() {} };
   const producerUI = createPackageUI({ runtime: { connect: producerPorts().connect } });
-  const context = vm.createContext({ document, window, URL, Uint8Array, crypto, btoa, AbortController,
+  const context = vm.createContext({ document, window, URL, Blob, Uint8Array, crypto, btoa, AbortController,
     location: new URL('https://www.youtube.com/watch?v=fixtureVideo'),
     IS_MUSIC: false, IS_SHORTS: () => false, BUTTON_ID: 'download-button',
     console: { warn() {}, error() {} }, setTimeout() {},
@@ -181,6 +182,70 @@ test('timed TXT is a separate package choice and saves actual timestamps and cha
   const saved = h.messages.find(message => message.t === 'mendosave-save');
   assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF' + literal);
   assert.match(saved.filename, /\[timed\]\.txt$/);
+});
+
+test('selected long timed TXT saves all accepted Unicode and chapter bytes beyond the legacy text transport bounds', async t => {
+  for (const variant of [
+    { name: 'ASCII', text: 'Literal & <tag> '.repeat(400), title: 'Fixture' },
+    { name: 'Unicode', text: 'Кириллица 😀 & <tag> '.repeat(240), title: 'Fixture' },
+    { name: 'supplementary Unicode filename', text: 'Кириллица 😀 & <tag> '.repeat(240), title: '😀'.repeat(120) },
+  ]) await t.test(variant.name, async () => {
+    const h = harness(), producers = producerPorts(), storage = packageIO();
+    const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+    const { text } = variant;
+    h.info.title = variant.title;
+    const cues = Array.from({ length: 400 }, (_, i) => ({ start: i * 3, end: i * 3 + 2, text: `${text} ${i}` }));
+    const timedText = require('../extension/captions.js').formatTimedTranscript(cues, [{ start: 0, text: 'Chapter <literal>' }]);
+    const expected = Buffer.from('\uFEFF' + timedText, 'utf8');
+    let saved;
+    const receive = async message => {
+      if (message.t === 'mendosave-save') {
+        if (message.url.length > 6 * 1024 ** 2) return { ok: false, error: 'Unsupported or oversized text download' };
+        const value = decodeURIComponent(message.url.slice(message.url.indexOf(',') + 1));
+        if (value.length > 2 * 1024 ** 2) return { ok: false, error: 'Invalid text output request' };
+        saved = Buffer.from(value); return { ok: true };
+      }
+      return storage.io.handle(message, sender) ?? { ok: true };
+    };
+    await h.openMenu(); const selected = h.snapshot().find(option => option.id === 'sub-timed-txt');
+    h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+    h.context.sendWorkerMessage = receive;
+    h.context.callHook = async () => ({ lang: 'ru', timedText, cues });
+    assert.ok(expected.length > 2 * 1024 ** 2, 'fixture is accepted by the actual formatter and exceeds legacy limits');
+    const filename = await selected.run();
+    assert.equal(storage.saved.length, 1, h.notifications.at(-1));
+    assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
+    assert.equal(filename, storage.saved[0].filename, 'completion reports the actual saved name');
+    if (variant.title === 'Fixture') assert.equal(filename, 'Fixture [ru] [timed].txt');
+    assert.ok(filename.length <= 250); assert.match(filename, /\.txt$/u);
+    assert.ok(!filename.includes('\uFFFD'), 'supplementary characters survive name shortening');
+    assert.match(h.notifications.at(-1), /Готово:/);
+    assert.ok(producers.ports.every(port => port.disconnected), 'terminal completion releases transfer and producer ports');
+    assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
+    assert.equal(saved, undefined, 'large text uses the actual bounded Blob handler');
+  });
+});
+
+test('cancelled native save of a long timed TXT stays cancellation and releases the transfer', async () => {
+  const h = harness(), producers = producerPorts(), packets = [];
+  const storage = packageIO({ saveBlob: async () => { throw Object.assign(new Error('USER_CANCELED'), { cancelled: true }); } });
+  const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+  const receive = async message => {
+    packets.push(message);
+    return storage.io.handle(message, sender) ?? { ok: true };
+  };
+  h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+  h.context.sendWorkerMessage = receive;
+  const cues = Array.from({ length: 400 }, (_, i) => ({ start: i, end: i + .5, text: 'Accepted caption '.repeat(400) }));
+  h.context.callHook = async () => ({ lang: 'en', cues,
+    timedText: require('../extension/captions.js').formatTimedTranscript(cues) });
+  assert.equal(await h.context.downloadSubtitles(h.info, 'timed-txt'), false);
+  assert.equal(h.notifications.at(-1), 'Сохранение отменено');
+  assert.ok(!h.notifications.some(text => text.startsWith('Готово:')));
+  assert.ok(producers.ports.every(port => port.disconnected));
+  assert.ok(packets.some(message => message.t === 'mendosave-blob-open'));
+  assert.ok(packets.some(message => message.t === 'mendosave-blob-abort'));
+  assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
 });
 
 test('timed TXT reports unavailable chapters after saving actual timestamped text without inventing chapters', async () => {

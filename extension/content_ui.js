@@ -769,10 +769,21 @@
       const content = output.transcript ? response.timedText
         : output.timed ? buildTimedSubtitles(response.cues, output.extension) : response.text;
       if (typeof content !== 'string' || !content.trim()) throw new Error('Нет доступной расшифровки с реальными таймкодами');
-      const filename = `${safeFilename(info.title)} [${language}]${output.transcript ? ' [timed]' : ''}.${output.extension}`;
-      const url = `data:${output.mime};charset=utf-8,${encodeURIComponent(`\uFEFF${content}`)}`;
-      const saved = await sendWorkerMessage({ t: 'mendosave-save', url, filename }, 30_000);
-      if (!saved?.ok) throw mediaResponseError(saved, 'не удалось сохранить субтитры');
+      let filename = `${safeFilename(info.title)} [${language}]${output.transcript ? ' [timed]' : ''}.${output.extension}`;
+      const text = `\uFEFF${content}`;
+      const blob = new Blob([text], { type: output.mime });
+      // Keep small UTF-8 outputs below both legacy text/data-URL bounds,
+      // including percent-encoding expansion. Larger accepted transcripts use
+      // the existing owned, chunked path through native download completion.
+      if (blob.size > 1024 ** 2) {
+        if (!globalThis.MendoPackageUI?.saveBlob) throw new Error('Передача текстового файла недоступна');
+        const stem = filename.slice(0, -output.extension.length - 1);
+        filename = await globalThis.MendoPackageUI.saveBlob(blob, `${safeFilename(stem)}.${output.extension}`);
+      } else {
+        const url = `data:${output.mime};charset=utf-8,${encodeURIComponent(text)}`;
+        const saved = await sendWorkerMessage({ t: 'mendosave-save', url, filename }, 30_000);
+        if (!saved?.ok) throw mediaResponseError(saved, 'не удалось сохранить субтитры');
+      }
       notification.set(`Готово: ${filename}${output.transcript && response.chaptersUnavailable
         ? ' · Главы на странице недоступны; сохранены реальные таймкоды.' : ''}`, 1);
       notification.hide(4000);
