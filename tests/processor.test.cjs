@@ -10,7 +10,8 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
       id: 'mendosave@test', getURL: (path) => `moz-extension://test/${path}`,
       onMessage: { addListener(fn) { listener = fn; } },
       async sendMessage(message) {
-        if (message.t === 'mendosave-recovery-read') return { ok: true, entries: State.entries || [] };
+        if (message.t === 'mendosave-recovery-read') return State.readRecovery
+          ? State.readRecovery(message) : { ok: true, entries: State.entries || [] };
         return sendMessage ? sendMessage(message) : { ok: true };
       },
     },
@@ -33,7 +34,8 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
   vm.runInContext(fs.readFileSync('extension/package_io.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/offscreen.js', 'utf8'), context);
   const message = (payload, tabId = 7) => new Promise((resolve) => {
-    const accepted = listener(payload, { id: chrome.runtime.id, tab: { id: tabId, url: 'https://www.youtube.com/watch?v=fixture' } }, resolve);
+    const accepted = listener(payload, { id: chrome.runtime.id, frameId: 0,
+      tab: { id: tabId, url: 'https://www.youtube.com/watch?v=fixture' } }, resolve);
     // Synchronous handlers send a response before returning false.
     if (!accepted) resolve(undefined);
   });
@@ -355,17 +357,41 @@ test('unreachable worker still parks exact ready bytes and recovery flush saves 
   } finally { clearTimeout(keepAlive); processor.close(); }
 });
 
-function recoveryFixture(onSave, onIndexWrite = () => {}) {
+function recoveryFixture(onSave, onIndexWrite = () => {}, options = {}) {
   const files = new Map(), state = { entries: [], fastTimers: true };
-  state.storage = { async getDirectory() { return { async getDirectoryHandle(name) {
-    if (name !== 'nvs-recovered') throw new Error('NotFoundError');
-    return { async getFileHandle(id, options) {
-      if (!options?.create && !files.has(id)) throw new Error('NotFoundError');
-      return { async createWritable() { return {
-        async write(blob) { files.set(id, new Blob([files.get(id) || [], blob])); }, async close() {}, async abort() {},
-      }; }, async getFile() { return files.get(id); } };
-    }, async removeEntry(id) { files.delete(id); } };
-  } }; } };
+  if (options.readRecovery) state.readRecovery = () => options.readRecovery(state.entries);
+  state.storage = { async estimate() { return { usage: 0, quota: 8 * 1024 ** 3 }; },
+    async getDirectory() { return { async getDirectoryHandle(name) {
+      if (name !== 'nvs-recovered') return {
+        async *entries() {
+          for (const key of files.keys()) if (key.startsWith(`${name}/`)) yield [key.slice(name.length + 1), { kind: 'file' }];
+        },
+        async getFileHandle(id, fileOptions) {
+          const key = `${name}/${id}`;
+          if (!fileOptions?.create && !files.has(key)) throw new Error('NotFoundError');
+          if (fileOptions?.create && !files.has(key)) files.set(key, new Blob());
+          return {
+            async createWritable() {
+              const parts = [];
+              return new WritableStream({ write: bytes => parts.push(bytes),
+                close: () => files.set(key, new Blob(parts)), abort() {} });
+            },
+            async getFile() { return files.get(key); },
+          };
+        },
+        async removeEntry(id) { files.delete(`${name}/${id}`); },
+      };
+      return { async getFileHandle(id, fileOptions) {
+        if (!fileOptions?.create && !files.has(id)) throw new Error('NotFoundError');
+        if (fileOptions?.create && !files.has(id)) files.set(id, new Blob());
+        return { async createWritable() {
+          await options.createWritable?.(id);
+          return {
+            async write(blob) { files.set(id, new Blob([files.get(id) || [], blob])); }, async close() {}, async abort() {},
+          };
+        }, async getFile() { return files.get(id); } };
+      }, async removeEntry(id) { files.delete(id); } };
+    } }; } };
   const processor = processorContext(message => {
     if (message.t === 'mendosave-save') return onSave(message);
     if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
@@ -472,3 +498,65 @@ test('unsaved manual recovery survives automatic expiry and remains explicitly s
     assert.ok(state.entries[0].savedAt);
   } finally { processor.close(); }
 });
+
+for (const fault of ['index write', 'index read', 'createWritable']) {
+  test(`ZIP preparation rolls back a new recovery file after ${fault} fails`, async () => {
+    let failure = true;
+    const savedNames = [];
+    const { processor, state, files, park } = recoveryFixture(message => {
+      savedNames.push(message.filename); return { ok: true, id: 42 };
+    }, () => {
+      if (failure && fault === 'index write') throw new Error('injected recovery index write failure');
+    }, {
+      readRecovery: entries => failure && fault === 'index read'
+        ? { ok: false, error: 'injected recovery index read failure' } : { ok: true, entries },
+      createWritable: () => { if (failure && fault === 'createWritable') throw new Error('injected recovery createWritable failure'); },
+    });
+    const keepAlive = setTimeout(() => {}, 2000);
+    try {
+      await processor.message({ t: 'mendosave-host-probe' });
+      await new Promise(resolve => setImmediate(resolve));
+      park('existing');
+      state.entries[0].manualOnly = true;
+      const original = JSON.parse(JSON.stringify(state.entries));
+      assert.equal((await processor.message({ t: 'mendosave-package-begin', packageId: 'zipFailure', mode: 'zip', title: 'Test',
+        items: [{ id: 'mp3', label: 'MP3' }, { id: 'second', label: 'Second' }] })).ok, true);
+      await processor.message({ t: 'mendosave-package-next', packageId: 'zipFailure', index: 0 });
+      assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'failedEntry', packageId: 'zipFailure',
+        packageIndex: 0, filename: 'new.mp3', format: 'mp3', audioMime: 'audio/mpeg' })).ok, true);
+      await processor.message({ t: 'mendosave-chunk', jobId: 'failedEntry', packageId: 'zipFailure',
+        packageIndex: 0, track: 'audio', b64: '//uQAAECAw==' });
+      const failed = await processor.message({ t: 'mendosave-finalize', jobId: 'failedEntry', packageId: 'zipFailure', packageIndex: 0 });
+      assert.equal(failed.ok, false);
+      assert.match(failed.error, new RegExp(`injected recovery ${fault} failure`));
+      assert.deepEqual(JSON.parse(JSON.stringify(state.entries)), original);
+      assert.deepEqual([...files.keys()], ['existing'], 'failed preparation must not leave invisible OPFS bytes');
+      assert.equal(await files.get('existing').text(), 'ready bytes');
+      await processor.message({ t: 'mendosave-package-cancel', packageId: 'zipFailure' });
+      failure = false;
+      assert.equal((await processor.message({ t: 'mendosave-package-begin', packageId: 'zipRetry', mode: 'zip', title: 'Retry',
+        items: [{ id: 'mp3', label: 'MP3' }, { id: 'second', label: 'Second' }] })).ok, true);
+      await processor.message({ t: 'mendosave-package-next', packageId: 'zipRetry', index: 0 });
+      await processor.message({ t: 'mendosave-begin', jobId: 'retryEntry', packageId: 'zipRetry',
+        packageIndex: 0, filename: 'retry.mp3', format: 'mp3', audioMime: 'audio/mpeg' });
+      await processor.message({ t: 'mendosave-chunk', jobId: 'retryEntry', packageId: 'zipRetry',
+        packageIndex: 0, track: 'audio', b64: '//uQAAECAw==' });
+      assert.equal((await processor.message({ t: 'mendosave-finalize', jobId: 'retryEntry', packageId: 'zipRetry', packageIndex: 0 })).ok, true);
+      await processor.message({ t: 'mendosave-package-complete', packageId: 'zipRetry', index: 0 });
+      assert.equal(state.entries.some(entry => entry.filename === 'retry.mp3'), true);
+      await processor.message({ t: 'mendosave-package-next', packageId: 'zipRetry', index: 1 });
+      await processor.message({ t: 'mendosave-begin', jobId: 'secondEntry', packageId: 'zipRetry',
+        packageIndex: 1, filename: 'second.mp3', format: 'mp3', audioMime: 'audio/mpeg' });
+      await processor.message({ t: 'mendosave-chunk', jobId: 'secondEntry', packageId: 'zipRetry',
+        packageIndex: 1, track: 'audio', b64: '//uQAAECAw==' });
+      assert.equal((await processor.message({ t: 'mendosave-finalize', jobId: 'secondEntry', packageId: 'zipRetry', packageIndex: 1 })).ok, true);
+      await processor.message({ t: 'mendosave-package-complete', packageId: 'zipRetry', index: 1 });
+      assert.equal((await processor.message({ t: 'mendosave-package-finish', packageId: 'zipRetry' })).ok, true);
+      assert.deepEqual(savedNames, ['Retry.zip']);
+      assert.deepEqual([...files.keys()], ['existing']);
+      assert.deepEqual(JSON.parse(JSON.stringify(state.entries)), original);
+      assert.equal((await processor.message({ t: 'mendosave-flush', manual: true })).ok, true);
+      assert.equal(state.entries.every(entry => entry.savedAt), true);
+    } finally { clearTimeout(keepAlive); processor.close(); }
+  });
+}

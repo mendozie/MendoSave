@@ -1496,20 +1496,21 @@ async function stashForRecovery(blob, filename, options = {}) {
   const dir = await recoveryDirectory();
   const id = `${Date.now()}-${Math.round(Math.random() * 1e9).toString(36)}.bin`;
   const handle = await dir.getFileHandle(id, { create: true });
-  const writable = await handle.createWritable();
+  let writable;
   try {
+    writable = await handle.createWritable();
     await blob.stream().pipeTo(new WritableStream({
       write: bytes => writable.write(bytes), close: () => writable.close(), abort: () => writable.abort(),
     }), { signal: options.signal });
+    await changeRecovery(entries => [...entries, {
+      id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
+      ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
+    }]);
   } catch (error) {
-    await writable.abort?.().catch(() => {});
+    await writable?.abort?.().catch(() => {});
     await dir.removeEntry(id).catch(() => {});
     throw error;
   }
-  await changeRecovery(entries => [...entries, {
-    id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
-    ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
-  }]);
   logToWorker('recovery', `parked finished file for later saving; file=${filename} bytes=${blob.size}`);
   return id;
 }

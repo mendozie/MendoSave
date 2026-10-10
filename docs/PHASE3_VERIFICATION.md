@@ -72,11 +72,13 @@ Popup настроек отдельно просмотрен целиком пр
 
 ## Regression checks и review
 
-Итог: **266/266 tests**. ESLint: **0 errors / 14 warnings** существующего кода. Проверены обе сборки и inventories; outgoing scanner не обнаружил секретов или приватных путей в проверяемом содержимом. Mozilla `web-ext`: **0 errors / 3 vendor warnings** - два прежних FFmpeg warnings и dynamic import в zip.js bundle. ZIP-путь использует локальную библиотеку с отключёнными workers; strict lint с `--warnings-as-errors` не проходит. Полный security scan запланирован перед публичным выпуском.
+Итог: **269/269 tests**. ESLint: **0 errors / 14 warnings** существующего кода. Проверены обе сборки и inventories; outgoing scanner не обнаружил секретов или приватных путей в проверяемом содержимом. Mozilla `web-ext`: **0 errors / 3 vendor warnings** - два прежних FFmpeg warnings и dynamic import в zip.js bundle. ZIP-путь использует локальную библиотеку с отключёнными workers; strict lint с `--warnings-as-errors` не проходит. Полный security scan запланирован перед публичным выпуском.
 
 Тесты покрывают store/CRC/ZIP64, безопасные имена, счётчик квоты, sender и текущий индекс, очередь/ошибку/отмену, Blob lifetime, orphan cleanup, native cancellation, захват актуальных codec settings и recovery. При реальном 128 MiB проходе Zen обнаружен protected `constructor` lookup у foreign buffer view: до первого chunk передача прерывалась. Создана собственная копия bytes перед `subarray`; meaningful regression сначала воспроизвёл сбой, затем прошёл. После исправления реальный Zen ZIP завершился и прошёл byte comparison.
 
 Совокупный внутренний code review и focused review коррекций выполнены. Исправлены подтверждённые ошибки принадлежности текущей позиции, recovery bookkeeping, повторного fallback после Cancel, stale codec selection и очистки потерянных передач. Review не заменяет перечисленные реальные проверки. GitHub PR/review и окончательные SHAs фиксируются в метаданных интеграции; это отдельная проверка от browser QA.
+
+Первый managed review в [PR #2](https://github.com/mendozie/MendoSave/pull/2) обнаружил неиндексированный OPFS-файл при отказе recovery index после записи готовых bytes. RED воспроизвёл утечку через публичный ZIP-протокол. Исправленный `stashForRecovery` охватывает одним `try/catch` открытие writable, запись bytes и обновление index; при отказе удаляет только новый файл и возвращает исходную ошибку. Три regression scenarios вводят read/write/createWritable failure до commit index, проверяют сохранность прежних entries и bytes, затем успешное завершение нового ZIP и ручное сохранение прежнего файла. Реальный crash, отказ удаления и потерянный ответ после index commit в этой коррекции не проверялись.
 
 ## Граница следующего этапа
 
