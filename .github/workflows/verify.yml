@@ -60,4 +60,4 @@ jobs:
           pattern: unsigned-candidate-*
           path: candidates
       - name: Compare Windows and Linux archive hashes
-        run: cmp candidates/unsigned-candidate-ubuntu-24.04/SHA256SUMS candidates/unsigned-candidate-windows-2025/SHA256SUMS
+        run: cmp candidates/unsigned-candidate-ubuntu-24.04/mendosave-*/SHA256SUMS candidates/unsigned-candidate-windows-2025/mendosave-*/SHA256SUMS
