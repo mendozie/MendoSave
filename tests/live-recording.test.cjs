@@ -23,8 +23,8 @@ async function packets(blob) {
   } finally { input.dispose(); }
 }
 
-async function assertFinalized(blob) {
-  const before = await packets(new Blob([recordingFixture]));
+async function assertFinalized(blob, original = new Blob([recordingFixture])) {
+  const before = await packets(original);
   const after = await packets(blob);
   for (const track of before) {
     const actual = after.find((entry) => entry.type === track.type);
@@ -35,7 +35,7 @@ async function assertFinalized(blob) {
   }
 }
 
-function host({ writeBarrier, outputBarrier, downloadState, saveError, dependency = mediabunny, outputFault, Clock = Date, fastStall, fastRetries } = {}) {
+function host({ writeBarrier, outputBarrier, outputSinkBarriers, downloadState, saveError, dependency = mediabunny, outputFault, Clock = Date, fastStall, fastRetries } = {}) {
   let messageListener, connectListener;
   const timers = new Set();
   const dirs = new Map();
@@ -49,18 +49,25 @@ function host({ writeBarrier, outputBarrier, downloadState, saveError, dependenc
       const files = new Map();
       dirs.set(name, {
         async *keys() { yield* files.keys(); },
-        async removeEntry(key) { files.delete(key); },
+        async removeEntry(key) {
+          if (files.get(key)?.isLocked()) throw new Error('output is still locked');
+          files.delete(key);
+        },
         async getFileHandle(key, options = {}) {
           if (key.endsWith('-out.webm')) await outputBarrier;
           if (!files.has(key)) {
             if (!options.create) throw new Error('missing file');
-            let committed = new Blob([]);
+            let committed = new Blob([]), locked = false;
+            const barriers = key.endsWith('-out.webm') ? outputSinkBarriers : undefined;
             files.set(key, {
+              isLocked: () => locked,
               async createWritable() {
+                locked = Boolean(barriers);
                 let bytes = new Uint8Array();
                 return {
                   async write(chunk) {
                     await writeBarrier;
+                    await barriers?.write;
                     const position = chunk.type === 'write' ? chunk.position : bytes.length;
                     const data = chunk.type === 'write' ? chunk.data : chunk;
                     const part = data instanceof Blob ? new Uint8Array(await data.slice().arrayBuffer()) : new Uint8Array(data);
@@ -68,10 +75,12 @@ function host({ writeBarrier, outputBarrier, downloadState, saveError, dependenc
                     next.set(bytes); next.set(part, position); bytes = next;
                   },
                   async close() {
+                    await barriers?.close;
                     const data = key.endsWith('-out.webm') && outputFault ? outputFault(bytes) : bytes;
                     committed = new Blob([data]); commits.push({ name: key, blob: committed });
+                    locked = false;
                   },
-                  async abort() {},
+                  async abort() { await barriers?.abort; locked = false; },
                 };
               },
               async getFile() {
@@ -435,4 +444,72 @@ test('a stalled OPFS output creation cannot recreate a failed output after the g
     assert.equal(app.saves.length, 0);
     assert.deepEqual(await liveFiles(app), ['record7-video.bin']);
   } finally { release(); app.close(); }
+});
+
+test('stalled OPFS writes and close return without waiting for cancellation and remove the output after unlock', async (t) => {
+  for (const operation of ['write', 'close']) {
+    await t.test(operation, async () => {
+      let release, deadline;
+      const blocked = new Promise((resolve) => { release = resolve; });
+      let now = 0;
+      class Clock extends Date { static now() { return now; } static advance(ms) { now += ms; } }
+      const app = host({ outputSinkBarriers: { [operation]: blocked, abort: blocked }, Clock, fastStall: true, fastRetries: true });
+      try {
+        await app.message({ ...begin }); app.connect(); await app.message({ ...chunk });
+        const result = await Promise.race([
+          app.message({ t: 'mendosave-live-finalize', jobId: begin.jobId }),
+          new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('cleanup blocked the stall response')), 500); }),
+        ]);
+        assert.equal(result.ok, false);
+        assert.match(result.error, /180 секунд/);
+        assert.equal(app.saves.length, 0);
+        assert.deepEqual(Buffer.from(await app.commits.find((entry) => entry.name === 'record7-video.bin').blob.arrayBuffer()), recordingFixture);
+        release(); await app.settle();
+        assert.deepEqual(await liveFiles(app), ['record7-video.bin']);
+        assert.equal(app.saves.length, 0);
+        await app.message({ ...begin, jobId: 'record8' }); app.connect(app.sender, 'record8');
+        await app.message({ ...chunk, jobId: 'record8' });
+        assert.equal((await app.message({ t: 'mendosave-live-finalize', jobId: 'record8' })).ok, true);
+        await assertFinalized(app.saves[0].blob);
+      } finally { clearTimeout(deadline); release(); await app.settle(); app.close(); }
+    });
+  }
+});
+
+test('a video-only capture saves normal and partial files despite a configured audio codec', async (t) => {
+  const lib = await mediabunny;
+  const input = new lib.Input({ formats: lib.ALL_FORMATS, source: new lib.BlobSource(new Blob([recordingFixture])) });
+  let videoOnly;
+  try {
+    const video = (await input.getTracks()).find((track) => track.type === 'video');
+    const target = new lib.BufferTarget();
+    const output = new lib.Output({ format: new lib.WebMOutputFormat(), target });
+    const source = new lib.EncodedVideoPacketSource(video.codec);
+    output.addVideoTrack(source); await output.start();
+    let first = true;
+    for await (const packet of new lib.EncodedPacketSink(video).packets()) {
+      await source.add(packet, first ? { decoderConfig: await video.getDecoderConfig() } : undefined);
+      first = false;
+    }
+    source.close(); await output.finalize();
+    videoOnly = new Blob([target.buffer]);
+  } finally { input.dispose(); }
+  assert.deepEqual((await packets(videoOnly)).map((track) => track.type), ['video']);
+  const b64 = Buffer.from(await videoOnly.arrayBuffer()).toString('base64');
+  for (const interrupted of [false, true]) {
+    await t.test(interrupted ? 'partial' : 'normal', async () => {
+      const app = host();
+      try {
+        await app.message({ ...begin }); app.connect();
+        await app.message({ ...chunk, b64 });
+        const result = await app.message({ t: 'mendosave-live-finalize', jobId: begin.jobId, interrupted });
+        assert.equal(result.ok, true, result.error);
+        assert.equal(result.partial, interrupted);
+        assert.equal(app.saves.length, 1);
+        assert.deepEqual((await packets(app.saves[0].blob)).map((track) => track.type), ['video']);
+        await assertFinalized(app.saves[0].blob, videoOnly);
+        assert.deepEqual(await liveFiles(app), []);
+      } finally { app.close(); }
+    });
+  }
 });

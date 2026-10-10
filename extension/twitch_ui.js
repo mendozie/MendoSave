@@ -469,9 +469,7 @@
   function pickMimeType() {
     const candidates = [
       'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=h264,opus',
       'video/webm;codecs=vp8,opus',
-      'video/webm',
     ];
     return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
   }
@@ -568,7 +566,8 @@
         throw new Error(`не удалось захватить поток (${error?.message || error})`, { cause: error });
       }
       if (!stream.getVideoTracks().length) throw new Error('видеопоток пока недоступен, попробуйте через пару секунд');
-      recorderMime = pickMimeType() || 'video/webm';
+      recorderMime = pickMimeType();
+      if (!recorderMime) throw new Error('совместимый формат WebM недоступен в этом браузере');
       const active = new MediaRecorder(stream, {
         mimeType: recorderMime,
         videoBitsPerSecond: 12_000_000,

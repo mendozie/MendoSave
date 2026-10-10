@@ -36,6 +36,40 @@ function liveRecording(send, reply) {
   return { app, port, get recorder() { return active; } };
 }
 
+test('Twitch chooses a remuxable WebM codec and refuses an H264-only recorder before starting a job', async (t) => {
+  for (const vp8Supported of [true, false]) {
+    await t.test(vp8Supported ? 'VP8 fallback' : 'H264 only', async () => {
+      const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
+        'https://www.twitch.tv/twitchdev', async () => { throw new Error('live must not fetch a VOD'); });
+      const media = app.document.querySelector('video');
+      Object.assign(media, { readyState: 2, paused: false, error: null, ended: false });
+      media.captureStream = () => ({ getVideoTracks: () => [{}] });
+      recordingPort(app);
+      const constructed = [];
+      let starts = 0;
+      app.context.MediaRecorder = class {
+        static isTypeSupported(type) {
+          return type.includes('h264') || (vp8Supported && type === 'video/webm;codecs=vp8,opus');
+        }
+        constructor(_stream, options) { constructed.push(options.mimeType); this.mimeType = options.mimeType; }
+        start() { starts++; this.state = 'recording'; }
+      };
+      app.click(app.document.querySelector('#mendosave-twitch-record')); await app.settle();
+      if (vp8Supported) {
+        assert.deepEqual(constructed, ['video/webm;codecs=vp8,opus']);
+        assert.equal(starts, 1);
+        assert.equal(app.messages.find((message) => message.t === 'mendosave-live-begin').mime, constructed[0]);
+      } else {
+        assert.deepEqual(constructed, []);
+        assert.equal(starts, 0);
+        assert.equal(app.messages.some((message) => message.t === 'mendosave-live-begin'), false);
+        assert.equal(app.document.querySelector('#mendosave-twitch-record').classList.contains('recording'), false);
+        assert.match(app.document.querySelector('#mendosave-twitch-toast').textContent, /совместимый формат WebM недоступен/);
+      }
+    });
+  }
+});
+
 function vod(playlist, variant = 'https://media.invalid/vod/playlist.m3u8', segmentFetch, master) {
   return adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>', 'https://www.twitch.tv/videos/551972874', async (url) => {
     if (url.includes('gql.twitch.tv')) return { ok: true, json: async () => ({ data: { video: { title: 'Test VOD', lengthSeconds: 49, owner: { displayName: 'TwitchDev' } }, videoPlaybackAccessToken: { signature: 'fixture', value: 'fixture' } } }) };

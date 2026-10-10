@@ -2397,9 +2397,26 @@ async function remuxRawRecording(job, inputFile) {
     lastTick = Date.now();
   };
   const cleanup = async () => {
-    try { if (output?.state === 'started' || output?.state === 'pending') await output.cancel(); } catch (cancelError) {}
-    if (writable && !writableClosed) await writable.abort?.().catch(() => {});
-    await dir.removeEntry(outName).catch(() => {});
+    const remove = () => dir.removeEntry(outName).catch(() => {});
+    // Cancellation can queue behind the stalled write/close. Start both
+    // independently and release the job even if that native sink never settles.
+    const cancelling = Promise.resolve().then(() => {
+      if (output?.state === 'started' || output?.state === 'pending') return output.cancel();
+      return undefined;
+    }).catch(() => {});
+    const aborting = Promise.resolve().then(() => {
+      if (writable && !writableClosed) return writable.abort?.();
+      return undefined;
+    }).catch(() => {});
+    // OPFS may refuse removal while a writer holds the file. Retry after
+    // either cancellation settles, and again in the late-copy catch below.
+    const cleanupFinished = Promise.all([remove(), cancelling.then(remove), aborting.then(remove)]);
+    let cleanupTimer;
+    try {
+      await Promise.race([cleanupFinished, new Promise((resolve) => {
+        cleanupTimer = setTimeout(resolve, 1_000);
+      })]);
+    } finally { clearTimeout(cleanupTimer); }
   };
   try {
     const copy = async () => {
@@ -2419,13 +2436,8 @@ async function remuxRawRecording(job, inputFile) {
           ? new EncodedVideoPacketSource(track.codec) : new EncodedAudioPacketSource(track.codec),
         config: await track.getDecoderConfig(), count: 0, lastMs: -Infinity });
       }
-      // A declared audio track must not silently disappear during capture/parsing.
-      for (const codec of ['vp8', 'vp9', 'av1', 'opus', 'vorbis']) {
-        if (new RegExp(`(?:[=,])\\s*${codec}(?:[,;]|$)`, 'i').test(job.rawMime)
-          && !tracks.some((track) => track.codec === codec)) {
-          throw new Error(`заявленная дорожка ${codec} отсутствует`);
-        }
-      }
+      // Recorder MIME is a codec preference, not evidence of captured tracks.
+      // Actual tracks and complete prefix packet counts below establish integrity.
       touch();
       const outHandle = await dir.getFileHandle(outName, { create: true });
       touch();
