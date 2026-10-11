@@ -1,6 +1,6 @@
 # Подписание и распространение
 
-Подписание завершено 10-10-2026: Mozilla одобрила MendoSave 0.3.0 в канале unlisted, Zen принял постоянную установку и сохранил её после перезапуска. Репозиторий остаётся приватным, страницы в магазине нет. [Проверки и hashes](SIGNING_VERIFICATION.md).
+MendoSave 0.3.1 выпущена 11-10-2026 для ручной установки: [GitHub Release](https://github.com/mendozie/MendoSave/releases/tag/v0.3.1) содержит подписанный Mozilla unlisted XPI, Chromium ZIP, matching source и hashes. Zen принял постоянное обновление с 0.3.0 и сохранил настройки после полного перезапуска. Репозиторий остаётся приватным, страницы в магазине нет. [Проверки и hashes 0.3.1](SIGNING_VERIFICATION_031.md); [baseline 0.3.0](SIGNING_VERIFICATION.md) сохранён отдельно.
 
 ## Выбранный вариант
 
@@ -12,6 +12,8 @@
 | Signed unlisted | Подписанный XPI для ограниченного тестирования без публичного listing | Раздача файла; обновления вручную либо отдельный согласованный update manifest |
 
 10-10-2026 пользователь прямо разрешил отправку MendoSave на подписание через signed unlisted, без публикации в магазине. Это решение заменяет прежний план «сначала файл, затем AMO». Репозиторий остаётся приватным, публичный listing сейчас не планируется. Обновления устанавливаются вручную; самостоятельный update server не добавляется.
+
+11-10-2026 пользователь подтвердил распространение готовых пакетов через GitHub Release для ручной установки в Chromium и Firefox-подобные браузеры. Выпуск выполняется в существующем приватном репозитории. Это заменяет прежнее отсутствие разрешения на Release, без смены видимости репозитория или отправки в магазины. Для работы с Mozilla выбран только встроенный браузер Codex; рабочий Zen пользователя не используется.
 
 Mozilla требует подпись для release/beta Firefox при обоих каналах и может провести review даже после подписания. `web-ext` 10.7.0 поддерживает initial listed/unlisted submission. Формирование архивов и CI upload не отправляют расширение в Mozilla. Источники: [Signing and distribution](https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/), [Self-distribution](https://extensionworkshop.com/documentation/publish/self-distribution/).
 
@@ -36,4 +38,6 @@ Mozilla требует подпись для release/beta Firefox при обо�
 
 Наличие unsigned XPI, зелёный CI или успешный upload на AMO не заменяют подписанный файл и проверку его установки.
 
-Для этой поставки исходный candidate и source snapshot `fa034ac7748bacd60f53800bbf31e233d4ab1139` сохранены в `artifacts/mendosave-0.3.0-unlisted/`. Рядом находятся полученный от Mozilla `mendosave-0.3.0-firefox-signed.xpi`, отдельный `signing-manifest.json` и `SIGNED_SHA256SUMS`. Исходный `release-manifest.json` продолжает описывать неподписанные архивы; подписание не меняет его provenance. Повторная сборка создаёт новые unsigned artifacts и не воспроизводит подпись Mozilla. GitHub release и смена видимости не выполнялись.
+Для 0.3.1 исходный candidate и source snapshot `1fce50347ca109cd60da7d2942353b86de90cabf` сохранены в `artifacts/mendosave-0.3.1-unlisted/`. Рядом находятся полученный от Mozilla `mendosave-0.3.1-firefox-signed.xpi`, отдельный `signing-manifest.json` и `SIGNED_SHA256SUMS`. Скачанный из Mozilla source совпал по SHA-256 с отправленным ZIP. Исходный `release-manifest.json` продолжает описывать неподписанные архивы; подписание не меняет его provenance. Повторная сборка создаёт новые unsigned artifacts и не воспроизводит подпись Mozilla. Release `v0.3.1` закреплён за этим runtime revision; последующие записи поставки в `main` не меняют отправленный source. Шесть Release assets проверены через saved API state по размерам и SHA-256. Смена видимости не выполнялась.
+
+Историческая поставка 0.3.0 и её source revision `fa034ac7748bacd60f53800bbf31e233d4ab1139` сохранены в `artifacts/mendosave-0.3.0-unlisted/`.
