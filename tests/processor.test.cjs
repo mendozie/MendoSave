@@ -18,6 +18,7 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
   };
   const timers = new Set();
   const context = vm.createContext({
+    location: new URL('moz-extension://test/offscreen.html#mendosave-host=fixture'),
     chrome, URL: State.URL || URL, console, TextDecoder, Uint8Array, ArrayBuffer, atob, Blob, Date: Clock, Worker,
     FFmpegWASM: { FFmpeg: Engine || class {
       on() {} async load() {} terminate() {}
@@ -40,7 +41,7 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
     .replace('const STAGING_MAX_BYTES = 1_500_000_000;', 'const STAGING_MAX_BYTES = 5;');
   vm.runInContext(processorSource, context);
   const message = (payload, tabId = 7) => new Promise((resolve) => {
-    const accepted = listener(payload, { id: chrome.runtime.id, frameId: 0,
+    const accepted = listener({ instanceId: 'fixture', ...payload }, { id: chrome.runtime.id, frameId: 0,
       tab: { id: tabId, url: 'https://www.youtube.com/watch?v=fixture' } }, resolve);
     // Synchronous handlers send a response before returning false.
     if (!accepted) resolve(undefined);
@@ -213,6 +214,108 @@ test('cancelling a waiting mux worker releases the job without a stall timeout',
     assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'job8', format: 'mp3' })).ok, true);
     await processor.message({ t: 'mendosave-abort', jobId: 'job8' });
   } finally { processor.close(); }
+});
+
+function muxFixture(mode) {
+  const input = Uint8Array.from([0, 0, 0, 20, 102, 116, 121, 112, 105, 115, 111, 109,
+    0, 0, 0, 0, 105, 115, 111, 109, 0, 0, 0, 8, 109, 111, 111, 118,
+    0, 0, 0, 8, 109, 100, 97, 116]);
+  const output = seconds => {
+    const bytes = new Uint8Array(28), view = new DataView(bytes.buffer);
+    view.setUint32(0, bytes.length); bytes.set([109, 118, 104, 100], 4);
+    view.setUint32(20, 1000); view.setUint32(24, seconds * 1000);
+    return bytes;
+  };
+  const writes = [], diagnostics = [], workers = [];
+  let executions = 0, saves = 0;
+  class MuxWorker {
+    constructor() { this.parts = { video: [], audio: [] }; this.completed = new Set(); workers.push(this);
+      if (mode !== 'unavailable') queueMicrotask(() => this.onmessage({ data: { t: 'ready' } }));
+    }
+    postMessage(message, transfer = []) {
+      if (message.t === 'start' || message.t === 'cancel') return;
+      if (message.t === 'chunk') {
+        // Model native ownership transfer, including detachment of the sender's buffer.
+        const received = structuredClone(message, { transfer });
+        assert.equal(message.bytes.byteLength, 0);
+        this.parts[message.track].push(received.bytes); return;
+      }
+      if (message.t !== 'complete') return;
+      this.completed.add(message.track);
+      if (this.completed.size !== 2) return;
+      queueMicrotask(() => {
+        if (mode === 'crash') this.onerror({ message: 'native mux crash' });
+        else if (mode === 'short') this.onmessage({ data: { t: 'done', bytes: output(69.9).buffer } });
+        else this.onmessage({ data: { t: 'error', message: 'native mux parse failure',
+          video: this.parts.video.map(bytes => mode === 'partial' ? bytes.slice(0, 12) : bytes),
+          audio: this.parts.audio.map(bytes => mode === 'partial' ? bytes.slice(0, 12) : bytes) } });
+      });
+    }
+    terminate() { this.terminated = true; }
+    unavailable() { this.onmessage({ data: { t: 'unavailable', message: 'native mux import unavailable' } }); }
+  }
+  const processor = processorContext(message => {
+    if (message.t === 'mendosave-error') diagnostics.push(message);
+    if (message.t === 'mendosave-save') { saves++; return { ok: true, id: 42 }; }
+    if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
+    return { ok: true };
+  }, class {
+    on() {} async load() {} terminate() {} async deleteFile() {}
+    async writeFile(name, bytes) { writes.push({ name, bytes: Buffer.from(bytes) }); }
+    async exec() { executions++; return 0; }
+    async readFile() { return output(100); }
+  }, Date, MuxWorker);
+  return { processor, input, writes, diagnostics, workers, get executions() { return executions; }, get saves() { return saves; },
+    async begin() {
+      assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'mux', filename: 'mux.mp4',
+        videoMime: 'video/mp4', audioMime: 'audio/mp4', videoSize: input.length, audioSize: input.length,
+        duration: mode === 'short' ? 773 : 100 })).ok, true);
+      for (const track of ['video', 'audio']) assert.equal((await processor.message({ t: 'mendosave-chunk',
+        jobId: 'mux', track, b64: Buffer.from(input).toString('base64') })).ok, true);
+      if (mode === 'unavailable') workers[0].unavailable();
+    } };
+}
+
+test('lost streaming mux inputs preserve the original failure and release the processor slot', async t => {
+  for (const [mode, reason] of [['short', /69\.9 сек вместо 773\.0 сек/],
+    ['crash', /native mux crash/], ['partial', /native mux parse failure/]]) await t.test(mode, async () => {
+    const f = muxFixture(mode);
+    try {
+      await f.begin();
+      const result = await f.processor.message({ t: 'mendosave-finalize', jobId: 'mux' });
+      assert.equal(result.ok, false);
+      assert.match(result.error, reason);
+      assert.doesNotMatch(result.error, /пустые данные аудио/);
+      assert.equal(f.executions, 0, 'incomplete input cannot be handed to buffered FFmpeg');
+      assert.equal(f.saves, 0);
+      assert.equal(f.diagnostics.length, 1);
+      assert.equal(f.diagnostics[0].details.stage, 'mediabunny-stream');
+      assert.equal(f.diagnostics[0].details.streamMuxFallback.available, false);
+      assert.deepEqual({ ...f.diagnostics[0].details.streamMuxFallback.received }, { video: 36, audio: 36 });
+      assert.deepEqual({ ...f.diagnostics[0].details.streamMuxFallback.retained },
+        mode === 'partial' ? { video: 12, audio: 12 } : { video: 0, audio: 0 });
+      assert.equal(f.workers[0].terminated, true);
+      assert.equal((await f.processor.message({ t: 'mendosave-begin', jobId: 'next', format: 'mp3' })).ok, true);
+      await f.processor.message({ t: 'mendosave-abort', jobId: 'next' });
+    } finally { f.processor.close(); }
+  });
+});
+
+test('buffered fallback keeps all returned worker inputs and unsent pre-ready inputs', async t => {
+  for (const mode of ['returned', 'unavailable']) await t.test(mode, async () => {
+    const f = muxFixture(mode);
+    try {
+      await f.begin();
+      const result = await f.processor.message({ t: 'mendosave-finalize', jobId: 'mux' });
+      assert.equal(result.ok, true, result.error);
+      assert.equal(f.executions, 1);
+      assert.equal(f.saves, 1);
+      assert.equal(f.diagnostics.length, 0);
+      assert.equal(f.writes.length, 2);
+      for (const { bytes } of f.writes) assert.deepEqual(bytes, Buffer.from(f.input));
+      assert.equal(f.workers[0].terminated, true);
+    } finally { f.processor.close(); }
+  });
 });
 
 test('a processed file is successful only after the browser finishes its download', async () => {

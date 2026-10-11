@@ -16,7 +16,8 @@ for (const target of ['firefox', 'chromium']) {
   manifest.host_permissions = manifest.host_permissions.filter((host) => !/github/.test(host));
   if (target === 'firefox') {
     manifest.permissions = manifest.permissions.filter((permission) => permission !== 'offscreen');
-    manifest.background = { scripts: ['platform.js', 'diagnostics.js', 'background.js'] };
+    fs.copyFileSync(path.join(root, 'browser-hosts', 'firefox.js'), path.join(output, 'browser-host.js'));
+    manifest.background = { scripts: ['browser-host.js', 'platform.js', 'diagnostics.js', 'background.js'] };
     manifest.browser_specific_settings = { gecko: {
       id: 'mendosave@mendozie', strict_min_version: '157.0',
       data_collection_permissions: { required: ['none'] },
@@ -37,7 +38,7 @@ for (const target of ['firefox', 'chromium']) {
     }
   }
   collect(output);
-  const expected = new Set(['LICENSE', 'THIRD_PARTY_NOTICES.md', ...(target === 'chromium' ? ['browser-host.js'] : [])]);
+  const expected = new Set(['LICENSE', 'THIRD_PARTY_NOTICES.md', 'browser-host.js']);
   function expectSource(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, entry.name);

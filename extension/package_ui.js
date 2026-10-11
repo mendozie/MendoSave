@@ -1,6 +1,7 @@
 (() => {
   function create({ runtime, document, fetch: fetcher = globalThis.fetch, queue = globalThis.MendoPackageQueue }) {
     let current = null;
+    let picker = null;
     const interrupted = (code) => {
       const error = new Error(`Сохранение прервано: ${code || 'ошибка браузера'}`);
       if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') { error.name = 'AbortError'; error.cancelled = true; }
@@ -16,20 +17,99 @@
       if (!response?.ok) throw new Error(response?.error || 'Обработчик не подтвердил операцию');
       return response;
     };
+    const processorRoutes = new Set([
+      'mendosave-warmup', 'mendosave-begin', 'mendosave-stage-open', 'mendosave-stage',
+      'mendosave-chunk', 'mendosave-abort', 'mendosave-finalize',
+      'mendosave-live-begin', 'mendosave-live-chunk', 'mendosave-live-abort', 'mendosave-live-finalize',
+      'mendosave-package-begin', 'mendosave-package-next', 'mendosave-package-complete', 'mendosave-package-finish', 'mendosave-package-cancel',
+      'mendosave-blob-open', 'mendosave-blob-chunk', 'mendosave-blob-finish', 'mendosave-blob-abort',
+      'mendosave-save-source', 'mendosave-save-text', 'mendosave-flush',
+      'mendosave-host-probe', 'mendosave-host-close', 'mendosave-host-resume',
+    ]);
+    const sendOwned = async (message, state, binding) => {
+      const maintenance = /abort|cancel|mendosave-log|mendosave-error/.test(message.t || '');
+      if (processorRoutes.has(message.t) && !binding) throw new Error('Processor command requires an acquired producer');
+      if (!maintenance && state && (state !== current || state.controller.signal.aborted)) interrupted('USER_CANCELED');
+      const targeted = binding && processorRoutes.has(message.t) ? { ...message, instanceId: binding.instanceId } : message;
+      const response = await raw(state ? { ...targeted, packageId: state.id,
+        packageIndex: binding ? binding.packageIndex : state.index } : targeted);
+      if (state && !maintenance && (state !== current || state.controller.signal.aborted)) interrupted('USER_CANCELED');
+      if (state === current && state && response?.ok && /mendosave-(?:live-)?begin$/.test(message.t)) state.jobs.add(message.jobId);
+      if (state === current && state && response?.ok && message.t === 'mendosave-save' && Number.isInteger(response.id)) state.downloads.add(response.id);
+      if (state === current && state && response?.ok && message.t === 'mendosave-download-state' && response.totalBytes) {
+        state.progress?.(response.bytesReceived / response.totalBytes);
+      }
+      return response;
+    };
     const api = {
       get running() { return Boolean(current); },
       get signal() { return current?.controller.signal || null; },
+      cancel() { return current?.abort?.(); },
       check,
       interruption: interrupted,
-      async send(message) {
-        if (!/abort|cancel|mendosave-log|mendosave-error/.test(message.t || '')) check();
-        const response = await raw(current ? { ...message, packageId: current.id, packageIndex: current.index } : message);
-        if (current && response?.ok && /mendosave-(?:live-)?begin$/.test(message.t)) current.jobs.add(message.jobId);
-        if (current && response?.ok && message.t === 'mendosave-save' && Number.isInteger(response.id)) current.downloads.add(response.id);
-        if (current && response?.ok && message.t === 'mendosave-download-state' && response.totalBytes) {
-          current.progress?.(response.bytesReceived / response.totalBytes);
+      acquireProcessor({ signal, onDisconnect } = {}) {
+        const state = current, packageIndex = state?.index;
+        if (signal?.aborted) {
+          try { interrupted('USER_CANCELED'); } catch (error) { return Promise.reject(error); }
         }
-        return response;
+        return new Promise((resolve, reject) => {
+          let port, timer, ready = false, released = false;
+          const detach = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', abort);
+            port?.onMessage.removeListener(message);
+            port?.onDisconnect.removeListener(disconnect);
+          };
+          const release = () => {
+            if (released) return;
+            released = true;
+            detach();
+            try { port?.disconnect(); } catch (error) {}
+          };
+          const fail = (error) => {
+            if (released) return;
+            const wasReady = ready;
+            release();
+            if (wasReady) onDisconnect?.(error);
+            else reject(error);
+          };
+          const abort = () => {
+            const error = new Error('Подготовка обработчика отменена');
+            error.name = 'AbortError'; error.cancelled = true;
+            fail(error);
+          };
+          const disconnect = () => fail(new Error('Связь с обработчиком медиа прервана'));
+          const message = (response) => {
+            if (released || ready) return;
+            if (response?.ok !== true || typeof response.instanceId !== 'string'
+              || !/^[a-zA-Z0-9_-]{1,128}$/.test(response.instanceId)) {
+              fail(new Error(response?.error || 'Обработчик не подтвердил готовность'));
+              return;
+            }
+            ready = true;
+            clearTimeout(timer);
+            // Once ready, cancellation must finish the caller's abort/drain
+            // cleanup before release disconnects the producer reservation.
+            signal?.removeEventListener('abort', abort);
+            port.onMessage.removeListener(message);
+            const instanceId = response.instanceId;
+            resolve({ instanceId, release, send(packet) {
+              if (released && !/abort|cancel|mendosave-log|mendosave-error/.test(packet.t || '')) {
+                return Promise.reject(new Error('Producer lease has been released'));
+              }
+              return sendOwned(packet, state, { instanceId, packageIndex });
+            } });
+          };
+          port = runtime.connect({ name: 'mendosave-producer' });
+          port.onMessage.addListener(message);
+          port.onDisconnect.addListener(disconnect);
+          signal?.addEventListener('abort', abort, { once: true });
+          timer = setTimeout(() => fail(new Error('Обработчик медиа не подтвердил готовность вовремя')), 30_000);
+          if (signal?.aborted) abort();
+        });
+      },
+      async send(message) {
+        return sendOwned(message, current, null);
       },
       fetch(url, options = {}) {
         check();
@@ -38,39 +118,57 @@
       },
       async saveBlob(blob, filename) {
         check();
-        const transferId = globalThis.crypto.randomUUID();
-        requireOk(await api.send({ t: 'mendosave-ensure' }));
-        requireOk(await api.send({ t: 'mendosave-blob-open', transferId, filename, mime: blob.type, size: blob.size }));
-        let finished = false;
-        const port = runtime.connect?.({ name: `mendosave-transfer:${transferId}` });
+        const controller = new AbortController();
+        const signal = current?.controller.signal || controller.signal;
+        let disconnectedError;
+        const checkTransfer = () => {
+          check();
+          if (disconnectedError) throw disconnectedError;
+          if (signal.aborted) interrupted('USER_CANCELED');
+        };
+        const producer = await api.acquireProcessor({ signal, onDisconnect(error) {
+          disconnectedError = error; controller.abort();
+        } });
+        let transferId, finished = false, opened = false, port;
         try {
+          transferId = globalThis.crypto.randomUUID();
+          checkTransfer();
+          requireOk(await producer.send({ t: 'mendosave-ensure' }));
+          checkTransfer();
+          opened = true;
+          requireOk(await producer.send({ t: 'mendosave-blob-open', transferId, filename, mime: blob.type, size: blob.size }));
+          port = runtime.connect({ name: `mendosave-transfer:${transferId}` });
           let sequence = 0;
           for (let offset = 0; offset < blob.size; offset += 1024 ** 2) {
-            check();
+            checkTransfer();
             const fetchedBytes = new Uint8Array(await blob.slice(offset, offset + 1024 ** 2).arrayBuffer());
+            checkTransfer();
             // Gecko may keep the buffer view in the page's compartment. Own the
             // bytes before subarray performs its protected constructor lookup.
             const bytes = new Uint8Array(fetchedBytes);
             let binary = '';
             for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-            requireOk(await api.send({ t: 'mendosave-blob-chunk', transferId, sequence: sequence++, data: btoa(binary) }));
+            requireOk(await producer.send({ t: 'mendosave-blob-chunk', transferId, sequence: sequence++, data: btoa(binary) }));
           }
-          check();
-          const result = requireOk(await api.send({ t: 'mendosave-blob-finish', transferId }));
+          checkTransfer();
+          const result = requireOk(await producer.send({ t: 'mendosave-blob-finish', transferId }));
+          checkTransfer();
           finished = true;
           return result.filename || filename;
         } finally {
-          if (!finished) await api.send({ t: 'mendosave-blob-abort', transferId }).catch(() => {});
+          if (opened && !finished) await producer.send({ t: 'mendosave-blob-abort', transferId }).catch(() => {});
           try { port?.disconnect(); } catch (error) {}
+          producer.release();
         }
       },
-      add(menu, { title, options, close }) {
+      add(menu, { title, source = title, options, close }) {
         if (!document || (typeof options !== 'function' && (!Array.isArray(options) || options.length < 2))) return null;
         const opener = document.createElement('button');
         opener.type = 'button'; opener.className = 'mendo-package-open'; opener.textContent = 'Выбрать несколько…';
         opener.addEventListener('click', (event) => {
           event.preventDefault(); event.stopPropagation();
-          if (current) return;
+          if (picker && (current || picker.source === String(source))) { close?.(); picker.show(); return; }
+          picker?.dispose();
           const choices = typeof options === 'function' ? options() : options;
           if (!Array.isArray(choices) || choices.length < 2) return;
           const available = choices.map((item, index) => Object.freeze({ id: String(item.id ?? index), label: String(item.label), run: item.run }));
@@ -96,64 +194,98 @@
           const files = document.createElement('button'); files.type = 'button'; files.dataset.mode = 'files'; files.textContent = 'Отдельные файлы';
           const zip = document.createElement('button'); zip.type = 'button'; zip.dataset.mode = 'zip'; zip.textContent = 'Один ZIP';
           const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Закрыть';
+          cancel.dataset.action = 'cancel';
+          const hide = document.createElement('button'); hide.type = 'button'; hide.textContent = 'Скрыть'; hide.dataset.action = 'hide';
+          const resume = document.createElement('button'); resume.type = 'button'; resume.className = 'mendo-package-resume';
+          resume.hidden = true; resume.setAttribute('aria-live', 'polite');
+          const updateResume = () => { resume.textContent = `Пакет · ${status.textContent.slice(0, 180)}`; };
+          const show = () => {
+            resume.hidden = true;
+            if (!dialog.hasAttribute('open')) { if (dialog.show) dialog.show(); else dialog.setAttribute('open', ''); }
+            (current ? hide : rows.find(row => row.input.checked)?.input || rows[0]?.input)?.focus();
+          };
+          const conceal = () => {
+            dialog.close?.(); dialog.removeAttribute('open');
+            updateResume(); resume.hidden = false; resume.focus();
+          };
+          hide.addEventListener('click', conceal);
+          resume.addEventListener('click', show);
           const selection = () => rows.filter(row => row.input.checked);
           const update = () => { files.disabled = selection().length === 0; zip.disabled = selection().length < 2; };
           rows.forEach(row => row.input.addEventListener('change', update)); update();
-          const dismiss = () => { if (current) return; dialog.close?.(); dialog.remove(); };
+          const dispose = () => { dialog.close?.(); dialog.remove(); resume.remove(); picker = null; };
+          picker = { source: String(source), show, dispose };
+          const dismiss = () => { if (current) return; dispose(); opener.focus(); };
           const abort = async () => {
             const running = current;
             if (!running || running.controller.signal.aborted) return;
             running.controller.abort();
             status.textContent = 'Отменяю текущий файл и оставшуюся очередь…';
+            updateResume();
             cancel.disabled = true;
-            running.cancelPromise = raw({ t: 'mendosave-package-cancel', packageId: running.id }).catch(() => {});
-            for (const jobId of running.jobs) void raw({ t: 'mendosave-abort', jobId, packageId: running.id }).catch(() => {});
-            for (const id of running.downloads) void raw({ t: 'mendosave-download-cancel', id }).catch(() => {});
+            running.cancelPromise = Promise.allSettled([
+              ...(running.producer ? [running.producer.send({ t: 'mendosave-package-cancel', packageId: running.id })] : []),
+              ...[...running.jobs].map(jobId => running.producer.send({ t: 'mendosave-abort', jobId, packageId: running.id })),
+              ...[...running.downloads].map(id => raw({ t: 'mendosave-download-cancel', id })),
+            ]);
           };
           cancel.addEventListener('click', () => { if (current) void abort(); else dismiss(); });
-          dialog.addEventListener('cancel', (e) => { e.preventDefault(); if (current) void abort(); else dismiss(); });
+          dialog.addEventListener('cancel', (e) => { e.preventDefault(); conceal(); });
+          dialog.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); conceal(); } });
           const start = async mode => {
             if (current) return;
             const selected = selection();
             if (!selected.length || (mode === 'zip' && selected.length < 2)) return;
-            const state = { id: globalThis.crypto.randomUUID(), index: -1, controller: new AbortController(), jobs: new Set(), downloads: new Set() };
+            const state = { id: globalThis.crypto.randomUUID(), index: -1, controller: new AbortController(), jobs: new Set(), downloads: new Set(), abort };
             current = state;
-            files.disabled = true; zip.disabled = true; cancel.textContent = 'Отменить пакет';
-            rows.forEach(row => { row.input.disabled = true; });
+            progress.value = 0;
+            status.textContent = 'Подготавливаю пакет…'; updateResume();
+            files.disabled = true; zip.disabled = true; cancel.disabled = false; cancel.textContent = 'Отменить пакет';
+            rows.forEach(row => { row.input.disabled = true; row.text.textContent = row.item.label; });
             const showProgress = fraction => {
+              if (current !== state || state.controller.signal.aborted) return;
               const value = Math.max(0, Math.min(1, Number(fraction) || 0));
               progress.value = Math.min(1, (Math.max(0, state.index) + value) / selected.length);
             };
             state.progress = showProgress;
             const listener = message => {
-              if (current !== state || (message?.t !== 'mendosave-progress' && message?.t !== 'mendosave-package-progress')) return;
+              if (current !== state || state.controller.signal.aborted || (message?.t !== 'mendosave-progress' && message?.t !== 'mendosave-package-progress')) return;
               if (message.packageId !== state.id && !state.jobs.has(message.jobId)) return;
               showProgress(message.value);
               if (message.status) status.textContent = `${Math.min(state.index + 1, selected.length)}/${selected.length} · ${String(message.status).slice(0, 160)}`;
+              updateResume();
             };
             runtime.onMessage?.addListener(listener);
-            let port;
+            let port, producer;
             const result = await queue.run(selected.map(row => row.item), {
               signal: state.controller.signal,
               async start() {
-                requireOk(await raw({ t: 'mendosave-ensure' }));
-                requireOk(await raw({ t: 'mendosave-package-begin', packageId: state.id, mode, title: String(title).slice(0, 250),
+                producer = await api.acquireProcessor({ signal: state.controller.signal,
+                  onDisconnect() { if (current === state) void abort(); } });
+                state.producer = producer;
+                check();
+                requireOk(await producer.send({ t: 'mendosave-ensure' }));
+                check();
+                requireOk(await producer.send({ t: 'mendosave-package-begin', packageId: state.id, mode, title: String(title).slice(0, 250),
                   items: selected.map(row => ({ id: row.item.id, label: row.item.label })) }));
                 port = runtime.connect?.({ name: `mendosave-package:${state.id}` });
                 port?.onDisconnect.addListener(() => { if (current === state) { state.controller.abort(); status.textContent = 'Связь с обработчиком прервана'; } });
               },
-              async next(index) { state.index = index; requireOk(await raw({ t: 'mendosave-package-next', packageId: state.id, index })); },
-              async complete(index) { requireOk(await raw({ t: 'mendosave-package-complete', packageId: state.id, index })); selected[index].text.textContent += mode === 'zip' ? ' · подготовлен' : ' · сохранён'; },
-              async finish() { return requireOk(await raw({ t: 'mendosave-package-finish', packageId: state.id })); },
-              async cancel(reason) { await state.cancelPromise; await raw({ t: 'mendosave-package-cancel', packageId: state.id, reason }); },
-              onChange(snapshot) { state.index = snapshot.index; showProgress(0); status.textContent = snapshot.phase === 'saving'
+              async next(index) { state.index = index; requireOk(await producer.send({ t: 'mendosave-package-next', packageId: state.id, index })); },
+              async complete(index) { requireOk(await producer.send({ t: 'mendosave-package-complete', packageId: state.id, index })); selected[index].text.textContent += mode === 'zip' ? ' · подготовлен' : ' · сохранён'; },
+              async finish() { return requireOk(await producer.send({ t: 'mendosave-package-finish', packageId: state.id })); },
+              async cancel(reason) { await state.cancelPromise; if (producer) await producer.send({ t: 'mendosave-package-cancel', packageId: state.id, reason }); },
+              onChange(snapshot) { if (state.controller.signal.aborted) return; state.index = snapshot.index; showProgress(0); status.textContent = snapshot.phase === 'saving'
                 ? (mode === 'zip' ? 'Создаю и сохраняю ZIP…' : 'Завершаю очередь…')
-                : `${snapshot.index + 1}/${selected.length} · ${selected[snapshot.index].item.label}`; },
+                : `${snapshot.index + 1}/${selected.length} · ${selected[snapshot.index].item.label}`; updateResume(); },
             });
             runtime.onMessage?.removeListener(listener);
             current = null;
             try { port?.disconnect(); } catch (error) {}
+            producer?.release();
             cancel.disabled = false; cancel.textContent = 'Закрыть';
+            rows.forEach(row => { row.input.disabled = false; });
+            update();
             if (result.phase === 'complete') {
               progress.value = 1;
               status.textContent = `Готово: ${mode === 'zip' ? result.filename : `${result.results.length} файлов`}`;
@@ -162,11 +294,11 @@
                 + (mode === 'zip' ? ' Подготовленные файлы можно сохранить через значок MendoSave.' : ' Уже сохранённые файлы остаются на диске.');
               for (const row of selected.slice(result.results.length)) row.text.textContent += ' · не завершён';
             }
+            updateResume();
           };
           files.addEventListener('click', () => { void start('files'); }); zip.addEventListener('click', () => { void start('zip'); });
-          actions.append(files, zip, cancel); dialog.append(heading, caption, list, status, progress, actions); document.body.append(dialog);
-          if (dialog.showModal) dialog.showModal(); else dialog.setAttribute('open', '');
-          rows[0]?.input.focus();
+          actions.append(files, zip, hide, cancel); dialog.append(heading, caption, list, status, progress, actions); document.body.append(dialog, resume);
+          show();
         });
         menu.append(opener);
         return opener;

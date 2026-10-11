@@ -11,7 +11,9 @@ function recordingPort(app, reply = { ok: true }) {
     disconnect() { this.disconnectCalls++; for (const fn of [...disconnects]) fn(); },
     acknowledge(value = { ok: true }) { for (const fn of [...messages]) fn(value); },
   };
+  const producerConnect = app.context.chrome.runtime.connect;
   app.context.chrome.runtime.connect = ({ name }) => {
+    if (name === 'mendosave-producer') return producerConnect({ name });
     port.name = name;
     if (reply) queueMicrotask(() => port.acknowledge(reply));
     return port;
@@ -19,12 +21,13 @@ function recordingPort(app, reply = { ok: true }) {
   return port;
 }
 
-function liveRecording(send, reply) {
+function liveRecording(send, reply, producers) {
   const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
     'https://www.twitch.tv/monstercat', async () => { throw new Error('live must not fetch a VOD'); }, send);
   const media = app.document.querySelector('video');
   Object.assign(media, { readyState: 2, paused: false, error: null, ended: false });
   media.captureStream = () => ({ getVideoTracks: () => [{}] });
+  if (producers) app.context.chrome.runtime.connect = producers.connect;
   const port = recordingPort(app, reply);
   let active;
   app.context.MediaRecorder = class {
@@ -35,6 +38,31 @@ function liveRecording(send, reply) {
   };
   return { app, port, get recorder() { return active; } };
 }
+
+test('Twitch recording waits for ready ACK and keeps its producer until finalize settles', async () => {
+  const { producerPorts } = require('./producer-port-harness.cjs');
+  const producers = producerPorts({ autoAck: false });
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const live = liveRecording(message => message.t === 'mendosave-live-finalize'
+    ? pending : { ok: true, tabId: 7 }, undefined, producers);
+  const button = live.app.document.querySelector('#mendosave-twitch-record');
+  live.app.click(button); await live.app.settle();
+  assert.equal(live.app.messages.some(message => message.t === 'mendosave-ensure'), false);
+  assert.equal(live.recorder.startCalls, 0);
+  const producer = producers.ports[0];
+  assert.ok(producer);
+  producer.receive({ ok: true, instanceId: 'processor-fixture' });
+  await live.app.settle();
+  assert.equal(live.recorder.startCalls, 1);
+  live.app.click(button); await live.app.settle();
+  assert.equal(live.app.messages.filter(message => message.t === 'mendosave-live-finalize').length, 1);
+  assert.equal(producer.disconnected, false);
+  live.app.click(button); await live.app.settle();
+  assert.equal(producers.ports.length, 1, 'finalizing session prevents a new recording');
+  finish({ ok: true, filename: 'saved.webm' }); await live.app.settle();
+  assert.equal(producer.disconnected, true);
+});
 
 test('Twitch chooses a remuxable WebM codec and refuses an H264-only recorder before starting a job', async (t) => {
   for (const vp8Supported of [true, false]) {
@@ -381,6 +409,22 @@ test('Twitch recording aborts a rejected Port binding before recording starts', 
   assert.equal(live.app.messages.filter((x) => x.t === 'mendosave-live-abort').length, 1);
   assert.equal(live.app.messages.some((x) => x.t === 'mendosave-live-finalize'), false);
   assert.match(live.app.document.querySelector('#mendosave-twitch-toast').textContent, /Foreign recording owner/);
+});
+
+test('Twitch binding failure retains producer and prevents restart while live abort cleanup is pending', async () => {
+  let finishAbort;
+  const aborting = new Promise(resolve => { finishAbort = resolve; });
+  const live = liveRecording(message => message.t === 'mendosave-live-abort'
+    ? aborting : { ok: true, tabId: 7 }, { ok: false, error: 'Foreign recording owner' });
+  const button = live.app.document.querySelector('#mendosave-twitch-record');
+  live.app.click(button); await live.app.settle();
+  assert.equal(live.app.messages.filter(message => message.t === 'mendosave-live-abort').length, 1);
+  assert.equal(live.app.producers.ports[0].disconnected, false);
+  live.app.click(button); await live.app.settle();
+  assert.equal(live.app.producers.ports.length, 1, 'aborting startup cannot overlap another recording');
+  finishAbort({ ok: true }); await live.app.settle();
+  assert.equal(live.app.producers.ports[0].disconnected, true);
+  assert.equal(live.recorder.startCalls, 0);
 });
 
 test('Twitch recording releases an unbound host job on early Port disconnect or binding timeout', async (t) => {

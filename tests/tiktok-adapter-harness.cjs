@@ -1,6 +1,9 @@
 const fs = require('node:fs');
+const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { parseHTML, DOMParser } = require('linkedom');
+const { producerPorts } = require('./producer-port-harness.cjs');
+const { create: createPackageUI } = require('../extension/package_ui.js');
 
 // Runs the delivered content script and exercises its DOM/runtime boundary.
 function adapter(script, html, href, network, send) {
@@ -9,17 +12,25 @@ function adapter(script, html, href, network, send) {
   window.innerHeight = 800;
   window.Element.prototype.getBoundingClientRect = () => ({ width: 320, height: 200, top: 300, bottom: 500, left: 20, right: 340 });
   const messages = [], requests = [], downloads = [], blobs = [], listeners = new Set();
+  const producers = producerPorts();
   document.addEventListener('click', (event) => {
     if (event.target.tagName === 'A' && event.target.download) downloads.push(event.target.download);
   }, true);
   const context = vm.createContext({
-    window, document, location: new URL(href), URL, Blob, Uint8Array, DOMParser, TextDecoder,
+    window, document, location: new URL(href), URL, Blob, Uint8Array, DOMParser, TextDecoder, AbortController, AbortSignal,
     crypto: require('node:crypto').webcrypto,
     console: { log() {}, error() {} },
     fetch: async (url, options = {}) => { requests.push({ url: String(url), options }); return network(String(url), options); },
     chrome: { runtime: {
+      connect: producers.connect,
       getManifest: () => ({ version: '0.1.0' }),
-      async sendMessage(message) { messages.push(message); return send ? send(message) : { ok: true, id: 1, tabId: 7, state: 'complete' }; },
+      async sendMessage(message) {
+        if (/^mendosave-(?:begin|chunk|abort|finalize|live-(?:begin|chunk|abort|finalize))$/.test(message.t)) {
+          assert.equal(message.instanceId, 'processor-fixture', `${script} direct processor packet needs its acquired target`);
+        }
+        messages.push(message);
+        return send ? send(message) : { ok: true, id: 1, tabId: 7, state: 'complete' };
+      },
       onMessage: { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); } },
     } },
     localStorage: { getItem() { return null; }, setItem() {} },
@@ -36,6 +47,7 @@ function adapter(script, html, href, network, send) {
     send: (message) => context.chrome.runtime.sendMessage(message),
     fetch: (url, options) => context.fetch(url, options),
     add() {},
+    acquireProcessor: createPackageUI({ runtime: context.chrome.runtime }).acquireProcessor,
     interruption(code) {
       const error = new Error(`Сохранение прервано: ${code}`);
       if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') error.name = 'AbortError';
@@ -45,7 +57,7 @@ function adapter(script, html, href, network, send) {
   };
   vm.runInContext(fs.readFileSync(`extension/${script}`, 'utf8'), context, { filename: script });
   return {
-    document, messages, requests, downloads, blobs, context,
+    document, messages, requests, downloads, blobs, context, producers,
     click(element) { element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true })); },
     press(element, key, repeat = false) {
       const event = new window.Event('keydown', { bubbles: true, cancelable: true });

@@ -1,12 +1,12 @@
 # Mozilla reviewer build instructions
 
-Submission: MendoSave 0.3.0, add-on ID `mendosave@mendozie`, self-distributed (unlisted). The repository is private. No public AMO listing or update server is part of this submission.
+Submission: MendoSave 0.3.1, add-on ID `mendosave@mendozie`, self-distributed (unlisted). This updates the existing 0.3.0 add-on. The repository is private. No public AMO listing or update server is part of this submission.
 
 ## Build the submitted Firefox package
 
 The source archive contains the extension, browser-specific host, build scripts, lockfile, bundled libraries, licenses and provenance. Extract it into an empty directory and run commands from its root.
 
-Tested environment: Windows with Node.js 22.18.0 / npm 10.9.3. The packaging pipeline was also validated on Ubuntu 24.04. Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
+Tested local environment: Windows with Node.js 22.18.0 / npm 10.9.3. The previous 0.3.0 packaging pipeline was also validated on Ubuntu 24.04; the 0.3.1 CI result is recorded separately in the release verification. Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
 
 ```sh
 npm ci --ignore-scripts
@@ -34,4 +34,8 @@ The three known lint warnings and their local-only execution boundaries are docu
 
 Load `dist/firefox/manifest.json` temporarily in a separate Firefox/Zen profile. Open a supported media page such as a YouTube watch page or Coub, select an available download option in MendoSave, and check the resulting file. The popup controls Save As, cancellation and manual recovery of prepared package inputs. Source-site availability and formats vary by material.
 
-The extension processes media locally and contacts the selected source site/CDN for media data. There is no analytics, advertising, processing server or Native Messaging. Permissions and storage are explained in [PRIVACY.md](../PRIVACY.md); measured behavior and remaining test gaps are in [PHASE4_VERIFICATION.md](PHASE4_VERIFICATION.md).
+For a package, use the multiple-selection control and select Files or ZIP. The picker is nonmodal: Hide or Escape keeps the selection and active queue; the floating status control reopens it. Cancel waits for cleanup and allows a new run from the same picker. On YouTube, plain TXT, SRT and timed TXT are distinct choices. Timed TXT requires cues attributable to the selected video and caption track; native chapter labels are included only when their video ownership is established. Ambiguous or unavailable captions produce an error rather than another track's text.
+
+Firefox uses a processor iframe owned by the extension background page. A fallback tab is created only if that iframe cannot start; it is inactive, pinned and closed only when its exact ID and URL still match the owned instance. Producer/work ports retain the background and processor while media work, native downloads or cleanup are pending. Idle cleanup releases the owned processor. Chromium uses its native offscreen API. Neither backend adopts or closes a matching user tab.
+
+The extension processes media locally and contacts the selected source site/CDN for media data. There is no analytics, advertising, processing server or Native Messaging. This update adds no permissions or remote libraries. Permissions and storage are explained in [PRIVACY.md](../PRIVACY.md); current checks and remaining test gaps are in [V031_VERIFICATION.md](V031_VERIFICATION.md), with the earlier baseline in [PHASE4_VERIFICATION.md](PHASE4_VERIFICATION.md).

@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const espree = require('espree');
 const { parseHTML } = require('linkedom');
+const { producerPorts } = require('./producer-port-harness.cjs');
+const { fixture: packageIO } = require('./package-io-harness.cjs');
+const { create: createPackageUI } = require('../extension/package_ui.js');
 
 const source = fs.readFileSync('extension/content_ui.js', 'utf8');
 const tree = espree.parse(source, { ecmaVersion: 'latest', range: true });
@@ -13,8 +16,8 @@ const declarations = tree.body[0].expression.callee.body.body;
 const names = new Set(['addDownloadItems', 'addSubtitleItems', 'addRadioSelector', 'addFormatSelector',
   'openMenu', 'videoIdFromLocation', 'startDownload', 'tryDownloadViaSabr', 'downloadViaSabr',
   'downloadSubtitles', 'encodeBase64', 'snapshotPackageOptions', 'mediaResponseError',
-  'buildTimedSubtitles', 'normalizeCues', 'formatCueTime']);
-const constants = new Set(['TRANSFER_CHUNK_SIZE', 'HAS_NATIVE_BASE64', 'SUBTITLE_OUTPUTS']);
+  'buildTimedSubtitles', 'normalizeCues', 'formatCueTime', 'safeFilename']);
+const constants = new Set(['TRANSFER_CHUNK_SIZE', 'HAS_NATIVE_BASE64', 'SUBTITLE_OUTPUTS', 'SUBTITLE_OUTPUT_MAX_BYTES']);
 const flowSource = declarations.filter(node => (node.type === 'FunctionDeclaration' && names.has(node.id.name))
   || (node.type === 'VariableDeclaration' && node.declarations.some(item => constants.has(item.id.name))))
   .map(node => source.slice(...node.range)).join('\n');
@@ -26,13 +29,14 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
   const settings = { transcode: false };
   let captureSaves = 0, picker;
   const toast = { set: (text) => notifications.push(text), hide() {}, setCancel() {}, beginStages() {}, stage() {} };
-  const context = vm.createContext({ document, window, URL, Uint8Array, crypto, btoa,
+  const producerUI = createPackageUI({ runtime: { connect: producerPorts().connect } });
+  const context = vm.createContext({ document, window, URL, Blob, Uint8Array, crypto, btoa, AbortController, TextEncoder,
     location: new URL('https://www.youtube.com/watch?v=fixtureVideo'),
     IS_MUSIC: false, IS_SHORTS: () => false, BUTTON_ID: 'download-button',
     console: { warn() {}, error() {} }, setTimeout() {},
     MendoMediaPlan: require('../extension/media_plan.js'),
     MendoMenu: { bind() {}, place() {} },
-    MendoPackageUI: { running: false, signal: null, add(_menu, value) { picker = value; } },
+    MendoPackageUI: { running: false, signal: null, acquireProcessor: options => producerUI.acquireProcessor(options), add(_menu, value) { picker = value; } },
     chrome: { storage: { local: {
       async get() { return { ...settings }; }, async set(value) { Object.assign(settings, value); },
     } }, runtime: { onMessage: { addListener() {}, removeListener() {} } } },
@@ -131,6 +135,258 @@ test('SRT download preserves actual cue times instead of extending short lines i
   assert.match(content, /00:00:02,000 --> 00:00:02,200/);
 });
 
+test('SRT and VTT downloads preserve literal whitespace in accepted cues', async t => {
+  for (const format of ['srt', 'vtt']) await t.test(format, async () => {
+    const h = harness();
+    const first = '  \n<first> \t ', last = '\n<last>\n  \n';
+    h.context.callHook = async () => ({ lang: 'en', cues: [
+      { start: 1, end: 2, text: first },
+      { start: 2, end: 3, text: ' \r\n\t ' },
+      { start: 3, end: 4, text: last },
+    ] });
+    assert.equal(await h.context.downloadSubtitles(h.info, format), `Fixture [en].${format}`);
+    const saved = h.messages.find(message => message.t === 'mendosave-save');
+    const separator = format === 'vtt' ? '.' : ',';
+    const expected = (format === 'vtt' ? 'WEBVTT\r\n\r\n' : '1\r\n')
+      + `00:00:01${separator}000 --> 00:00:02${separator}000\r\n${first}\r\n\r\n`
+      + (format === 'vtt' ? '' : '2\r\n')
+      + `00:00:03${separator}000 --> 00:00:04${separator}000\r\n${last}\r\n`;
+    assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF' + expected);
+  });
+});
+
+test('small and large TXT names reserve language and timed markers before Unicode title truncation', async t => {
+  const names = new Map();
+  for (const variant of [
+    { name: 'emoji', title: '😀'.repeat(120) },
+    { name: 'reserved ASCII', title: 'CON.' + 'A'.repeat(116) },
+    { name: 'reserved BMP', title: 'CON.' + '界'.repeat(116) },
+    { name: 'reserved emoji', title: 'CON.' + '😀'.repeat(116) },
+  ]) for (const size of ['small', 'large']) for (const format of ['txt', 'timed-txt']) {
+    await t.test(`${variant.name} ${size} ${format}`, async () => {
+      const h = harness(), producers = producerPorts(), storage = packageIO();
+      const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+      h.info.title = variant.title;
+      const content = size === 'large' ? '界'.repeat(350000) : 'literal';
+      h.context.callHook = async () => ({ lang: 'ru', text: content, timedText: content,
+        cues: [{ start: 0, end: 1, text: 'literal' }] });
+      const receive = async message => message.t === 'mendosave-save'
+        ? (h.messages.push(message), { ok: true }) : storage.io.handle(message, sender) ?? { ok: true };
+      h.context.sendWorkerMessage = receive;
+      h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+      const suffix = ` [ru]${format === 'timed-txt' ? ' [timed]' : ''}`;
+      const filename = await h.context.downloadSubtitles(h.info, format);
+      if (variant.name === 'emoji') assert.equal(filename,
+        '😀'.repeat(Math.floor((180 - Buffer.byteLength(suffix + '.txt')) / 4)) + suffix + '.txt');
+      assert.equal(require('../extension/archive.js').safeName(filename), filename,
+        'shared Windows basename normalization cannot truncate the reserved markers');
+      assert.ok(filename.endsWith(suffix + '.txt')); assert.ok([...filename.slice(0, -4)].length <= 120);
+      assert.ok(Buffer.byteLength(filename) <= 180, 'shared archive sanitization retains the reserved suffix');
+      assert.ok(filename.length <= 250); assert.ok(!filename.includes('\uFFFD'));
+      assert.equal(h.notifications.at(-1), `Готово: ${filename}`);
+      const expected = Buffer.from('\uFEFF' + content);
+      if (size === 'large') {
+        assert.equal(storage.saved.length, 1);
+        assert.equal(storage.saved[0].filename, filename);
+        assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
+      } else {
+        const saved = h.messages.find(message => message.t === 'mendosave-save');
+        assert.equal(saved.filename, filename);
+        assert.deepEqual(Buffer.from(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1))), expected);
+      }
+      names.set(format, filename);
+      assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
+      assert.ok(producers.ports.every(port => port.disconnected));
+    });
+  }
+  assert.notEqual(names.get('txt'), names.get('timed-txt'));
+});
+
+test('standalone SRT and timed TXT pass real shared-helper admission through the background save route', async t => {
+  for (const format of ['srt', 'timed-txt']) await t.test(format, async () => {
+    const h = harness(), producers = producerPorts(), packets = [];
+    h.context.MendoPackageUI = createPackageUI({ runtime: {
+      connect: producers.connect,
+      async sendMessage(message) {
+        packets.push(message);
+        assert.equal(message.t, 'mendosave-save', 'background owns forwarding text to its selected host');
+        assert.equal(message.instanceId, undefined);
+        assert.equal(message.packageId, undefined);
+        return { ok: true };
+      },
+    } });
+    h.context.callHook = async () => ({ lang: 'ru', timedText: '[00:01.125] Привет & <literal> 😀\n',
+      cues: [{ start: 1.125, end: 1.75, text: 'Привет & <literal> 😀' }] });
+    const transportNames = new Set(['sendRuntimeMessage', 'sendWorkerMessage', 'isWorkerAsleep']);
+    const transport = declarations.filter(node => (node.type === 'FunctionDeclaration' && transportNames.has(node.id.name))
+      || (node.type === 'VariableDeclaration' && node.declarations.some(item => item.id.name === 'WORKER_RETRY_DELAYS')))
+      .map(node => source.slice(...node.range)).join('\n');
+    vm.runInContext(transport, h.context);
+    assert.equal(await h.context.downloadSubtitles(h.info, format), format === 'srt' ? 'Fixture [ru].srt' : 'Fixture [ru] [timed].txt');
+    assert.equal(producers.ports.length, 0, 'standalone save uses background withHost admission rather than a direct processor command');
+    assert.equal(packets.length, 1);
+    const content = decodeURIComponent(packets[0].url.slice(packets[0].url.indexOf(',') + 1));
+    assert.equal(content, format === 'srt' ? '\uFEFF1\r\n00:00:01,125 --> 00:00:01,750\r\nПривет & <literal> 😀\r\n'
+      : '\uFEFF[00:01.125] Привет & <literal> 😀\n');
+    assert.match(h.notifications.at(-1), /Готово:/);
+  });
+});
+
+test('timed TXT is a separate package choice and saves actual timestamps and chapters as literal UTF-8', async () => {
+  const h = harness();
+  await h.openMenu();
+  const selected = h.snapshot().find(option => option.id === 'sub-timed-txt');
+  assert.ok(selected, 'the third format is additive');
+  assert.match(selected.label, /Расшифровка с таймкодами и главами/);
+  assert.match(h.snapshot().find(option => option.id === 'sub-txt').label, /без таймкодов/);
+  assert.match(h.snapshot().find(option => option.id === 'sub-srt').label, /с таймкодами/);
+  const literal = '[00:00] Начало\n\n[00:01.125] Привет & <literal> 😀\n';
+  h.context.callHook = async (command, payload) => {
+    assert.equal(command, 'subtitles'); assert.equal(payload.format, 'timed-txt');
+    return { lang: 'ru', timedText: literal, cues: [{ start: 1.125, end: 2, text: 'Привет & <literal> 😀' }] };
+  };
+  assert.equal(await selected.run(), 'Fixture [ru] [timed].txt');
+  const saved = h.messages.find(message => message.t === 'mendosave-save');
+  assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF' + literal);
+  assert.match(saved.filename, /\[timed\]\.txt$/);
+});
+
+test('selected long timed TXT saves all accepted Unicode and chapter bytes beyond the legacy text transport bounds', async t => {
+  for (const variant of [
+    { name: 'ASCII', text: 'Literal & <tag> '.repeat(400), title: 'Fixture' },
+    { name: 'Unicode', text: 'Кириллица 😀 & <tag> '.repeat(240), title: 'Fixture' },
+    { name: 'supplementary Unicode filename', text: 'Кириллица 😀 & <tag> '.repeat(240), title: '😀'.repeat(120) },
+  ]) await t.test(variant.name, async () => {
+    const h = harness(), producers = producerPorts(), storage = packageIO();
+    const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+    const { text } = variant;
+    h.info.title = variant.title;
+    const cues = Array.from({ length: 400 }, (_, i) => ({ start: i * 3, end: i * 3 + 2, text: `${text} ${i}` }));
+    const timedText = require('../extension/captions.js').formatTimedTranscript(cues, [{ start: 0, text: 'Chapter <literal>' }]);
+    const expected = Buffer.from('\uFEFF' + timedText, 'utf8');
+    let saved;
+    const receive = async message => {
+      if (message.t === 'mendosave-save') {
+        if (message.url.length > 6 * 1024 ** 2) return { ok: false, error: 'Unsupported or oversized text download' };
+        const value = decodeURIComponent(message.url.slice(message.url.indexOf(',') + 1));
+        if (value.length > 2 * 1024 ** 2) return { ok: false, error: 'Invalid text output request' };
+        saved = Buffer.from(value); return { ok: true };
+      }
+      return storage.io.handle(message, sender) ?? { ok: true };
+    };
+    await h.openMenu(); const selected = h.snapshot().find(option => option.id === 'sub-timed-txt');
+    h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+    h.context.sendWorkerMessage = receive;
+    h.context.callHook = async () => ({ lang: 'ru', timedText, cues });
+    assert.ok(expected.length > 2 * 1024 ** 2, 'fixture is accepted by the actual formatter and exceeds legacy limits');
+    const filename = await selected.run();
+    assert.equal(storage.saved.length, 1, h.notifications.at(-1));
+    assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
+    assert.equal(filename, storage.saved[0].filename, 'completion reports the actual saved name');
+    if (variant.title === 'Fixture') assert.equal(filename, 'Fixture [ru] [timed].txt');
+    assert.ok(filename.length <= 250); assert.match(filename, / \[ru\] \[timed\]\.txt$/u);
+    assert.ok(!filename.includes('\uFFFD'), 'supplementary characters survive name shortening');
+    assert.match(h.notifications.at(-1), /Готово:/);
+    assert.ok(producers.ports.every(port => port.disconnected), 'terminal completion releases transfer and producer ports');
+    assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
+    assert.equal(saved, undefined, 'large text uses the actual bounded Blob handler');
+  });
+});
+
+test('oversized page subtitle text is rejected before acquiring a processor or starting a transfer', async t => {
+  for (const variant of [
+    { name: 'ASCII length', text: 'A'.repeat(32 * 1024 ** 2 + 1) },
+    { name: 'UTF-8 expansion', text: '界'.repeat(12 * 1024 ** 2) },
+  ]) await t.test(variant.name, async () => {
+    const h = harness(), producers = producerPorts(), packets = [];
+    h.context.MendoPackageUI = createPackageUI({ runtime: {
+      connect: producers.connect,
+      async sendMessage(message) { packets.push(message); return { ok: true, filename: 'unexpected.txt' }; },
+    } });
+    h.context.sendWorkerMessage = async message => { packets.push(message); return { ok: true }; };
+    h.context.callHook = async () => ({ lang: 'en', timedText: variant.text,
+      cues: [{ start: 0, end: 1, text: 'untrusted page cue' }] });
+    assert.equal(await h.context.downloadSubtitles(h.info, 'timed-txt'), undefined);
+    assert.match(h.notifications.at(-1), /32 MiB/);
+    assert.ok(!h.notifications.some(text => text.startsWith('Готово:')));
+    assert.equal(producers.ports.length, 0); assert.equal(packets.length, 0);
+  });
+});
+
+test('SRT rejects excessive page cue count and text before formatting or privileged transfer', async t => {
+  for (const variant of [
+    { name: 'cue count', cues: Array.from({ length: 50001 }, (_, i) => ({ start: i, text: 'x' })) },
+    { name: 'single cue text', cues: [{ start: 0, text: 'A'.repeat(65537) }] },
+    { name: 'total cue text', cues: Array.from({ length: 129 }, (_, i) => ({ start: i, text: '界'.repeat(65536) })) },
+  ]) await t.test(variant.name, async () => {
+    const h = harness(), producers = producerPorts(), packets = [];
+    h.context.MendoPackageUI = createPackageUI({ runtime: {
+      connect: producers.connect, async sendMessage(message) { packets.push(message); return { ok: true }; },
+    } });
+    h.context.sendWorkerMessage = async message => { packets.push(message); return { ok: true }; };
+    h.context.callHook = async () => ({ lang: 'en', cues: variant.cues });
+    assert.equal(await h.context.downloadSubtitles(h.info, 'srt'), undefined);
+    assert.match(h.notifications.at(-1), /лимит/);
+    assert.ok(!h.notifications.some(text => text.startsWith('Готово:')));
+    assert.equal(producers.ports.length, 0); assert.equal(packets.length, 0);
+  });
+});
+
+test('the full formatter text budget preserves all worst-case UTF-8 bytes through the real file handler', async t => {
+  for (const format of ['timed-txt', 'srt']) await t.test(format, async () => {
+    const h = harness(), producers = producerPorts(), storage = packageIO();
+    const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+    const receive = async message => storage.io.handle(message, sender) ?? { ok: true };
+    h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+    h.context.sendWorkerMessage = receive;
+    const cues = Array.from({ length: 128 }, (_, i) => ({ start: i, end: i + .5, text: '界'.repeat(65536) }));
+    const timedText = require('../extension/captions.js').formatTimedTranscript(cues);
+    const content = format === 'srt' ? h.context.buildTimedSubtitles(cues, 'srt') : timedText;
+    const expected = Buffer.from('\uFEFF' + content, 'utf8');
+    assert.ok(expected.length > 24 * 1024 ** 2);
+    h.context.callHook = async () => ({ lang: 'zh', cues, timedText });
+    assert.equal(await h.context.downloadSubtitles(h.info, format), format === 'srt'
+      ? 'Fixture [zh].srt' : 'Fixture [zh] [timed].txt');
+    assert.equal(storage.saved.length, 1);
+    assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
+    assert.match(h.notifications.at(-1), /Готово:/);
+    assert.ok(producers.ports.every(port => port.disconnected));
+    assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
+  });
+});
+
+test('cancelled native save of a long timed TXT stays cancellation and releases the transfer', async () => {
+  const h = harness(), producers = producerPorts(), packets = [];
+  const storage = packageIO({ saveBlob: async () => { throw Object.assign(new Error('USER_CANCELED'), { cancelled: true }); } });
+  const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+  const receive = async message => {
+    packets.push(message);
+    return storage.io.handle(message, sender) ?? { ok: true };
+  };
+  h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+  h.context.sendWorkerMessage = receive;
+  const cues = Array.from({ length: 400 }, (_, i) => ({ start: i, end: i + .5, text: 'Accepted caption '.repeat(400) }));
+  h.context.callHook = async () => ({ lang: 'en', cues,
+    timedText: require('../extension/captions.js').formatTimedTranscript(cues) });
+  assert.equal(await h.context.downloadSubtitles(h.info, 'timed-txt'), false);
+  assert.equal(h.notifications.at(-1), 'Сохранение отменено');
+  assert.ok(!h.notifications.some(text => text.startsWith('Готово:')));
+  assert.ok(producers.ports.every(port => port.disconnected));
+  assert.ok(packets.some(message => message.t === 'mendosave-blob-open'));
+  assert.ok(packets.some(message => message.t === 'mendosave-blob-abort'));
+  assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
+});
+
+test('timed TXT reports unavailable chapters after saving actual timestamped text without inventing chapters', async () => {
+  const h = harness();
+  h.context.callHook = async () => ({ lang: 'ru', timedText: '[00:01] Реальная реплика\n',
+    chaptersUnavailable: true, cues: [{ start: 1, end: 2, text: 'Реальная реплика' }] });
+  assert.equal(await h.context.downloadSubtitles(h.info, 'timed-txt'), 'Fixture [ru] [timed].txt');
+  assert.match(h.notifications.at(-1), /Главы на странице недоступны/);
+  const saved = h.messages.find(message => message.t === 'mendosave-save');
+  assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF[00:01] Реальная реплика\n');
+});
+
 test('package rejects changed SPA material before any video, audio or subtitle operation', async (t) => {
   for (const id of ['video-720', 'audio-mp3', 'sub-txt']) await t.test(id, async () => {
     const h = harness();
@@ -144,7 +400,7 @@ test('package rejects changed SPA material before any video, audio or subtitle o
   });
 });
 
-test('SABR user cancellation never falls back to capture or a second save with the shared module absent', async (t) => {
+test('SABR user cancellation never falls back to capture or a second save with the shared send shortcut absent', async (t) => {
   const variants = {
     AbortError() { const error = new Error('dialog canceled'); error.name = 'AbortError'; throw error; },
     cancelledFlag() { const error = new Error('dialog canceled'); error.cancelled = true; throw error; },
@@ -153,7 +409,7 @@ test('SABR user cancellation never falls back to capture or a second save with t
   };
   for (const [name, finalize] of Object.entries(variants)) await t.test(name, async () => {
     const h = harness(finalize);
-    delete h.context.MendoPackageUI;
+    delete h.context.MendoPackageUI.send;
     assert.equal(await h.context.startDownload({ format: 'mp4', height: 720 }, h.info), false);
     assert.equal(h.captureSaves(), 0, 'cancellation is terminal rather than a route refusal');
     assert.equal(h.hooks.includes('download'), false);
@@ -164,15 +420,15 @@ test('SABR user cancellation never falls back to capture or a second save with t
 
 test('ordinary SABR refusal retains the existing capture fallback', async () => {
   const h = harness(() => ({ ok: false, error: 'unsupported media' }));
-  delete h.context.MendoPackageUI;
+  delete h.context.MendoPackageUI.send;
   assert.equal(await h.context.startDownload({ format: 'mp4', height: 720 }, h.info), true);
   assert.equal(h.captureSaves(), 1);
   assert.ok(h.hooks.includes('download'));
 });
 
-test('capture response preserves native save cancellation when the shared module is absent', async () => {
+test('capture response preserves native save cancellation when the shared send shortcut is absent', async () => {
   const h = harness(() => ({ ok: false, error: 'unsupported media' }));
-  delete h.context.MendoPackageUI;
+  delete h.context.MendoPackageUI.send;
   h.context.muxViaOffscreen = async () => ({ ok: false, cancelled: true, error: 'dialog canceled' });
   assert.equal(await h.context.startDownload({ format: 'mp4', height: 720 }, h.info), false);
   assert.ok(h.hooks.includes('download'));
@@ -180,9 +436,9 @@ test('capture response preserves native save cancellation when the shared module
   assert.equal(h.notifications.some(text => text.startsWith('Готово:')), false);
 });
 
-test('subtitle response preserves native save cancellation when the shared module is absent', async () => {
+test('subtitle response preserves native save cancellation when the shared send shortcut is absent', async () => {
   const h = harness();
-  delete h.context.MendoPackageUI;
+  delete h.context.MendoPackageUI.send;
   h.context.sendWorkerMessage = async (message) => {
     h.messages.push(message);
     return { ok: false, cancelled: true, error: 'dialog canceled' };

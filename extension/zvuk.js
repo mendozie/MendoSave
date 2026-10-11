@@ -330,7 +330,9 @@
 
   let toastTimer;
 
+  let toastRevision = 0;
   function getToast() {
+    const revision = ++toastRevision;
     if (!toastBox) {
       toastBox = createElement('div', 'mendosave-zvuk-toast');
       const text = createElement('div', 'mendosave-zvuk-toast-text');
@@ -349,6 +351,7 @@
     };
     return {
       set(message, fraction) {
+        if (revision !== toastRevision) return;
         show();
         toastBox._text.textContent = message;
         toastBox._stages.replaceChildren();
@@ -357,6 +360,7 @@
         toastBox._bar.querySelector('i').style.width = `${Math.max(0, Math.min(1, Number(fraction) || 0)) * 100}%`;
       },
       begin(message, definitions) {
+        if (revision !== toastRevision) return;
         show();
         toastBox._text.textContent = message;
         toastBox._bar.hidden = true;
@@ -375,6 +379,7 @@
         toastBox._stages.classList.add('show');
       },
       stage(id, fraction, state = 'active', label) {
+        if (revision !== toastRevision) return;
         const row = toastBox?._stages.querySelector(`[data-stage="${id}"]`);
         if (!row) return;
         row.className = `mendosave-zvuk-stage ${state}`;
@@ -393,8 +398,11 @@
         }
       },
       hide(delay) {
+        if (revision !== toastRevision) return;
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => toastBox?.classList.remove('show'), delay || 0);
+        toastTimer = setTimeout(() => {
+          if (revision === toastRevision) toastBox?.classList.remove('show');
+        }, delay || 0);
       },
     };
   }

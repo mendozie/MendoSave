@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const { producerPorts } = require('./producer-port-harness.cjs');
+const { create: createPackageUI } = require('../extension/package_ui.js');
 const { parseHTML } = require('linkedom');
 
 const page = 'https://rutube.ru/video/5295f2a858cdace0855c40f8a48f4676/';
@@ -31,12 +33,13 @@ function adapter(media = fixture, overrides = {}) {
     return bytes;
   }
   ContentUint8Array.prototype = Uint8Array.prototype;
-  const context = vm.createContext({ document, window, URL,
+  const context = vm.createContext({ document, window, URL, AbortController, AbortSignal,
     Uint8Array: overrides.foreignViews ? ContentUint8Array : Uint8Array, btoa, crypto,
     location: new URL(overrides.page || page), getComputedStyle: () => ({ position: 'relative' }),
-    setInterval() {}, setTimeout(fn) { fn(); },
+    setInterval() {}, setTimeout(fn) { fn(); }, clearTimeout() {},
     console: { error(label, error) { errors.push(error || label); } },
     chrome: { runtime: { getManifest: () => ({ version: '0.1.0' }), async sendMessage(message) {
+      if (/^mendosave-(?:begin|chunk|abort|finalize)$/.test(message.t)) assert.equal(message.instanceId, 'processor-fixture');
       messages.push(message);
       if (message.t === 'mendosave-register-job') return { ok: true, tabId: 7 };
       if (message.t === 'mendosave-finalize' && overrides.finalizeError) return { ok: false, error: 'mux failed' };
@@ -56,6 +59,8 @@ function adapter(media = fixture, overrides = {}) {
       } };
     },
   });
+  context.chrome.runtime.connect = producerPorts().connect;
+  context.MendoPackageUI = createPackageUI({ runtime: context.chrome.runtime, fetch: (...args) => context.fetch(...args) });
   vm.runInContext(fs.readFileSync('extension/rutube.js', 'utf8'), context);
   const click = (element) => element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
   const settle = async () => { for (let n = 0; n < 12; n++) await new Promise(setImmediate); };

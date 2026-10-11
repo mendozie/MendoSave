@@ -53,12 +53,60 @@ function logToWorker(tag, text) {
 }
 
 let busyFinalizers = 0;
+let pendingWork = 0;
+let hostRevision = 0;
+let hostPort;
+let hostSealed = false;
+const hostInstanceId = typeof location === 'object'
+  ? /^#mendosave-host=([A-Za-z0-9_-]+)$/.exec(location.hash)?.[1] : undefined;
+
+function backgroundSender(sender) {
+  if (sender?.id !== chrome.runtime.id || sender.tab) return false;
+  if (!sender.url) return true; // Chromium service worker has no page URL.
+  try {
+    const url = new URL(sender.url); url.hash = '';
+    return [chrome.runtime.getURL('background.js'), chrome.runtime.getURL('_generated_background_page.html')].includes(url.href);
+  } catch (error) { return false; }
+}
+
+// Promise work and stateful jobs jointly own the port. A settled RPC alone
+// does not end a package, staging area, live recording, or pending cleanup.
+function holdWork(action) {
+  pendingWork++; hostRevision++; updateKeepAlive();
+  let result;
+  try { result = action(); } catch (error) { result = Promise.reject(error); }
+  return Promise.resolve(result).finally(() => { pendingWork--; hostRevision++; updateKeepAlive(); });
+}
+
+function syncHostActivity() {
+  if (!hostInstanceId || typeof chrome.runtime.connect !== 'function') return;
+  const active = jobsActive();
+  if (active && !hostPort) {
+    hostPort = chrome.runtime.connect({ name: 'mendosave-processor' });
+    const current = hostPort;
+    current.onDisconnect.addListener(() => { if (hostPort === current) hostPort = undefined; });
+    current.onMessage.addListener(message => {
+      if (hostPort !== current || message?.t !== 'mendosave-idle-ack' || message.instanceId !== hostInstanceId
+        || message.revision !== hostRevision || jobsActive()) return;
+      hostPort = undefined; current.disconnect();
+    });
+  }
+  if (!hostPort) return;
+  const current = hostPort;
+  try { current.postMessage({ instanceId: hostInstanceId, revision: hostRevision, active }); }
+  catch (error) { /* the background may be restarting; the next transition retries */ }
+  // Wait for the idle ACK before disconnect: queued state must reach the
+  // background, otherwise a clean shutdown looks like a crashed active host.
+}
 
 function jobsActive() {
-  return Boolean(activeJob) || liveJobs.size > 0 || busyFinalizers > 0 || packageIO.jobsActive();
+  return pendingWork > 0 || Boolean(staging) || Boolean(activeJob) || liveJobs.size > 0 || busyFinalizers > 0 || packageIO.jobsActive();
 }
 
 function updateKeepAlive() {
+  hostRevision++;
+  // Coalesce synchronous state transitions (adopting staging, abort handoff).
+  Promise.resolve().then(syncHostActivity);
   if (jobsActive()) {
     if (keepAliveTimer) return;
     notifyWorker({ t: 'mendosave-ping' }, 0);
@@ -68,7 +116,7 @@ function updateKeepAlive() {
         keepAliveTimer = undefined;
         return;
       }
-      notifyWorker({ t: 'mendosave-ping' }, 0);
+      notifyWorker({ t: 'mendosave-ping' }, 0).then(syncHostActivity);
     }, KEEPALIVE_INTERVAL_MS);
   } else if (keepAliveTimer) {
     clearInterval(keepAliveTimer);
@@ -394,6 +442,7 @@ function startStreamingMux(job) {
       }
       if (message.t === 'unavailable') {
         logToWorker('mux', `mux worker could not load mediabunny: ${message.message}`);
+        restoreQueuedChunks(job, bridge);
         settle(reject, new Error(message.message || 'worker не загрузил mediabunny'));
         return;
       }
@@ -682,7 +731,7 @@ function beginJob(message) {
       // Detached on purpose: closing and deleting are async, and the caller of
       // both these paths is synchronous.
       const abandoned = activeJob;
-      closeSpool(abandoned.spool).then(() => removeSpoolFiles(abandoned)).catch(() => {});
+      holdWork(() => closeSpool(abandoned.spool).then(() => removeSpoolFiles(abandoned))).catch(() => {});
       activeJob.spool = null;
     }
     activeJob.video.length = 0;
@@ -794,7 +843,7 @@ function beginJob(message) {
   // ffmpeg output otherwise ends up in this job's error report.
   ffmpegLogs.length = 0;
   updateKeepAlive();
-  getFFmpeg().catch(() => {}); // warm up while chunks arrive
+  holdWork(() => getFFmpeg()).catch(() => {}); // warm up while chunks arrive
   startStreamingMux(activeJob);
   return { ok: true };
 }
@@ -1022,6 +1071,7 @@ function openStaging(message) {
     return { ok: false, error: 'идентификатор задания отсутствует' };
   }
   staging = { id: message.jobId, video: [], audio: [], bytes: 0, sizes: { video: 0, audio: 0 }, at: Date.now() };
+  updateKeepAlive();
   return { ok: true };
 }
 
@@ -1049,6 +1099,7 @@ function stageChunk(message) {
 
 function dropStaging() {
   staging = undefined;
+  updateKeepAlive();
 }
 
 function stagedBytesFor(track) {
@@ -1087,7 +1138,7 @@ function abortJob(message) {
       // Detached on purpose: closing and deleting are async, and the caller of
       // both these paths is synchronous.
       const abandoned = activeJob;
-      closeSpool(abandoned.spool).then(() => removeSpoolFiles(abandoned)).catch(() => {});
+      holdWork(() => closeSpool(abandoned.spool).then(() => removeSpoolFiles(abandoned))).catch(() => {});
       activeJob.spool = null;
     }
     activeJob.video.length = 0;
@@ -1525,10 +1576,10 @@ async function writeRecoveryIndex(entries) {
 
 let recoveryChanges = Promise.resolve();
 function changeRecovery(update) {
-  const result = recoveryChanges.catch(() => {}).then(async () => {
+  const result = holdWork(() => recoveryChanges.catch(() => {}).then(async () => {
     const entries = await readRecoveryIndex();
     await writeRecoveryIndex(await update(entries));
-  });
+  }));
   recoveryChanges = result;
   return result;
 }
@@ -1566,7 +1617,7 @@ let recoveryFlush = Promise.resolve();
 // one right after: overlapping passes would read the same index and hand the
 // same file to chrome.downloads twice.
 function flushRecoveredFiles(manual = false) {
-  recoveryFlush = recoveryFlush.catch(() => {}).then(() => runRecoveryFlush(manual));
+  recoveryFlush = holdWork(() => recoveryFlush.catch(() => {}).then(() => runRecoveryFlush(manual)));
   return recoveryFlush;
 }
 
@@ -1769,6 +1820,7 @@ async function finalizeJob(message) {
         stallTimer = setTimeout(check, 5_000);
       });
       const bridgeAtStart = job.muxWorker;
+      job.stage = 'mediabunny-stream';
       try {
         output = await Promise.race([job.streamMux, stallGuard, job.cancelWait]);
         const short = outputDurationMismatch(job, output);
@@ -1792,9 +1844,19 @@ async function finalizeJob(message) {
         if (job.cancelled) throw error;
         output = undefined;
         try { job.muxWorker?.worker.postMessage({ t: 'cancel' }); } catch (e) {}
-        // A stall or a rejected output leaves the bridge alive with bytes still
-        // queued; the buffered path below needs them back.
+        // Only unsent chunks remain in the queue. A completed/crashed worker
+        // may have consumed transferred inputs without returning them.
         const restored = restoreQueuedChunks(job, bridgeAtStart);
+        const received = {}, retained = {};
+        for (const track of ['video', 'audio']) {
+          received[track] = job.streams[track].received;
+          retained[track] = job[track].reduce((total, bytes) => total + bytes.length, 0);
+        }
+        if (['video', 'audio'].some(track => retained[track] < received[track])) {
+          error.details = { ...error.details, streamMuxFallback: { available: false, received, retained } };
+          logToWorker('mux', `stream remux failed without recoverable inputs: ${String(error?.message || error)}`);
+          throw error;
+        }
         logToWorker('mux', `stream remux unavailable, falling back: ${String(error?.message || error)}`
           + (restored ? `; вернули из очереди ${restored} байт` : ''));
       } finally {
@@ -1975,6 +2037,7 @@ async function finalizeJob(message) {
   } catch (error) {
     if (job.cancelled) error.cancelled = true;
     error.details = {
+      ...error.details,
       stage: job.stage,
       format: job.format,
       transcode: job.transcode,
@@ -2041,10 +2104,8 @@ async function cleanupStaleLiveFiles() {
     }
   } catch (error) { /* OPFS unavailable: live begin will report it */ }
 }
-cleanupStaleLiveFiles();
 // Spools of jobs that died with the document; the finished MP4 of the last
 // successful one is also here, and by now its download has long been read.
-cleanupStaleSpoolFiles();
 
 const LIVE_STALE_MS = 10 * 60_000;
 
@@ -2055,7 +2116,7 @@ async function evictStaleLiveJobs() {
     // Its port owns teardown; never discard the accepted raw recording here.
     if (job.rawRecording && job.port) continue;
     if (job.rawRecording) {
-      finalizeLiveJob({ jobId, interrupted: true }).catch(reportError);
+      holdWork(() => finalizeLiveJob({ jobId, interrupted: true }).catch(reportError));
       continue;
     }
     // The recording tab is gone (closed/crashed) and can never abort its job;
@@ -2102,7 +2163,7 @@ function beginLiveJob(message) {
     bytes: { video: 0, audio: 0 },
   });
   updateKeepAlive();
-  if (!message.rawRecording) getFFmpeg().catch(() => {});
+  if (!message.rawRecording) holdWork(() => getFFmpeg()).catch(() => {});
   return { ok: true };
 }
 
@@ -2496,7 +2557,7 @@ async function remuxRawRecording(job, inputFile) {
     }).catch(() => {});
     // OPFS may refuse removal while a writer holds the file. Retry after
     // either cancellation settles, and again in the late-copy catch below.
-    const cleanupFinished = Promise.all([remove(), cancelling.then(remove), aborting.then(remove)]);
+    const cleanupFinished = holdWork(() => Promise.all([remove(), cancelling.then(remove), aborting.then(remove)]));
     let cleanupTimer;
     try {
       await Promise.race([cleanupFinished, new Promise((resolve) => {
@@ -2609,11 +2670,11 @@ async function remuxRawRecording(job, inputFile) {
     });
     // OPFS promises cannot be cancelled. If one settles after the stall guard,
     // stop the copy and clean up resources acquired after the first cleanup.
-    const copying = copy().catch(async (error) => {
+    const copying = holdWork(() => copy().catch(async (error) => {
       stopped = true;
       await cleanup();
       throw error;
-    });
+    }));
     return await Promise.race([copying, stallGuard]);
   } catch (error) {
     stopped = true;
@@ -2840,6 +2901,7 @@ async function reportError(error) {
 const packageIO = globalThis.MendoPackageIO.create({
   runtimeId: chrome.runtime.id, getURL: path => chrome.runtime.getURL(path), storage: navigator.storage,
   archive: globalThis.MendoArchive, saveBlob,
+  onActivity: updateKeepAlive,
   positionBusy(p) { return (activeJob?.packageId === p.id && activeJob.packageIndex === p.index)
     || (staging?.packageId === p.id && staging.packageIndex === p.index); },
   async prepare(blob, filename, signal, packageId) {
@@ -2868,9 +2930,11 @@ const packageIO = globalThis.MendoPackageIO.create({
   },
 });
 
-const packageStartup = typeof navigator.storage.getDirectory === 'function'
-  ? packageIO.initialize().catch(error => { logToWorker('package/storage', String(error?.message || error)); })
-  : Promise.resolve();
+const packageStartup = holdWork(() => Promise.all([
+  cleanupStaleLiveFiles(), cleanupStaleSpoolFiles(),
+  typeof navigator.storage.getDirectory === 'function'
+    ? packageIO.initialize().catch(error => { logToWorker('package/storage', String(error?.message || error)); }) : Promise.resolve(),
+]));
 
 // This connection is owned by the extension host, so its disconnect callback
 // survives source-page teardown and does not depend on recorder.stop events.
@@ -2890,41 +2954,51 @@ chrome.runtime.onConnect?.addListener((port) => {
   job.port = port;
   port.onDisconnect.addListener(() => {
     if (liveJobs.get(job.id) !== job) return;
-    finalizeLiveJob({ jobId: job.id, interrupted: true }).catch(reportError);
+    holdWork(() => finalizeLiveJob({ jobId: job.id, interrupted: true }).catch(reportError));
   });
   try { port.postMessage({ ok: true }); }
-  catch (error) { finalizeLiveJob({ jobId: job.id, interrupted: true }).catch(reportError); }
+  catch (error) { holdWork(() => finalizeLiveJob({ jobId: job.id, interrupted: true }).catch(reportError)); }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.t !== 'string') return false;
+  if (!hostInstanceId || message.instanceId !== hostInstanceId) return false;
+
+  if (message.t === 'mendosave-host-close' || message.t === 'mendosave-host-resume') {
+    if (!backgroundSender(_sender) || !hostInstanceId || message.instanceId !== hostInstanceId) return false;
+    if (message.t === 'mendosave-host-resume') { hostSealed = false; sendResponse({ ok: true }); }
+    else {
+      const idle = !jobsActive() && message.revision === hostRevision;
+      if (idle) hostSealed = true;
+      sendResponse({ ok: idle });
+    }
+    return false;
+  }
+  if (hostSealed) { sendResponse({ ok: false, error: 'Processor is closing; acquire a new producer lease.' }); return false; }
 
   if (message.t === 'mendosave-package-begin' && activeJob) {
     sendResponse({ ok: false, error: 'Другая загрузка уже обрабатывается' }); return false;
   }
   const packageResult = packageIO.handle(message, _sender);
   if (packageResult) {
-    packageResult.then(sendResponse, error => sendResponse({ ok: false, error: String(error?.message || error) }))
-      .finally(updateKeepAlive);
+    holdWork(() => packageResult).then(sendResponse, error => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
   }
 
   if (message.t === 'mendosave-host-probe') {
-    packageStartup.then(() => sendResponse({ ok: true }));
+    if (!backgroundSender(_sender)) return false;
+    packageStartup.then(() => sendResponse({ ok: true, instanceId: hostInstanceId, revision: hostRevision, active: jobsActive() }));
     return true;
   }
 
   if (message.t === 'mendosave-save-text') {
-    const backgroundUrl = _sender?.url;
-    if (_sender?.id !== chrome.runtime.id || _sender?.tab
-      || (backgroundUrl && ![chrome.runtime.getURL('background.js'),
-        chrome.runtime.getURL('_generated_background_page.html')].includes(backgroundUrl))
+    if (!backgroundSender(_sender)
       || typeof message.text !== 'string' || message.text.length > 2 * 1024 * 1024
       || !['text/plain', 'text/vtt', 'application/x-subrip'].includes(message.type)) {
       sendResponse({ ok: false, error: 'Invalid text output request' });
       return false;
     }
-    saveBlob(new Blob([message.text], { type: `${message.type};charset=utf-8` }), message.filename)
+    holdWork(() => saveBlob(new Blob([message.text], { type: `${message.type};charset=utf-8` }), message.filename))
       .then((id) => sendResponse({ ok: true, id }))
       .catch((error) => sendResponse({ ok: false, error: String(error?.message || error), ...(error?.cancelled ? { cancelled: true } : {}) }));
     return true;
@@ -2995,7 +3069,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   if (message.t === 'mendosave-warmup') {
-    getFFmpeg()
+    holdWork(() => getFFmpeg())
       .then(() => sendResponse({ ok: true, mode: ffmpegMode }))
       .catch((error) => sendResponse({ ok: false, error: String(error?.stack || error) }));
     return true;
@@ -3021,7 +3095,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // A spooled job answers only once the bytes are on disk, so its result is a
     // promise; every other path is still synchronous.
     if (result && typeof result.then === 'function') {
-      result.then(sendResponse, (error) => sendResponse({
+      holdWork(() => result).then(sendResponse, (error) => sendResponse({
         ok: false, error: `запись на диск не удалась: ${String(error?.message || error)}`,
       }));
       return true;
@@ -3034,24 +3108,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   if (message.t === 'mendosave-finalize') {
-    finalizeJob(message).then(sendResponse).catch(async (error) => sendResponse(error.cancelled
-      ? { ok: false, cancelled: true, error: 'Загрузка отменена' } : await reportError(error)));
+    holdWork(() => finalizeJob(message).catch(async error => error.cancelled
+      ? { ok: false, cancelled: true, error: 'Загрузка отменена' } : await reportError(error))).then(sendResponse);
     return true;
   }
   if (message.t === 'mendosave-live-begin') {
-    evictStaleLiveJobs().catch(() => {}).then(() => sendResponse(beginLiveJob(message)));
+    holdWork(() => evictStaleLiveJobs().catch(() => {}).then(() => beginLiveJob(message))).then(sendResponse);
     return true;
   }
   if (message.t === 'mendosave-live-chunk') {
-    appendLiveChunk(message).then(sendResponse);
+    holdWork(() => appendLiveChunk(message)).then(sendResponse);
     return true;
   }
   if (message.t === 'mendosave-live-abort') {
-    abortLiveJob(message).then(sendResponse).catch(() => sendResponse({ ok: true }));
+    holdWork(() => abortLiveJob(message)).then(sendResponse).catch(() => sendResponse({ ok: true }));
     return true;
   }
   if (message.t === 'mendosave-live-finalize') {
-    finalizeLiveJob(message).then(sendResponse).catch(async (error) => sendResponse(await reportError(error)));
+    holdWork(() => finalizeLiveJob(message).catch(reportError)).then(sendResponse);
     return true;
   }
   if (message.t === 'mendosave-flush') {

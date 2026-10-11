@@ -69,3 +69,29 @@ test('ZIP receives the exact prepared files only after every selected position c
   assert.deepEqual(archived, [['video.mp4', 'exact video'], ['audio.mp3', 'exact audio']]);
   assert.deepEqual(saved, [['zip', 'Test.zip']]);
 });
+
+test('cancel during ZIP saving retains prepared inputs and blocks a new package until saving settles', async () => {
+  let releaseSave, startedSave, discarded = false;
+  const saving = new Promise(resolve => { startedSave = resolve; });
+  const saveResult = new Promise(resolve => { releaseSave = resolve; });
+  const host = new PackageHost({ names: names => names,
+    async prepare(blob, filename) { return { blob, filename }; },
+    async archive() { return new Blob(['zip']); },
+    async save() { startedSave(); return saveResult; },
+    async discard() { discarded = true; }, async cancelWork() {},
+  });
+  await host.begin(owner, plan);
+  for (let index = 0; index < 2; index++) {
+    host.next(owner, { packageId: plan.packageId, index });
+    await host.output(owner, plan.packageId, new Blob(['prepared']), `item${index}.txt`);
+    host.complete(owner, { packageId: plan.packageId, index });
+  }
+  const finishing = host.finish(owner, { packageId: plan.packageId });
+  await saving;
+  await host.cancel(owner, { packageId: plan.packageId });
+  await assert.rejects(() => host.begin(owner, { ...plan, packageId: 'next-package' }), /выполняется/);
+  releaseSave(42);
+  await assert.rejects(() => finishing, /отменён/);
+  assert.equal(discarded, false, 'cancellation cannot discard the recoverable inputs');
+  assert.equal((await host.begin(owner, { ...plan, packageId: 'next-package' })).ok, true);
+});

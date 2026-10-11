@@ -118,14 +118,19 @@ async function ensureOffscreen() {
   await MendoProcessorHost.ensure();
 }
 
+function hostRequest(message) {
+  return MendoProcessorHost.withHost(instance => chrome.runtime.sendMessage({ ...message, instanceId: instance.id }));
+}
+
+chrome.runtime.onConnect?.addListener(port => MendoProcessorHost.connect(port));
+
 // Finished files the offscreen document could not hand over (see the recovery
 // store there). Flushing needs that document, so it is created on demand.
 async function flushRecoveredFiles(manual = false) {
   const stored = await chrome.storage.local.get(RECOVERY_KEY).catch(() => ({}));
   const entries = Array.isArray(stored[RECOVERY_KEY]) ? stored[RECOVERY_KEY] : [];
   if (!entries.some((entry) => entry && !entry.savedAt)) return { ok: true, saved: 0, pending: 0 };
-  await ensureOffscreen();
-  const result = await chrome.runtime.sendMessage({ t: 'mendosave-flush', manual })
+  const result = await hostRequest({ t: 'mendosave-flush', manual })
     .catch((error) => ({ ok: false, error: String(error?.message || error) }));
   return result || { ok: false, error: 'обработчик медиа не ответил' };
 }
@@ -204,8 +209,7 @@ async function saveDownload(url, filename) {
     const match = /^data:(text\/plain|text\/vtt|application\/x-subrip);charset=utf-8,(.*)$/s.exec(url);
     if (!match || url.length > 6 * 1024 * 1024) throw new Error('Unsupported or oversized text download');
     const text = decodeURIComponent(match[2]);
-    await ensureOffscreen();
-    const response = await chrome.runtime.sendMessage({ t: 'mendosave-save-text', text, type: match[1], filename: repaired });
+    const response = await hostRequest({ t: 'mendosave-save-text', text, type: match[1], filename: repaired });
     if (!response?.ok) {
       const error = new Error(response?.error || 'Не удалось сохранить текстовый файл');
       error.cancelled = Boolean(response?.cancelled); throw error;
@@ -302,8 +306,11 @@ chrome.runtime.onStartup.addListener(() => {
 
 async function handleMessage(message, sender) {
   if (sender?.id !== chrome.runtime.id) throw new Error('Unknown extension sender');
+  // A Chromium service worker may restart while its offscreen document runs.
+  // Recovery trusts the actual browser context, never a URL claimed in data.
+  await MendoProcessorHost.restore(sender);
   const downloadOwner = () => {
-    if (sender.url === chrome.runtime.getURL('offscreen.html')) return 'processor';
+    if (MendoProcessorHost.isProcessor(sender)) return `processor:${MendoProcessorHost.instance.id}`;
     if (Number.isInteger(sender.tab?.id)) return `tab:${sender.tab.id}`;
     throw new Error('Download sender has no tab');
   };
@@ -393,7 +400,7 @@ async function handleMessage(message, sender) {
 
     case 'mendosave-recovery-read':
     case 'mendosave-recovery-write': {
-      if (sender?.id !== chrome.runtime.id || sender?.url !== chrome.runtime.getURL('offscreen.html')) {
+      if (!MendoProcessorHost.isProcessor(sender)) {
         throw new Error('Recovery storage is only available to the media processor');
       }
       if (message.t === 'mendosave-recovery-read') {
@@ -416,8 +423,7 @@ async function handleMessage(message, sender) {
         if (!Number.isInteger(sender.tab?.id) || sender.frameId !== 0) throw new Error('Пакет доступен только верхнему документу вкладки');
         if (typeof message.url !== 'string' || typeof message.filename !== 'string' || !message.filename.length
           || message.filename.length > 250) throw new Error('Некорректный результат пакета');
-        await ensureOffscreen();
-        const response = await chrome.runtime.sendMessage({ t: 'mendosave-save-source', packageId: message.packageId,
+        const response = await hostRequest({ t: 'mendosave-save-source', packageId: message.packageId,
           packageIndex: message.packageIndex, url: message.url, filename: repairFilename(message.filename),
           sourceOwner: { tabId: sender.tab.id, frameId: sender.frameId, documentId: sender.documentId } });
         if (response?.ok && Number.isInteger(response.id)) await chrome.storage.session.set({ [`mendo_download_owner:${response.id}`]: owner });
@@ -437,7 +443,8 @@ async function handleMessage(message, sender) {
       if (!Number.isInteger(id) || id < 0) return { ok: false, error: 'download id is missing' };
       const key = `mendo_download_owner:${id}`;
       const saved = await chrome.storage.session.get(key);
-      if (saved[key] !== downloadOwner()) throw new Error('Download belongs to a different sender');
+      const owner = downloadOwner();
+      if (saved[key] !== owner && !(owner === 'processor:legacy' && saved[key] === 'processor')) throw new Error('Download belongs to a different sender');
       if (message.t === 'mendosave-download-cancel') {
         await chrome.downloads.cancel(id);
         return { ok: true };
@@ -547,7 +554,7 @@ async function handleMessage(message, sender) {
 
     case 'mendosave-progress':
     case 'mendosave-package-progress': {
-      if (sender?.url !== chrome.runtime.getURL('offscreen.html')) {
+      if (!MendoProcessorHost.isProcessor(sender)) {
         throw new Error('progress messages are only accepted from the media processor');
       }
       if (!Number.isInteger(message.tabId)) throw new Error('progress tab is unavailable');

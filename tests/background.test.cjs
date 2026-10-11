@@ -13,7 +13,7 @@ test('temporary installation and startup never contact the upstream updater', as
   assert.deepEqual(browser.network, []);
 });
 
-test('ensuring the processor in Gecko reuses one extension tab for concurrent requests', async () => {
+test('ensuring the processor in Gecko fallback creates one owned extension tab for concurrent requests', async () => {
   let created = 0;
   const processor = [];
   const browser = browserContext({
@@ -23,21 +23,21 @@ test('ensuring the processor in Gecko reuses one extension tab for concurrent re
       async create(options) { created++; const tab = { id: 19, ...options }; processor.push(tab); return tab; },
     },
   });
-  browser.chrome.runtime.sendMessage = async (message) => message.t === 'mendosave-host-probe' ? { ok: true } : undefined;
+  browser.chrome.runtime.sendMessage = async (message) => message.t === 'mendosave-host-probe' ? { ok: true, instanceId: message.instanceId } : undefined;
   const responses = await Promise.all([browser.message({ t: 'mendosave-ensure' }), browser.message({ t: 'mendosave-ensure' })]);
   assert.equal(responses.every((result) => result.ok), true);
   assert.equal(created, 1);
   assert.equal(processor[0].active, false);
-  assert.equal(processor[0].url, 'moz-extension://test/offscreen.html');
+  assert.match(processor[0].url, /^moz-extension:\/\/test\/offscreen\.html#mendosave-host=[A-Za-z0-9_-]+$/);
 });
 
 test('Chromium reuses its offscreen context when hasDocument is unavailable', async () => {
   let created = 0;
-  const context = vm.createContext({ chrome: {
+  const context = vm.createContext({ URL, chrome: {
     runtime: { async getContexts(query) {
       assert.equal(query.contextTypes[0], 'OFFSCREEN_DOCUMENT');
-      return [{ documentUrl: query.documentUrls[0] }];
-    } },
+      return [{ documentUrl: 'chrome-extension://test/offscreen.html' }];
+    }, getURL: path => `chrome-extension://test/${path}` },
     offscreen: { async createDocument() { created++; } },
   } });
   vm.runInContext(fs.readFileSync('browser-hosts/chromium.js', 'utf8'), context);
@@ -47,11 +47,14 @@ test('Chromium reuses its offscreen context when hasDocument is unavailable', as
 
 test('the processor accesses recovery storage through runtime while a content page cannot', async () => {
   const browser = browserContext();
-  const sender = { id: browser.chrome.runtime.id, url: 'moz-extension://test/offscreen.html' };
+  const sender = browser.processorSender();
   const entry = { id: 'file.bin', filename: 'result.mp4', type: 'video/mp4', bytes: 12, createdAt: 1, savedAt: 0 };
   assert.equal((await browser.message({ t: 'mendosave-recovery-write', entries: [entry] }, sender))?.ok, true);
   assert.deepEqual(JSON.parse(JSON.stringify((await browser.message({ t: 'mendosave-recovery-read' }, sender)).entries)), [entry]);
   assert.equal((await browser.message({ t: 'mendosave-recovery-write', entries: [] })).ok, false);
+  for (const url of ['moz-extension://test/offscreen.html', 'moz-extension://test/offscreen.html#foreign', `${sender.url}extra`]) {
+    assert.equal((await browser.message({ t: 'mendosave-recovery-read' }, { ...sender, url })).ok, false);
+  }
 });
 
 test('subtitle data URLs are saved by the bundled Blob host instead of downloads.download', async () => {
@@ -59,7 +62,7 @@ test('subtitle data URLs are saved by the bundled Blob host instead of downloads
     async download({ url }) { assert.equal(url.startsWith('data:'), false); return 42; },
   } });
   browser.chrome.runtime.sendMessage = async (message) => {
-    if (message.t === 'mendosave-host-probe') return { ok: true };
+    if (message.t === 'mendosave-host-probe') return { ok: true, instanceId: message.instanceId };
     assert.equal(message.t, 'mendosave-save-text');
     assert.equal(message.text, '\uFEFF1\n00:00:00,000 --> 00:00:01,000\nHello\n');
     assert.equal(message.type, 'application/x-subrip');
@@ -79,7 +82,7 @@ test('download status and cancellation belong to the sender that requested the f
     async download() { return 42; }, async search() { return [{ id: 42, state: 'in_progress' }]; },
     async cancel() { cancelled++; },
   } });
-  const sender = { id: browser.chrome.runtime.id, url: 'moz-extension://test/offscreen.html' };
+  const sender = browser.processorSender();
   assert.equal((await browser.message({ t: 'mendosave-save', url: 'blob:moz-extension://test/output', filename: 'video.mp4' }, sender)).ok, true);
   assert.equal((await browser.message({ t: 'mendosave-download-state', id: 42 })).ok, false);
   assert.equal((await browser.message({ t: 'mendosave-download-cancel', id: 42 }))?.ok, false);

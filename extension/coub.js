@@ -11,11 +11,54 @@
 // keeps the saved file clean. Video-only and audio-only saves never enter the
 // extension at all: the URL goes straight to chrome.downloads.
 (() => {
-  const mendoSend = (message) => globalThis.MendoPackageUI
-    ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
-  const mendoFetch = (url, options) => globalThis.MendoPackageUI
-    ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options);
-  const mendoCheck = () => globalThis.MendoPackageUI?.check();
+  let processorTask = null;
+  const mendoSend = (message, task) => {
+    if (task?.error && !/abort|cancel|mendosave-log|mendosave-error/.test(message.t)) {
+      return Promise.reject(task.error);
+    }
+    if (task?.lease) return task.lease.send(message);
+    return globalThis.MendoPackageUI
+      ? globalThis.MendoPackageUI.send(message) : chrome.runtime.sendMessage(message);
+  };
+  const mendoFetch = async (url, options = {}) => {
+    const task = processorTask;
+    if (task?.error) throw task.error;
+    if (task) options = { ...options, signal: options.signal
+      ? AbortSignal.any([options.signal, task.controller.signal]) : task.controller.signal };
+    try {
+      const response = await (globalThis.MendoPackageUI
+        ? globalThis.MendoPackageUI.fetch(url, options) : fetch(url, options));
+      if (task?.error) throw task.error;
+      return response;
+    } catch (error) { throw task?.error || error; }
+  };
+  const mendoCheck = () => {
+    if (processorTask?.error) throw processorTask.error;
+    globalThis.MendoPackageUI?.check();
+  };
+  async function reserveProcessor() {
+    const task = { controller: new AbortController(), error: null, lease: null };
+    processorTask = task;
+    try {
+      task.lease = await globalThis.MendoPackageUI.acquireProcessor({
+        signal: globalThis.MendoPackageUI.signal || task.controller.signal,
+        onDisconnect(error) {
+          if (processorTask !== task) return;
+          task.error = error;
+          task.controller.abort();
+        },
+      });
+      mendoCheck();
+      return task;
+    } catch (error) {
+      releaseProcessor(task);
+      throw error;
+    }
+  }
+  function releaseProcessor(task) {
+    task?.lease?.release();
+    if (processorTask === task) processorTask = null;
+  }
   const packageRunning = () => Boolean(globalThis.MendoPackageUI?.running);
   function downloadInterrupted(code) {
     if (globalThis.MendoPackageUI) globalThis.MendoPackageUI.interruption(code);
@@ -187,6 +230,7 @@
         onProgress?.(1);
         return merged;
       } catch (error) {
+        mendoCheck();
         if (error?.name === 'AbortError') throw error;
         lastError = error;
         log('fetch', `attempt ${attempt + 1}/${MEDIA_ATTEMPTS} failed at ${received} bytes:`
@@ -259,58 +303,58 @@
     return btoa(binary);
   }
 
-  async function sendTrack(jobId, track, bytes, onProgress) {
+  async function sendTrack(jobId, track, bytes, onProgress, producer) {
     for (let offset = 0; offset < bytes.length; offset += TRANSFER_CHUNK_SIZE) {
       const chunk = bytes.subarray(offset, Math.min(offset + TRANSFER_CHUNK_SIZE, bytes.length));
       const response = await mendoSend({
         t: 'mendosave-chunk', jobId, track, b64: encodeBase64(chunk),
-      });
+      }, producer);
       if (!response?.ok) throw new Error(response?.error || `передача данных прервалась (${track})`);
       onProgress?.(Math.min(offset + chunk.length, bytes.length) / bytes.length);
     }
   }
 
-  async function muxViaOffscreen(job, tracks, onStage) {
-    const ensured = await mendoSend({ t: 'mendosave-ensure' });
-    if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
-    const registration = await mendoSend({ t: 'mendosave-register-job', jobId: job.jobId });
-    if (!registration?.ok || !Number.isInteger(registration.tabId)) {
-      throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
-    }
-    const started = await mendoSend({
-      t: 'mendosave-begin',
-      jobId: job.jobId,
-      tabId: registration.tabId,
-      filename: job.filename,
-      format: 'mp4',
-      // -1 repeats the video until the soundtrack ends, 0 keeps one pass and
-      // cuts the sound to match.
-      loopVideo: job.loopVideo,
-      videoMime: 'video/mp4',
-      audioMime: 'audio/mpeg',
-      videoSize: tracks.video.length,
-      audioSize: tracks.audio.length,
-      duration: job.duration,
-    });
-    if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
-
+  async function muxViaOffscreen(job, tracks, onStage, producer) {
     try {
+      const ensured = await mendoSend({ t: 'mendosave-ensure' }, producer);
+      if (!ensured?.ok) throw new Error(ensured?.error || 'не удалось запустить обработчик медиа');
+      const registration = await mendoSend({ t: 'mendosave-register-job', jobId: job.jobId }, producer);
+      if (!registration?.ok || !Number.isInteger(registration.tabId)) {
+        throw new Error(registration?.error || 'не удалось определить вкладку загрузки');
+      }
+      const started = await mendoSend({
+        t: 'mendosave-begin',
+        jobId: job.jobId,
+        tabId: registration.tabId,
+        filename: job.filename,
+        format: 'mp4',
+        // -1 repeats the video until the soundtrack ends, 0 keeps one pass and
+        // cuts the sound to match.
+        loopVideo: job.loopVideo,
+        videoMime: 'video/mp4',
+        audioMime: 'audio/mpeg',
+        videoSize: tracks.video.length,
+        audioSize: tracks.audio.length,
+        duration: job.duration,
+      }, producer);
+      if (!started?.ok) throw new Error(started?.error || 'не удалось начать обработку');
+
       const total = tracks.video.length + tracks.audio.length;
       let sent = 0;
       const report = () => onStage?.('transfer', total ? sent / total : 1);
       await sendTrack(job.jobId, 'video', tracks.video, (fraction) => {
         sent = fraction * tracks.video.length;
         report();
-      });
+      }, producer);
       sent = tracks.video.length;
       await sendTrack(job.jobId, 'audio', tracks.audio, (fraction) => {
         sent = tracks.video.length + fraction * tracks.audio.length;
         report();
-      });
+      }, producer);
       onStage?.('transfer', 1);
-      return await mendoSend({ t: 'mendosave-finalize', jobId: job.jobId });
+      return await mendoSend({ t: 'mendosave-finalize', jobId: job.jobId }, producer);
     } catch (error) {
-      await mendoSend({ t: 'mendosave-abort', jobId: job.jobId }).catch(() => {});
+      await mendoSend({ t: 'mendosave-abort', jobId: job.jobId }, producer).catch(() => {});
       throw error;
     }
   }
@@ -332,6 +376,7 @@
       mendoCheck();
       await new Promise((resolve) => setTimeout(resolve, 700));
       const state = await mendoSend({ t: 'mendosave-download-state', id: saved.id }).catch((error) => {
+        mendoCheck();
         if (error?.name === 'AbortError') throw error;
         return null;
       });
@@ -346,7 +391,7 @@
     return filename;
   }
 
-  async function downloadWithSound(info, choice, notification, jobId) {
+  async function downloadWithSound(info, choice, notification, jobId, producer) {
     const video = choice.video;
     const audio = info.audio[0];
     const label = video.width ? `${video.width}×${video.height}` : video.key;
@@ -388,7 +433,7 @@
       if (stage === 'transfer') {
         notification.set(`Передача ${Math.round(fraction * 100)}%`, 0.55 + fraction * 0.1);
       }
-    });
+    }, producer);
     if (!result?.ok) throw new Error(result?.error || 'не удалось собрать файл');
     return result.filename || filename;
   }
@@ -403,18 +448,21 @@
     busy = true;
     const notification = getToast();
     const jobId = crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    let acceptingProgress = true;
     // The offscreen document reports the ffmpeg stage on its own channel, via
     // the service worker. Other tabs' jobs reach this listener too.
     const onProgress = (message) => {
-      if (message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
+      if (!acceptingProgress || message?.t !== 'mendosave-progress' || message.jobId !== jobId) return;
       const value = Math.max(0, Math.min(1, message.value || 0));
       notification.set(message.status || 'Сборка…', 0.65 + value * 0.33);
     };
     chrome.runtime.onMessage.addListener(onProgress);
+    let producer;
     try {
+      if (choice.kind === 'sound') producer = await reserveProcessor();
       let filename;
       if (choice.kind === 'sound') {
-        filename = await downloadWithSound(info, choice, notification, jobId);
+        filename = await downloadWithSound(info, choice, notification, jobId, producer);
       } else if (choice.kind === 'video') {
         notification.set('Передаю видео браузеру…', 0.5);
         filename = await saveDirect(choice.video.url,
@@ -423,21 +471,26 @@
         notification.set('Передаю звук браузеру…', 0.5);
         filename = await saveDirect(info.audio[0].url, baseName(info, '.mp3'));
       }
+      acceptingProgress = false;
       notification.set(`Готово: ${filename}`, 1);
       notification.hide(5000);
       return filename;
     } catch (error) {
-      if (bundled) throw error;
+      acceptingProgress = false;
       if (error?.name === 'AbortError') {
         notification.set('Загрузка отменена', 1);
         notification.hide(5000);
+        if (bundled) throw error;
         return;
       }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 160)}`, 1);
       notification.hide(11000);
+      if (bundled) throw error;
       await reportError('coub/download', error, { permalink: info.permalink, choice: choice.kind });
     } finally {
+      acceptingProgress = false;
       chrome.runtime.onMessage.removeListener(onProgress);
+      releaseProcessor(producer);
       busy = false;
     }
   }
@@ -463,7 +516,11 @@
     return svg;
   }
 
+  let toastRevision = 0;
+  let toastTimer;
   function getToast() {
+    const revision = ++toastRevision;
+    clearTimeout(toastTimer);
     if (!toastBox) {
       toastBox = document.createElement('div');
       toastBox.className = 'mendosave-coub-toast';
@@ -472,10 +529,17 @@
     toastBox.hidden = false;
     return {
       set(text, progress) {
+        if (revision !== toastRevision) return;
         toastBox.textContent = text;
         toastBox.style.setProperty('--mendosave-coub-progress', `${Math.round((progress || 0) * 100)}%`);
       },
-      hide(delay) { setTimeout(() => { if (toastBox) toastBox.hidden = true; }, delay || 0); },
+      hide(delay) {
+        if (revision !== toastRevision) return;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+          if (revision === toastRevision && toastBox) toastBox.hidden = true;
+        }, delay || 0);
+      },
     };
   }
 
@@ -583,7 +647,7 @@
         menu.append(item);
       }
       if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
-        title: info.title || info.permalink,
+        title: info.title || info.permalink, source: `coub:${info.permalink}`,
         close: closeMenu,
         options: choices.map((choice, index) => ({
           id: `coub-${index}`, label: choice.text,

@@ -10,6 +10,45 @@ function coub(send) {
   return app;
 }
 
+test('Coub processor workflow waits for producer ACK and retains it during native finalization', async () => {
+  const { producerPorts } = require('./producer-port-harness.cjs');
+  const transport = producerPorts({ autoAck: false });
+  let finalized;
+  const pending = new Promise(resolve => { finalized = resolve; });
+  const audio = new Uint8Array(834);
+  for (const at of [0, 417]) audio.set([0xff, 0xfb, 0x90, 0], at);
+  const app = adapter('coub.js', '<div data-permalink="or1i6abuay"><div class="viewer"></div></div>',
+    'https://coub.com/view/or1i6abuay', async url => {
+      if (url.includes('/api/')) return { ok: true, json: async () => ({ permalink: 'or1i6abuay',
+        title: 'Fixture', has_sound: true, duration: 0.01, file_versions: { html5: {
+          video: { high: { url: 'https://media.invalid/video.mp4', size: 8 } },
+          audio: { high: { url: 'https://media.invalid/audio.mp3', size: audio.length } },
+        } } }) };
+      const bytes = url.endsWith('video.mp4') ? new Uint8Array(8) : audio;
+      return { ok: true, status: 200, headers: { get: () => String(bytes.length) },
+        arrayBuffer: async () => bytes.buffer };
+    }, message => message.t === 'mendosave-finalize' ? pending : { ok: true, tabId: 7 });
+  app.context.MendoPackageUI.add = (_menu, picker) => { app.picker = picker; };
+  app.context.chrome.runtime.connect = transport.connect;
+  app.click(app.document.querySelector('.mendosave-coub-btn')); await app.settle();
+  const choice = app.picker.options.find(entry => entry.label.includes('Со звуком'));
+  assert.ok(choice);
+  app.context.MendoPackageUI.running = true;
+  const running = choice.run();
+  await app.settle();
+  assert.equal(app.messages.some(message => message.t === 'mendosave-ensure'), false);
+  const producer = transport.ports.find(port => port.name === 'mendosave-producer');
+  assert.ok(producer);
+  producer.receive({ ok: true, instanceId: 'processor-fixture' });
+  await app.settle();
+  assert.equal(app.messages.some(message => message.t === 'mendosave-finalize'), true);
+  assert.equal(app.messages.find(message => message.t === 'mendosave-finalize').instanceId, 'processor-fixture');
+  assert.equal(producer.disconnected, false);
+  finalized({ ok: true, filename: 'clip.mp4' });
+  assert.equal(await running, 'clip.mp4');
+  assert.equal(producer.disconnected, true);
+});
+
 test('Coub package direct item resolves after archive collection without polling a nonexistent download', async () => {
   const app = coub(() => ({ ok: true, collected: true, filename: 'stored.mp4' }));
   app.click(app.document.querySelector('.mendosave-coub-btn'));
@@ -112,6 +151,37 @@ test('Rutube cancellation does not retry a segment or finalize a partial file', 
   assert.equal(app.requests.filter((entry) => entry.url.endsWith('segment.ts')).length, 1);
   assert.equal(app.messages.some((message) => message.t === 'mendosave-finalize'), false);
   assert.equal(app.messages.some((message) => message.t === 'mendosave-abort'), true);
+});
+
+test('Rutube drains outstanding lookahead reads before abort cleanup releases the producer', async () => {
+  let completeRead;
+  const slowRead = new Promise(resolve => { completeRead = resolve; });
+  let slowSignal;
+  const app = adapter('rutube.js', '<div class="player"><video></video></div>',
+    'https://rutube.ru/video/5295f2a858cdace0855c40f8a48f4676/', async (url, options) => {
+      if (url.includes('/api/play/options/')) return { ok: true, json: async () => ({ title: 'Fixture', duration: 2000,
+        video_balancer: { m3u8: 'https://media.invalid/master.m3u8' } }) };
+      if (url.endsWith('master.m3u8')) return { ok: true, text: async () => '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=10000,RESOLUTION=256x144\n144.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=20000,RESOLUTION=640x360\n360.m3u8\n' };
+      if (url.endsWith('.m3u8')) return { ok: true, text: async () => '#EXTM3U\n#EXTINF:1,\nfirst.ts\n#EXTINF:1,\nsecond.ts\n#EXT-X-ENDLIST\n' };
+      if (url.endsWith('second.ts')) { slowSignal = options.signal; return { ok: true, arrayBuffer: () => slowRead }; }
+      return { ok: true, arrayBuffer: async () => Uint8Array.of(0x47, 1, 2).buffer };
+    }, message => {
+      if (message.t === 'mendosave-chunk') throw new Error('processor write failed');
+      return { ok: true, tabId: 7 };
+    });
+  app.context.MendoPackageUI.add = (_menu, picker) => { app.picker = picker; };
+  app.click(app.document.querySelector('#mendosave-rutube-btn')); await app.settle();
+  app.context.MendoPackageUI.running = true;
+  const running = app.picker.options[0].run();
+  const rejected = assert.rejects(running, /processor write failed/);
+  await app.settle();
+  const producer = app.producers.ports[0];
+  assert.equal(producer.disconnected, false, 'outstanding native read still belongs to this workflow');
+  assert.equal(slowSignal.aborted, true, 'failure cancels pending lookahead requests');
+  assert.equal(app.messages.some(message => message.t === 'mendosave-abort'), false, 'read cleanup precedes job abort');
+  completeRead(Uint8Array.of(0x47, 3, 4).buffer); await rejected;
+  assert.equal(producer.disconnected, true);
+  assert.equal(app.messages.some(message => message.t === 'mendosave-finalize'), false);
 });
 
 test('TikTok waits for privileged Blob save and preserves cookie-fetched original bytes', async () => {

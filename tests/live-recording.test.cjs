@@ -114,6 +114,7 @@ function host({ writeBarrier, outputBarrier, outputSinkBarriers, downloadState, 
     },
   };
   const context = vm.createContext({
+    location: new URL('moz-extension://test/offscreen.html#mendosave-host=fixture'),
     chrome: { runtime }, navigator: { storage }, Blob, Uint8Array, ArrayBuffer, atob,
     Date: Clock, console, TextDecoder, WritableStream, mediabunnyDependency: dependency,
     URL: class extends URL {
@@ -143,7 +144,7 @@ function host({ writeBarrier, outputBarrier, outputSinkBarriers, downloadState, 
   const sender = { id: runtime.id, tab: { id: 7, url: 'https://www.twitch.tv/channel' },
     url: 'https://www.twitch.tv/channel', frameId: 0, documentId: 'document7' };
   const message = (payload, owner = sender) => new Promise((resolve) => {
-    if (!messageListener(payload, owner, resolve)) resolve(undefined);
+    if (!messageListener({ instanceId: 'fixture', ...payload }, owner, resolve)) resolve(undefined);
   });
   function connect(owner = sender, jobId = 'record7') {
     let disconnected;
