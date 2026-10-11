@@ -722,7 +722,7 @@
     }
     const sorted = cues
       .filter((cue) => typeof cue?.text === 'string' && cue.text.trim())
-      .map((cue) => ({ start: Number(cue.start) || 0, end: Number(cue.end) || 0, text: cue.text.trim() }))
+      .map((cue) => ({ start: Number(cue.start) || 0, end: Number(cue.end) || 0, text: cue.text }))
       .sort((a, b) => a.start - b.start);
 
     return sorted.map((cue, index) => {
@@ -743,7 +743,7 @@
       lines.push(`${formatCueTime(cue.start, separator)} --> ${formatCueTime(cue.end, separator)}`);
       lines.push(cue.text, '');
     });
-    return `${lines.join('\r\n').replace(/(\r?\n)+$/, '')}\r\n`;
+    return `${lines.slice(0, -1).join('\r\n')}\r\n`;
   }
 
   const SUBTITLE_OUTPUT_MAX_BYTES = 32 * 1024 ** 2;
@@ -781,7 +781,22 @@
       // Blob allocation, then check actual UTF-8 bytes before producer/OPFS.
       if (content.length > SUBTITLE_OUTPUT_MAX_BYTES) throw new Error('Размер текстового файла превышает 32 MiB');
       if (!content.trim()) throw new Error('Нет доступной расшифровки с реальными таймкодами');
-      let filename = `${safeFilename(info.title)} [${language}]${output.transcript ? ' [timed]' : ''}.${output.extension}`;
+      // Reserve the format/language markers before shortening the title, so
+      // both transport routes keep distinct bounded names without split pairs.
+      const languageLabel = [...safeFilename(language).normalize('NFC')].slice(0, 32).join('').trim();
+      const suffix = ` [${languageLabel}]${output.transcript ? ' [timed]' : ''}`;
+      const nameEncoder = new TextEncoder();
+      let nameBytes = nameEncoder.encode(`${suffix}.${output.extension}`).length;
+      let title = '';
+      let titleValue = safeFilename(info.title).normalize('NFC');
+      if (/^(con|conin\$|conout\$|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\s*\.|$)/i.test(titleValue)) titleValue = `_${titleValue}`;
+      for (const character of [...titleValue].slice(0, 120 - [...suffix].length)) {
+        const size = nameEncoder.encode(character).length;
+        // PackageIO applies the shared archive's 180-byte basename limit.
+        if (nameBytes + size > 180) break;
+        title += character; nameBytes += size;
+      }
+      let filename = `${title.trim()}${suffix}.${output.extension}`;
       const text = `\uFEFF${content}`;
       const blob = new Blob([text], { type: output.mime });
       if (blob.size > SUBTITLE_OUTPUT_MAX_BYTES) throw new Error('Размер текстового файла превышает 32 MiB');
@@ -790,8 +805,7 @@
       // the existing owned, chunked path through native download completion.
       if (blob.size > 1024 ** 2) {
         if (!globalThis.MendoPackageUI?.saveBlob) throw new Error('Передача текстового файла недоступна');
-        const stem = filename.slice(0, -output.extension.length - 1);
-        filename = await globalThis.MendoPackageUI.saveBlob(blob, `${safeFilename(stem)}.${output.extension}`);
+        filename = await globalThis.MendoPackageUI.saveBlob(blob, filename);
       } else {
         const url = `data:${output.mime};charset=utf-8,${encodeURIComponent(text)}`;
         const saved = await sendWorkerMessage({ t: 'mendosave-save', url, filename }, 30_000);

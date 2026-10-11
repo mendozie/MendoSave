@@ -30,3 +30,11 @@ Bounded PoC использовал настоящий consumer, shared PackageUI
 Текущий код после этого snapshot добавляет consumer bounds 32 MiB UTF-8/BOM и ранний SRT/VTT budget. Регрессии проверяют отказ до privileged transfer и полное сохранение допустимого Unicode текста. Эти guards не приписываются историческому scan; итоговый immutable diff проверяется отдельно.
 
 SHA-256 canonical report: `7c2b0f80379790cb2a2057c7309b5e42b2fe218866c6d1c47af2d0bc2ac86184`. Учтено 7171684 input tokens, включая 6805120 cached, и 35919 output; total 7207603. Это accounting связанного thread, не цена и не изолированная стоимость короткого diff. Завершённая scan-цель заняла около 17 минут активного времени; пауза пользователя не считается выполненной работой.
+
+## Итоговые consumer bounds
+
+11-10-2026 завершён и прочитан sealed scan `91ce2aad-9e80-4f14-bb6f-0dce13a76f57` для `9673e5fba704914d927183ac8df7e9c7b9954c05..6c84b8efb7f8741b6f1099e6eaa8fbd5f86fd984`: все шесть changed paths учтены, один authoritative production source рассмотрен вместе с соседними formatter/producer/metadata/OPFS controls. Coverage данного diff complete, candidates/reportable findings/deferred - 0. Исторический deferred-кандидат предыдущего snapshot этим не переименован и не закрыт задним числом.
+
+Проверены early cue count/per-row/aggregate guards, cheap output-length guard до Blob и фактический UTF-8/BOM byte guard до processor/OPFS. MIME, sender/owner/instance, sequence/quota, native completion и cancel cleanup не ослаблены. Root source review и независимый bounded code review согласуются; 541 tests на этом snapshot и native functional QA являются отдельными evidence. Последующие literal-whitespace/filename corrections имеют собственные RED/GREEN и code review; они не приписываются этому sealed range.
+
+SHA-256 canonical report: `b02dc832406fe8b98d0fa908e269dc087de4ff598498dc165d16f274080e9ac1`. Учтено 792629 input tokens, включая 777856 cached, и 4759 output; total 797388 в одном связанном thread. Это accounting, не цена. Полный vendor/native audit и native exhaustion/peak-memory campaign не повторялись.

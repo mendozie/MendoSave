@@ -30,7 +30,7 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
   let captureSaves = 0, picker;
   const toast = { set: (text) => notifications.push(text), hide() {}, setCancel() {}, beginStages() {}, stage() {} };
   const producerUI = createPackageUI({ runtime: { connect: producerPorts().connect } });
-  const context = vm.createContext({ document, window, URL, Blob, Uint8Array, crypto, btoa, AbortController,
+  const context = vm.createContext({ document, window, URL, Blob, Uint8Array, crypto, btoa, AbortController, TextEncoder,
     location: new URL('https://www.youtube.com/watch?v=fixtureVideo'),
     IS_MUSIC: false, IS_SHORTS: () => false, BUTTON_ID: 'download-button',
     console: { warn() {}, error() {} }, setTimeout() {},
@@ -135,6 +135,73 @@ test('SRT download preserves actual cue times instead of extending short lines i
   assert.match(content, /00:00:02,000 --> 00:00:02,200/);
 });
 
+test('SRT and VTT downloads preserve literal whitespace in accepted cues', async t => {
+  for (const format of ['srt', 'vtt']) await t.test(format, async () => {
+    const h = harness();
+    const first = '  \n<first> \t ', last = '\n<last>\n  \n';
+    h.context.callHook = async () => ({ lang: 'en', cues: [
+      { start: 1, end: 2, text: first },
+      { start: 2, end: 3, text: ' \r\n\t ' },
+      { start: 3, end: 4, text: last },
+    ] });
+    assert.equal(await h.context.downloadSubtitles(h.info, format), `Fixture [en].${format}`);
+    const saved = h.messages.find(message => message.t === 'mendosave-save');
+    const separator = format === 'vtt' ? '.' : ',';
+    const expected = (format === 'vtt' ? 'WEBVTT\r\n\r\n' : '1\r\n')
+      + `00:00:01${separator}000 --> 00:00:02${separator}000\r\n${first}\r\n\r\n`
+      + (format === 'vtt' ? '' : '2\r\n')
+      + `00:00:03${separator}000 --> 00:00:04${separator}000\r\n${last}\r\n`;
+    assert.equal(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1)), '\uFEFF' + expected);
+  });
+});
+
+test('small and large TXT names reserve language and timed markers before Unicode title truncation', async t => {
+  const names = new Map();
+  for (const variant of [
+    { name: 'emoji', title: '😀'.repeat(120) },
+    { name: 'reserved ASCII', title: 'CON.' + 'A'.repeat(116) },
+    { name: 'reserved BMP', title: 'CON.' + '界'.repeat(116) },
+    { name: 'reserved emoji', title: 'CON.' + '😀'.repeat(116) },
+  ]) for (const size of ['small', 'large']) for (const format of ['txt', 'timed-txt']) {
+    await t.test(`${variant.name} ${size} ${format}`, async () => {
+      const h = harness(), producers = producerPorts(), storage = packageIO();
+      const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+      h.info.title = variant.title;
+      const content = size === 'large' ? '界'.repeat(350000) : 'literal';
+      h.context.callHook = async () => ({ lang: 'ru', text: content, timedText: content,
+        cues: [{ start: 0, end: 1, text: 'literal' }] });
+      const receive = async message => message.t === 'mendosave-save'
+        ? (h.messages.push(message), { ok: true }) : storage.io.handle(message, sender) ?? { ok: true };
+      h.context.sendWorkerMessage = receive;
+      h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+      const suffix = ` [ru]${format === 'timed-txt' ? ' [timed]' : ''}`;
+      const filename = await h.context.downloadSubtitles(h.info, format);
+      if (variant.name === 'emoji') assert.equal(filename,
+        '😀'.repeat(Math.floor((180 - Buffer.byteLength(suffix + '.txt')) / 4)) + suffix + '.txt');
+      assert.equal(require('../extension/archive.js').safeName(filename), filename,
+        'shared Windows basename normalization cannot truncate the reserved markers');
+      assert.ok(filename.endsWith(suffix + '.txt')); assert.ok([...filename.slice(0, -4)].length <= 120);
+      assert.ok(Buffer.byteLength(filename) <= 180, 'shared archive sanitization retains the reserved suffix');
+      assert.ok(filename.length <= 250); assert.ok(!filename.includes('\uFFFD'));
+      assert.equal(h.notifications.at(-1), `Готово: ${filename}`);
+      const expected = Buffer.from('\uFEFF' + content);
+      if (size === 'large') {
+        assert.equal(storage.saved.length, 1);
+        assert.equal(storage.saved[0].filename, filename);
+        assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
+      } else {
+        const saved = h.messages.find(message => message.t === 'mendosave-save');
+        assert.equal(saved.filename, filename);
+        assert.deepEqual(Buffer.from(decodeURIComponent(saved.url.slice(saved.url.indexOf(',') + 1))), expected);
+      }
+      names.set(format, filename);
+      assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
+      assert.ok(producers.ports.every(port => port.disconnected));
+    });
+  }
+  assert.notEqual(names.get('txt'), names.get('timed-txt'));
+});
+
 test('standalone SRT and timed TXT pass real shared-helper admission through the background save route', async t => {
   for (const format of ['srt', 'timed-txt']) await t.test(format, async () => {
     const h = harness(), producers = producerPorts(), packets = [];
@@ -217,7 +284,7 @@ test('selected long timed TXT saves all accepted Unicode and chapter bytes beyon
     assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
     assert.equal(filename, storage.saved[0].filename, 'completion reports the actual saved name');
     if (variant.title === 'Fixture') assert.equal(filename, 'Fixture [ru] [timed].txt');
-    assert.ok(filename.length <= 250); assert.match(filename, /\.txt$/u);
+    assert.ok(filename.length <= 250); assert.match(filename, / \[ru\] \[timed\]\.txt$/u);
     assert.ok(!filename.includes('\uFFFD'), 'supplementary characters survive name shortening');
     assert.match(h.notifications.at(-1), /Готово:/);
     assert.ok(producers.ports.every(port => port.disconnected), 'terminal completion releases transfer and producer ports');

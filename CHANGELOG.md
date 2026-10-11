@@ -8,6 +8,8 @@
 - Отмена на границе сохранения ZIP сохраняет подготовленные входы и не выдаётся за успех.
 - Честное terminal сообщение пакета при необходимости reload, без обещания невыполненного автоматического продолжения.
 - Отдельный TXT с реальными таймкодами и доступными главами YouTube; plain TXT и SRT сохраняются.
+- Большие допустимые text outputs передаются через bounded Blob/OPFS без потери bytes; превышение 32 MiB отклоняется до privileged transfer.
+- SRT/VTT сохраняют literal cue whitespace. Текстовые имена резервируют язык, `[timed]` и extension до сокращения Unicode title, включая Windows reserved stems.
 - Очистка завершённых Worker transports с сохранением живых streams при SPA и повторном открытии MediaSource.
 - Скрытый обработчик Zen без служебной вкладки; producer/work ports удерживают очередь, ZIP, live, сохранение и cleanup. Новый запуск проверяет существующий host и связывает команды с его instance.
 
