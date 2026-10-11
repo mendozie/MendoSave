@@ -6,7 +6,7 @@
 
 Проверка использовала repository-scoped threat model и offline source review. Основные границы: данные страницы остаются недоверенными; browser-authenticated sender, tab/document/package, producer lease и processor instance ограничивают операции; обработчик удерживается во время работы и закрывается только при подтверждённом владении и поздней проверке idle; download ID принадлежит вкладке или processor instance. Рассмотрены отмена/повторный запуск, восстановление, OPFS, ограничения URL/сообщений/таймкодов и сборочные изменения. Разные маршруты имеют разные договоры владения: generic media главным образом привязаны к вкладке, package и raw Twitch дополнительно привязаны к документу.
 
-После reviewed revision исправлено устаревшее описание служебной вкладки Zen в PRIVACY.md и обновлены reviewer notes. Эти редакционные изменения не меняют рассмотренные runtime bytes. Позднейшая коррекция больших text output находится вне данного sealed range; она проверяется отдельным security diff перед подписанием.
+После reviewed revision исправлено устаревшее описание служебной вкладки Zen в PRIVACY.md и обновлены reviewer notes. Эти редакционные изменения не меняют рассмотренные runtime bytes. Позднейшая коррекция больших text output находится вне данного sealed range; её исторический diff и последующие consumer bounds проверяются отдельно перед подписанием.
 
 ## Пределы результата
 
@@ -19,3 +19,14 @@
 Canonical artifacts остаются в завершённом scan; их machine-specific storage path не публикуется. SHA-256 canonical report: `6335e07655ff0e0cfa7d169ed912bf522600dee8f96dcb9c40ca57d57821c587`. Учтённый инструментом расход: 11 566 091 input tokens, из них 10 968 064 cached; 67 759 output tokens; total 11 633 850. Это token accounting пяти связанных review threads, не цена и не только новые input tokens.
 
 Подпись Mozilla, private PR/CI и постоянное обновление Zen проверяются отдельно. Публичный магазин и смена приватности этим scan не разрешались.
+
+
+## Коррекция большого текстового output
+
+11-10-2026 завершён и прочитан sealed scan `d042ef9c-9d2b-462d-b5e7-ff5fe1b4df5f` для `aa09bcc915c227d61fff6788e8622f5d63999170..9673e5fba704914d927183ac8df7e9c7b9954c05`. Все семь changed paths учтены, один authoritative production source рассмотрен. Coverage `partial`: один кандидат CWE-400/770 имеет подтверждённый путь подменённого ответа страницы до ограниченного OPFS, но конкретный security impact не доказан; validation и attack-path decision сохранены как deferred. Reportable findings - 0. Это не результат «все риски отсутствуют».
+
+Bounded PoC использовал настоящий consumer, shared PackageUI и PackageIO.handle: forged 9 Mi UTF-16 ASCII сохранил 9437187 UTF-8/BOM bytes; квота 4 MiB отклонила его до chunks. В обоих случаях spool/jobs/ports освобождены. Generic file/transfer/quota/owner limits сохранены; исходный media путь уже допускал больший объём памяти, но с иными OPFS preconditions. Native exhaustion и paused-download concurrency не воспроизводились.
+
+Текущий код после этого snapshot добавляет consumer bounds 32 MiB UTF-8/BOM и ранний SRT/VTT budget. Регрессии проверяют отказ до privileged transfer и полное сохранение допустимого Unicode текста. Эти guards не приписываются историческому scan; итоговый immutable diff проверяется отдельно.
+
+SHA-256 canonical report: `7c2b0f80379790cb2a2057c7309b5e42b2fe218866c6d1c47af2d0bc2ac86184`. Учтено 7171684 input tokens, включая 6805120 cached, и 35919 output; total 7207603. Это accounting связанного thread, не цена и не изолированная стоимость короткого diff. Завершённая scan-цель заняла около 17 минут активного времени; пауза пользователя не считается выполненной работой.

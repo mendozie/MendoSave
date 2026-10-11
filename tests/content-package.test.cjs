@@ -17,7 +17,7 @@ const names = new Set(['addDownloadItems', 'addSubtitleItems', 'addRadioSelector
   'openMenu', 'videoIdFromLocation', 'startDownload', 'tryDownloadViaSabr', 'downloadViaSabr',
   'downloadSubtitles', 'encodeBase64', 'snapshotPackageOptions', 'mediaResponseError',
   'buildTimedSubtitles', 'normalizeCues', 'formatCueTime', 'safeFilename']);
-const constants = new Set(['TRANSFER_CHUNK_SIZE', 'HAS_NATIVE_BASE64', 'SUBTITLE_OUTPUTS']);
+const constants = new Set(['TRANSFER_CHUNK_SIZE', 'HAS_NATIVE_BASE64', 'SUBTITLE_OUTPUTS', 'SUBTITLE_OUTPUT_MAX_BYTES']);
 const flowSource = declarations.filter(node => (node.type === 'FunctionDeclaration' && names.has(node.id.name))
   || (node.type === 'VariableDeclaration' && node.declarations.some(item => constants.has(item.id.name))))
   .map(node => source.slice(...node.range)).join('\n');
@@ -223,6 +223,68 @@ test('selected long timed TXT saves all accepted Unicode and chapter bytes beyon
     assert.ok(producers.ports.every(port => port.disconnected), 'terminal completion releases transfer and producer ports');
     assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
     assert.equal(saved, undefined, 'large text uses the actual bounded Blob handler');
+  });
+});
+
+test('oversized page subtitle text is rejected before acquiring a processor or starting a transfer', async t => {
+  for (const variant of [
+    { name: 'ASCII length', text: 'A'.repeat(32 * 1024 ** 2 + 1) },
+    { name: 'UTF-8 expansion', text: '界'.repeat(12 * 1024 ** 2) },
+  ]) await t.test(variant.name, async () => {
+    const h = harness(), producers = producerPorts(), packets = [];
+    h.context.MendoPackageUI = createPackageUI({ runtime: {
+      connect: producers.connect,
+      async sendMessage(message) { packets.push(message); return { ok: true, filename: 'unexpected.txt' }; },
+    } });
+    h.context.sendWorkerMessage = async message => { packets.push(message); return { ok: true }; };
+    h.context.callHook = async () => ({ lang: 'en', timedText: variant.text,
+      cues: [{ start: 0, end: 1, text: 'untrusted page cue' }] });
+    assert.equal(await h.context.downloadSubtitles(h.info, 'timed-txt'), undefined);
+    assert.match(h.notifications.at(-1), /32 MiB/);
+    assert.ok(!h.notifications.some(text => text.startsWith('Готово:')));
+    assert.equal(producers.ports.length, 0); assert.equal(packets.length, 0);
+  });
+});
+
+test('SRT rejects excessive page cue count and text before formatting or privileged transfer', async t => {
+  for (const variant of [
+    { name: 'cue count', cues: Array.from({ length: 50001 }, (_, i) => ({ start: i, text: 'x' })) },
+    { name: 'single cue text', cues: [{ start: 0, text: 'A'.repeat(65537) }] },
+    { name: 'total cue text', cues: Array.from({ length: 129 }, (_, i) => ({ start: i, text: '界'.repeat(65536) })) },
+  ]) await t.test(variant.name, async () => {
+    const h = harness(), producers = producerPorts(), packets = [];
+    h.context.MendoPackageUI = createPackageUI({ runtime: {
+      connect: producers.connect, async sendMessage(message) { packets.push(message); return { ok: true }; },
+    } });
+    h.context.sendWorkerMessage = async message => { packets.push(message); return { ok: true }; };
+    h.context.callHook = async () => ({ lang: 'en', cues: variant.cues });
+    assert.equal(await h.context.downloadSubtitles(h.info, 'srt'), undefined);
+    assert.match(h.notifications.at(-1), /лимит/);
+    assert.ok(!h.notifications.some(text => text.startsWith('Готово:')));
+    assert.equal(producers.ports.length, 0); assert.equal(packets.length, 0);
+  });
+});
+
+test('the full formatter text budget preserves all worst-case UTF-8 bytes through the real file handler', async t => {
+  for (const format of ['timed-txt', 'srt']) await t.test(format, async () => {
+    const h = harness(), producers = producerPorts(), storage = packageIO();
+    const sender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'doc7' };
+    const receive = async message => storage.io.handle(message, sender) ?? { ok: true };
+    h.context.MendoPackageUI = createPackageUI({ runtime: { connect: producers.connect, sendMessage: receive } });
+    h.context.sendWorkerMessage = receive;
+    const cues = Array.from({ length: 128 }, (_, i) => ({ start: i, end: i + .5, text: '界'.repeat(65536) }));
+    const timedText = require('../extension/captions.js').formatTimedTranscript(cues);
+    const content = format === 'srt' ? h.context.buildTimedSubtitles(cues, 'srt') : timedText;
+    const expected = Buffer.from('\uFEFF' + content, 'utf8');
+    assert.ok(expected.length > 24 * 1024 ** 2);
+    h.context.callHook = async () => ({ lang: 'zh', cues, timedText });
+    assert.equal(await h.context.downloadSubtitles(h.info, format), format === 'srt'
+      ? 'Fixture [zh].srt' : 'Fixture [zh] [timed].txt');
+    assert.equal(storage.saved.length, 1);
+    assert.deepEqual(Buffer.from(await storage.saved[0].blob.arrayBuffer()), expected);
+    assert.match(h.notifications.at(-1), /Готово:/);
+    assert.ok(producers.ports.every(port => port.disconnected));
+    assert.equal(storage.files.size, 0); assert.equal(storage.io.jobsActive(), false);
   });
 });
 

@@ -1,7 +1,7 @@
 # MendoSave - roadmap
 
 Основание: [PROJECT_SPEC.md](PROJECT_SPEC.md).
-Актуализировано: 10-10-2026.
+Актуализировано: 11-10-2026.
 
 `[ ]` - не начато; `[~]` - выполняется либо остаётся необходимая проверка; `[x]` - результат технически проверен. Пользовательская приёмка и публикация отмечаются отдельно. Дальние этапы уточняются перед выполнением по spec; они не расширяют разрешения автоматически.
 
@@ -27,7 +27,7 @@
 - [x] Исправить подтверждённый Worker lifecycle finding с regression terminate/SPA/live reuse; провести paired same-quality замер startup/passive playback. Выполнены 10 baseline pairs 0.3.0; ускорение 0.3.1 не установлено. Cleanup неизвестных файлов не выполнялся.
 - [x] Убрать видимую служебную вкладку в Zen через невидимый background iframe. Реальные OPFS/Worker/queue/downloads и idle disposal проверены; readiness/recovery/SaveAs/parallel/live и async close race имеют meaningful regressions. Fallback во вкладку закрывает только собственный processor tab; реальный forced fallback не заявляется проверенным. Новых разрешений нет.
 - [x] Проверить реальные сценарии нескольких доступных адаптеров, отдельные файлы/ZIP, отмену/повторный запуск/скрытие/переключение вкладок и terminal cleanup. Coub, Rutube, Twitch VOD/live, TikTok и YouTube проверены; ограничения записаны. VK/Звук повторно не проверялись.
-- [~] TDD/regression, обе сборки, конечные файлы/ZIP bytes, wide/narrow UI/keyboard и совокупный внутренний code review завершены; 531 tests и полный pipeline прошли; большой TXT и ZIP проверены через native Zen UI на controlled fixture. [Security diff scan](SECURITY_REVIEW_031.md) завершён: 22 source files, coverage complete для этого diff, 0 reportable findings. Первый managed review и Windows/Linux CI прошли; oversized transcript finding исправлен, его runtime correction проверяется отдельным security diff и bounded managed pass. Предыдущие 296 tests/CI не подменяют новый diff.
+- [~] TDD/regression, обе сборки, конечные файлы/ZIP bytes, wide/narrow UI/keyboard и совокупный внутренний code review завершены; 541 tests и полный pipeline прошли; большой TXT и ZIP проверены через native Zen UI на controlled fixture. [Security diff scan](SECURITY_REVIEW_031.md) завершён: 22 source files, coverage complete для этого diff, 0 reportable findings. Первый managed review и Windows/Linux CI прошли; oversized transcript finding исправлен, его runtime correction проверяется отдельным security diff и bounded managed pass. Предыдущие 296 tests/CI не подменяют новый diff.
 - [ ] Подготовить 0.3.1 с ID `mendosave@mendozie`, matching source/reviewer notes; завершить разрешённый private PR/review/merge и unlisted подписание существующего дополнения. Проверить saved state, подпись/hashes, upgrade/settings/permanent install/full restart. Магазин, публичный release и смена приватности не запрошены.
 
 Наблюдения пользователя: одиночный 480p и пакет 480p+SRT сейчас «вроде всё ок», SRT также; при переключении вкладки файл скачался. Первым проверенным роликом был WiDLJlGI5d0, его особенность не установлена. Старый stall не повторился. Локальные скриншоты отмены и независимый аудит сохраняются в ignored `.local/qa/`; они не включаются в Git.

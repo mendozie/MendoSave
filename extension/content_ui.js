@@ -713,8 +713,15 @@
 
   function normalizeCues(cues) {
     if (!Array.isArray(cues)) return [];
+    if (cues.length > 50000) throw new Error('Превышен лимит строк субтитров');
+    let textLength = 0;
+    for (const cue of cues) {
+      if (typeof cue?.text !== 'string') continue;
+      textLength += cue.text.length;
+      if (cue.text.length > 65536 || textLength > 8 * 1024 ** 2) throw new Error('Превышен лимит текста субтитров');
+    }
     const sorted = cues
-      .filter((cue) => cue?.text?.trim())
+      .filter((cue) => typeof cue?.text === 'string' && cue.text.trim())
       .map((cue) => ({ start: Number(cue.start) || 0, end: Number(cue.end) || 0, text: cue.text.trim() }))
       .sort((a, b) => a.start - b.start);
 
@@ -739,6 +746,7 @@
     return `${lines.join('\r\n').replace(/(\r?\n)+$/, '')}\r\n`;
   }
 
+  const SUBTITLE_OUTPUT_MAX_BYTES = 32 * 1024 ** 2;
   const SUBTITLE_OUTPUTS = Object.freeze({
     srt: { extension: 'srt', mime: 'application/x-subrip', timed: true },
     vtt: { extension: 'vtt', mime: 'text/vtt', timed: true },
@@ -768,10 +776,15 @@
       }
       const content = output.transcript ? response.timedText
         : output.timed ? buildTimedSubtitles(response.cues, output.extension) : response.text;
-      if (typeof content !== 'string' || !content.trim()) throw new Error('Нет доступной расшифровки с реальными таймкодами');
+      if (typeof content !== 'string') throw new Error('Нет доступной расшифровки с реальными таймкодами');
+      // MAIN-world replies remain untrusted. Reject implausible text before
+      // Blob allocation, then check actual UTF-8 bytes before producer/OPFS.
+      if (content.length > SUBTITLE_OUTPUT_MAX_BYTES) throw new Error('Размер текстового файла превышает 32 MiB');
+      if (!content.trim()) throw new Error('Нет доступной расшифровки с реальными таймкодами');
       let filename = `${safeFilename(info.title)} [${language}]${output.transcript ? ' [timed]' : ''}.${output.extension}`;
       const text = `\uFEFF${content}`;
       const blob = new Blob([text], { type: output.mime });
+      if (blob.size > SUBTITLE_OUTPUT_MAX_BYTES) throw new Error('Размер текстового файла превышает 32 MiB');
       // Keep small UTF-8 outputs below both legacy text/data-URL bounds,
       // including percent-encoding expansion. Larger accepted transcripts use
       // the existing owned, chunked path through native download completion.
