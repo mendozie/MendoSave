@@ -2,6 +2,7 @@
   function create({ runtime, document, fetch: fetcher = globalThis.fetch, queue = globalThis.MendoPackageQueue }) {
     let current = null;
     let picker = null;
+    let rememberedSelection = null;
     const interrupted = (code) => {
       const error = new Error(`Сохранение прервано: ${code || 'ошибка браузера'}`);
       if (code === 'USER_CANCELED' || code === 'USER_CANCELLED') { error.name = 'AbortError'; error.cancelled = true; }
@@ -161,50 +162,74 @@
           producer.release();
         }
       },
-      add(menu, { title, source = title, options, close }) {
+      add(menu, { title, source = title, options, close, back }) {
         if (!document || (typeof options !== 'function' && (!Array.isArray(options) || options.length < 2))) return null;
         const opener = document.createElement('button');
         opener.type = 'button'; opener.className = 'mendo-package-open'; opener.textContent = 'Выбрать несколько…';
         opener.addEventListener('click', (event) => {
           event.preventDefault(); event.stopPropagation();
-          if (picker && (current || picker.source === String(source))) { close?.(); picker.show(); return; }
-          picker?.dispose();
+          if (picker && current) { close?.(); picker.show(); return; }
           const choices = typeof options === 'function' ? options() : options;
           if (!Array.isArray(choices) || choices.length < 2) return;
-          const available = choices.map((item, index) => Object.freeze({ id: String(item.id ?? index), label: String(item.label), run: item.run }));
+          const available = choices.map((item, index) => Object.freeze({ id: String(item.id ?? index),
+            compatibilityKey: String(item.compatibilityKey ?? item.id ?? index), group: String(item.group || ''),
+            label: String(item.label), run: item.run }));
+          if (picker?.source === String(source)) {
+            close?.(); picker.refresh(available, title, back); picker.show(); return;
+          }
+          picker?.dispose();
           close?.();
+          let returnToMenu = back;
+          let panel;
           const dialog = document.createElement('dialog');
           dialog.className = 'mendo-package-dialog';
           dialog.setAttribute('aria-label', `Пакет: ${title}`);
           const heading = document.createElement('h2'); heading.textContent = 'Пакет форматов';
           const caption = document.createElement('p'); caption.textContent = title;
+          const header = document.createElement('div'); header.className = 'mendo-package-header';
+          const goBack = document.createElement('button'); goBack.type = 'button'; goBack.dataset.action = 'back'; goBack.textContent = '← Назад';
+          const headingGroup = document.createElement('div'); headingGroup.append(heading, caption);
+          header.append(goBack, headingGroup);
           const list = document.createElement('div'); list.className = 'mendo-package-list';
           const status = document.createElement('p'); status.setAttribute('role', 'status');
           status.setAttribute('aria-live', 'polite'); status.textContent = 'Выберите файлы. Они будут обработаны по очереди.';
           const progress = document.createElement('progress'); progress.max = 1; progress.value = 0;
           progress.setAttribute('aria-label', 'Общий прогресс пакета');
           const actions = document.createElement('div'); actions.className = 'mendo-package-actions';
-          const rows = available.map(item => {
-            const row = document.createElement('label');
-            const input = document.createElement('input'); input.type = 'checkbox'; input.value = item.id;
-            const text = document.createElement('span'); text.textContent = item.label;
-            row.append(input, text); list.append(row);
-            return { item, input, text };
-          });
-          const files = document.createElement('button'); files.type = 'button'; files.dataset.mode = 'files'; files.textContent = 'Отдельные файлы';
-          const zip = document.createElement('button'); zip.type = 'button'; zip.dataset.mode = 'zip'; zip.textContent = 'Один ZIP';
-          const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Закрыть';
+          const makeRows = items => {
+            let previousGroup = '';
+            return items.map(item => {
+              if (item.group && item.group !== previousGroup) {
+                const heading = document.createElement('h3'); heading.className = 'mendo-package-group'; heading.textContent = item.group;
+                list.append(heading);
+              }
+              previousGroup = item.group;
+              const row = document.createElement('label');
+              const input = document.createElement('input'); input.type = 'checkbox'; input.value = item.id;
+              input.checked = rememberedSelection?.source === String(source)
+                && rememberedSelection.choices.get(item.id) === item.compatibilityKey;
+              const text = document.createElement('span'); text.textContent = item.label;
+              row.append(input, text); list.append(row);
+              return { item, input, text };
+            });
+          };
+          let rows = makeRows(available);
+          const files = document.createElement('button'); files.type = 'button'; files.dataset.mode = 'files'; files.textContent = 'Скачать файлы';
+          const zip = document.createElement('button'); zip.type = 'button'; zip.dataset.mode = 'zip'; zip.textContent = 'Скачать ZIP';
+          const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Отменить пакет'; cancel.hidden = true;
           cancel.dataset.action = 'cancel';
           const hide = document.createElement('button'); hide.type = 'button'; hide.textContent = 'Скрыть'; hide.dataset.action = 'hide';
           const resume = document.createElement('button'); resume.type = 'button'; resume.className = 'mendo-package-resume';
           resume.hidden = true; resume.setAttribute('aria-live', 'polite');
           const updateResume = () => { resume.textContent = `Пакет · ${status.textContent.slice(0, 180)}`; };
           const show = () => {
+            if (picker !== panel) return;
             resume.hidden = true;
             if (!dialog.hasAttribute('open')) { if (dialog.show) dialog.show(); else dialog.setAttribute('open', ''); }
             (current ? hide : rows.find(row => row.input.checked)?.input || rows[0]?.input)?.focus();
           };
           const conceal = () => {
+            if (picker !== panel) return;
             dialog.close?.(); dialog.removeAttribute('open');
             updateResume(); resume.hidden = false; resume.focus();
           };
@@ -212,13 +237,34 @@
           resume.addEventListener('click', show);
           const selection = () => rows.filter(row => row.input.checked);
           const update = () => { files.disabled = selection().length === 0; zip.disabled = selection().length < 2; };
-          rows.forEach(row => row.input.addEventListener('change', update)); update();
-          const dispose = () => { dialog.close?.(); dialog.remove(); resume.remove(); picker = null; };
-          picker = { source: String(source), show, dispose };
-          const dismiss = () => { if (current) return; dispose(); opener.focus(); };
+          const bindRows = () => { rows.forEach(row => row.input.addEventListener('change', update)); update(); };
+          const remember = () => { rememberedSelection = { source: String(source),
+            choices: new Map(selection().map(row => [row.item.id, row.item.compatibilityKey])) }; };
+          bindRows();
+          const dispose = () => {
+            if (picker !== panel || current) return;
+            remember(); dialog.close?.(); dialog.remove(); resume.remove(); picker = null;
+          };
+          const refresh = (items, nextTitle, nextBack) => {
+            if (current || picker !== panel) return;
+            remember(); list.replaceChildren(); rows = makeRows(items); bindRows();
+            title = nextTitle; caption.textContent = title; returnToMenu = nextBack;
+            dialog.setAttribute('aria-label', `Пакет: ${title}`);
+            progress.value = 0; status.textContent = 'Выберите файлы. Они будут обработаны по очереди.'; updateResume();
+          };
+          panel = { source: String(source), show, dispose, refresh };
+          picker = panel;
+          const dismiss = async () => {
+            if (current || picker !== panel) return;
+            dispose();
+            const target = await returnToMenu?.();
+            if (target?.isConnected) target.focus();
+            else if (opener.isConnected) opener.focus();
+          };
+          goBack.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); void dismiss(); });
           const abort = async () => {
             const running = current;
-            if (!running || running.controller.signal.aborted) return;
+            if (!running || running.panel !== panel || running.controller.signal.aborted) return;
             running.controller.abort();
             status.textContent = 'Отменяю текущий файл и оставшуюся очередь…';
             updateResume();
@@ -229,18 +275,21 @@
               ...[...running.downloads].map(id => raw({ t: 'mendosave-download-cancel', id })),
             ]);
           };
-          cancel.addEventListener('click', () => { if (current) void abort(); else dismiss(); });
+          cancel.addEventListener('click', () => { if (current) void abort(); });
           dialog.addEventListener('cancel', (e) => { e.preventDefault(); conceal(); });
           dialog.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); conceal(); } });
           const start = async mode => {
-            if (current) return;
+            if (current || picker !== panel) return;
             const selected = selection();
             if (!selected.length || (mode === 'zip' && selected.length < 2)) return;
-            const state = { id: globalThis.crypto.randomUUID(), index: -1, controller: new AbortController(), jobs: new Set(), downloads: new Set(), abort };
+            const state = { id: globalThis.crypto.randomUUID(), index: -1, controller: new AbortController(), jobs: new Set(), downloads: new Set(), abort, panel };
             current = state;
+            const checkState = () => {
+              if (current !== state || picker !== panel || state.controller.signal.aborted) interrupted('USER_CANCELED');
+            };
             progress.value = 0;
             status.textContent = 'Подготавливаю пакет…'; updateResume();
-            files.disabled = true; zip.disabled = true; cancel.disabled = false; cancel.textContent = 'Отменить пакет';
+            files.disabled = true; zip.disabled = true; goBack.disabled = true; cancel.disabled = false; cancel.hidden = false;
             rows.forEach(row => { row.input.disabled = true; row.text.textContent = row.item.label; });
             const showProgress = fraction => {
               if (current !== state || state.controller.signal.aborted) return;
@@ -271,19 +320,21 @@
                 port = runtime.connect?.({ name: `mendosave-package:${state.id}` });
                 port?.onDisconnect.addListener(() => { if (current === state) { state.controller.abort(); status.textContent = 'Связь с обработчиком прервана'; } });
               },
-              async next(index) { state.index = index; requireOk(await producer.send({ t: 'mendosave-package-next', packageId: state.id, index })); },
-              async complete(index) { requireOk(await producer.send({ t: 'mendosave-package-complete', packageId: state.id, index })); selected[index].text.textContent += mode === 'zip' ? ' · подготовлен' : ' · сохранён'; },
-              async finish() { return requireOk(await producer.send({ t: 'mendosave-package-finish', packageId: state.id })); },
+              async next(index) { checkState(); state.index = index; requireOk(await producer.send({ t: 'mendosave-package-next', packageId: state.id, index })); checkState(); },
+              async complete(index) { checkState(); requireOk(await producer.send({ t: 'mendosave-package-complete', packageId: state.id, index })); checkState(); selected[index].text.textContent += mode === 'zip' ? ' · подготовлен' : ' · сохранён'; },
+              async finish() { checkState(); const output = requireOk(await producer.send({ t: 'mendosave-package-finish', packageId: state.id })); checkState(); return output; },
               async cancel(reason) { await state.cancelPromise; if (producer) await producer.send({ t: 'mendosave-package-cancel', packageId: state.id, reason }); },
-              onChange(snapshot) { if (state.controller.signal.aborted) return; state.index = snapshot.index; showProgress(0); status.textContent = snapshot.phase === 'saving'
+              onChange(snapshot) { if (current !== state || picker !== panel || state.controller.signal.aborted) return; state.index = snapshot.index; showProgress(0); status.textContent = snapshot.phase === 'saving'
                 ? (mode === 'zip' ? 'Создаю и сохраняю ZIP…' : 'Завершаю очередь…')
                 : `${snapshot.index + 1}/${selected.length} · ${selected[snapshot.index].item.label}`; updateResume(); },
             });
             runtime.onMessage?.removeListener(listener);
-            current = null;
+            const ownsPanel = current === state && picker === panel;
+            if (current === state) current = null;
             try { port?.disconnect(); } catch (error) {}
             producer?.release();
-            cancel.disabled = false; cancel.textContent = 'Закрыть';
+            if (!ownsPanel) return;
+            cancel.disabled = false; cancel.hidden = true; goBack.disabled = false;
             rows.forEach(row => { row.input.disabled = false; });
             update();
             if (result.phase === 'complete') {
@@ -297,7 +348,8 @@
             updateResume();
           };
           files.addEventListener('click', () => { void start('files'); }); zip.addEventListener('click', () => { void start('zip'); });
-          actions.append(files, zip, hide, cancel); dialog.append(heading, caption, list, status, progress, actions); document.body.append(dialog, resume);
+          const choiceGroup = document.createElement('div'); choiceGroup.className = 'mendo-package-choices'; choiceGroup.append(list, status, progress);
+          actions.append(files, zip, hide, cancel); dialog.append(header, choiceGroup, actions); document.body.append(dialog, resume);
           show();
         });
         menu.append(opener);

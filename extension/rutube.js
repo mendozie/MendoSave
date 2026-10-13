@@ -60,6 +60,7 @@
 
   let downloadInProgress = false;
   let menu;
+  let menuAnchor;
   let toast;
 
   function log(tag, text) {
@@ -350,9 +351,11 @@
     };
   }
 
-  function closeMenu() {
+  function closeMenu(restoreFocus = false) {
     menu?.remove();
     menu = undefined;
+    if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
+    menuAnchor = undefined;
     document.removeEventListener('click', onOutsideClick, true);
   }
 
@@ -365,8 +368,15 @@
     event.stopPropagation();
     if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
+    menuAnchor = document.getElementById(BUTTON_ID);
     menu = document.createElement('div');
     const openedMenu = menu;
+    const videoId = videoIdFromPage();
+    const current = () => {
+      if (menu !== openedMenu) return false;
+      if (videoIdFromPage() !== videoId) { closeMenu(); return false; }
+      return true;
+    };
     menu.className = 'mendosave-rt-menu';
     const heading = document.createElement('div');
     heading.className = 'mendosave-rt-head';
@@ -381,12 +391,11 @@
     document.addEventListener('click', onOutsideClick, true);
 
     try {
-      const videoId = videoIdFromPage();
       if (!videoId) throw new Error('не удалось определить идентификатор видео');
       const options = await fetchPlayOptions(videoId);
-      if (menu !== openedMenu) return;
+      if (!current()) return;
       const master = await fetchText(options.master);
-      if (menu !== openedMenu) return;
+      if (!current()) return;
       const variants = parseMasterPlaylist(master, options.master);
       loading.remove();
       if (options.isLive) {
@@ -411,6 +420,7 @@
           ? ` · ~${Math.round((variant.bandwidth / 8) * options.durationSeconds / 1e6)} МБ` : '';
         item.textContent = `${variant.height}p MP4${size}`;
         item.addEventListener('click', () => {
+          if (!current()) return;
           closeMenu();
           void startDownload(variant, options);
         });
@@ -418,13 +428,21 @@
       }
       if (variants.length > 1) globalThis.MendoPackageUI?.add(menu, {
         title: options.title, source: `rutube:${videoId}`, close: closeMenu,
-        options: variants.map((variant, index) => ({
-          id: `rutube-${index}`, label: `${variant.height}p MP4`,
+        back: async () => {
+          const current = document.getElementById(BUTTON_ID);
+          if (!current?.isConnected) return null;
+          await openMenu({ preventDefault() {}, stopPropagation() {} });
+          return menu?.querySelector('.mendo-package-open') || current;
+        },
+        options: variants.map((variant) => ({
+          id: `rutube-${variant.height}-${variant.bandwidth}`, label: `${variant.height}p MP4`,
+          compatibilityKey: `${variant.height}:${variant.bandwidth}`, group: 'Видео',
           run: () => startDownload(variant, options),
         })),
       });
+      globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-rt-item[role="button"],.mendo-package-open');
     } catch (error) {
-      if (menu !== openedMenu) return;
+      if (!current()) return;
       loading.remove();
       const failed = document.createElement('div');
       failed.className = 'mendosave-rt-item mendosave-rt-muted';

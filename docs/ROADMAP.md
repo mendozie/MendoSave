@@ -1,11 +1,26 @@
 # MendoSave - roadmap
 
 Основание: [PROJECT_SPEC.md](PROJECT_SPEC.md).
-Актуализировано: 11-10-2026.
+Актуализировано: 13-10-2026.
 
 `[ ]` - не начато; `[~]` - выполняется либо остаётся необходимая проверка; `[x]` - результат технически проверен. Пользовательская приёмка и публикация отмечаются отдельно. Дальние этапы уточняются перед выполнением по spec; они не расширяют разрешения автоматически.
 
 ## Текущее состояние
+
+Согласованный [локальный срез 0.3.2](PROJECT_SPEC.md#согласованный-срез-032) подготовлен для ручной приёмки: source binding субтитров, VK modern/async, возврат/focus/keyboard, единые подписи и достоверный popup. Результат - unsigned Firefox dev-кандидат, Chromium ZIP и matching source с manifest/hashes. До нового прямого разрешения после проверки запрещена любая новая публикация в GitHub/Mozilla, включая push, PR/merge, tags, assets и unlisted signing. Постоянные правила автоматической публикации на этот срез не применяются. Подписанная опубликованная версия остаётся 0.3.1.
+
+### Локальный срез 0.3.2
+
+**Рубеж ручной приёмки - 13-10-2026.** При возобновлении все 38 файлов WIP совпали с копией остановки; base `5fea4facdd383444bb0692283393edf35b5f7859`, branch `fix/032-source-and-package-ux`. Старый checkpoint, patch, copies и hashes сохранены в ignored `.local/qa/candidate-032-12-10-2026/SAFE_STOP.md` и `safe-stop/`. Новые результаты находятся в `.local/qa/candidate-032-13-10-2026/`. Финальные correction reviews завершены; дополнительно исправлены миллисекунды SRT, бесконечное ожидание Twitch metadata и классификация `audio_only`. Собственные native browsers остановлены, необходимые профили и доказательства сохранены.
+
+- [x] Согласованы результат, UX и local-only граница; чистый checkout `5fea4fa`, отдельная task branch.
+- [x] Реализованы source binding SRT/plain/timed TXT и современный VK с сохранением legacy. Ready-panel correction прошла independent review 13/13; native Edge подтвердил тройной экспорт и точные SRT milliseconds. Specific legacy DOM reuse сегодня сайт не предоставил - его captured shape и regression evidence отмечены отдельно.
+- [x] Исправлены Back/focus/keyboard, актуальность idle plan и подписи.
+- [x] Финальный runtime: 824/824 tests, lint 0 errors / 17 warnings, обе сборки по 60 файлов, build/dependency/outgoing checks и совокупный review прошли. Native media/subtitles/ZIP bytes, доступные UX controls и wide/narrow screenshots проверены. Непроверенные и отрицательные пути не объявлены успешными; подробности - в отчёте 0.3.2.
+- [x] Локальная поставка: unsigned XPI, Chromium ZIP, matching source, SHA-256/manifest и инструкция отдельного тестового профиля; точный revision фиксируется manifest из чистого локального commit.
+- [ ] Пользователь вручную проверил кандидат и отдельно разрешил следующий шаг. До этого работа останавливается на приёмке.
+
+Сценарии и фактические ограничения 0.3.2 - в [V032_VERIFICATION.md](V032_VERIFICATION.md). Ни один пункт локального среза не разрешает его внешнюю публикацию или подписание.
 
 - Текущий результат: подписанная 0.3.1 и пакеты обоих движков для ручной установки через GitHub Release. Срез 0.3.1 добавляет неблокирующее окно, timed TXT и исправления отмены/progress/processor lifecycle; [проверки](V031_VERIFICATION.md) и [поставка](SIGNING_VERIFICATION_031.md) завершены. Фазы 1-3 сохраняют основу выбора места сохранения, очереди и ZIP; [PHASE3_VERIFICATION.md](PHASE3_VERIFICATION.md) и [PHASE2_CHECKPOINT.md](PHASE2_CHECKPOINT.md) остаются историческими evidence.
 - Выполнено: собственное оформление и общий код двух сборок; отключён upstream updater. Все пути используют общий Save As, включая Page-Blob. Подготовленные ZIP-входы сохраняются для ручного восстановления; sender, вкладка, документ, job и текущий индекс проверяются. Старые durable keys и recovery directory сохранены. Проверенная совместимость находится в [SITE_MATRIX.md](SITE_MATRIX.md).

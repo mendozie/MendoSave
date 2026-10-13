@@ -330,12 +330,16 @@ test('cancellation during host startup, the next item and final ZIP saving unloc
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(ui.running, true);
     assert.equal(inputs.every(input => input.disabled), true);
+    assert.equal(dialog.querySelector('[data-action="back"]').disabled, true, 'pending cleanup cannot return to a new single job');
+    dialog.querySelector('[data-action="back"]').click();
+    assert.ok(dialog.isConnected);
     dialog.querySelector('[data-mode="files"]').click();
     assert.equal(calls.filter(message => message.t === 'mendosave-package-begin').length, 1);
     release();
     while (ui.running) await new Promise(resolve => setImmediate(resolve));
     assert.match(dialog.querySelector('[role="status"]').textContent, /Пакет отменён/);
     assert.equal(inputs.every(input => input.checked && !input.disabled), true);
+    assert.equal(dialog.querySelector('[data-action="back"]').disabled, false);
     assert.equal(dialog.querySelector('[data-mode="zip"]').disabled, false);
     dialog.querySelector('[data-mode="files"]').click();
     while (ui.running) await new Promise(resolve => setImmediate(resolve));
@@ -602,4 +606,138 @@ test('late old runtime responses and progress cannot attach to the restarted pac
   finishNewRun();
   while (ui.running) await new Promise(resolve => setImmediate(resolve));
   assert.equal(listeners.size, 0);
+});
+
+test('Back reconstructs the current source menu and focuses a live opener without starting work', async () => {
+  const { document } = parseHTML('<html><body></body></html>');
+  const packets = [], ran = [];
+  let source = 'material-A', focused;
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+    async sendMessage(message) { packets.push(message); return { ok: true }; },
+  } });
+  const render = () => {
+    const menu = document.createElement('div'); menu.dataset.source = source; document.body.append(menu);
+    const opener = ui.add(menu, { title: 'Same title', source, close() { menu.remove(); },
+      back() { return render(); }, options: ['video', 'audio'].map(id => ({ id, label: `${source} ${id}`,
+        async run() { ran.push(source); return `${id}.file`; } })) });
+    opener.focus = () => { focused = opener; };
+    return opener;
+  };
+  const oldOpener = render(); oldOpener.click();
+  assert.equal(oldOpener.isConnected, false);
+  const back = document.querySelector('[data-action="back"]');
+  assert.ok(back, 'the header provides an explicit return action');
+  assert.equal(back.textContent, '← Назад');
+  assert.equal(document.querySelector('[data-action="cancel"]').hidden, true, 'idle footer has no equal Close action');
+  source = 'material-B'; back.click(); await new Promise(setImmediate);
+  const liveOpener = document.querySelector('.mendo-package-open');
+  assert.ok(liveOpener?.isConnected); assert.ok(focused === liveOpener);
+  assert.equal(liveOpener.parentElement.dataset.source, 'material-B');
+  assert.equal(document.querySelectorAll('dialog').length, 0);
+  assert.equal(document.querySelectorAll('.mendo-package-resume').length, 0);
+  assert.deepEqual(packets, []); assert.deepEqual(ran, []);
+});
+
+test('returning to the picker refreshes idle settings and retains only compatible choices for that source', async () => {
+  const { document } = parseHTML('<html><body></body></html>');
+  let codec = 'original', language = 'en', source = 'A', focus;
+  const ran = [];
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+    async sendMessage() { return { ok: true }; },
+  } });
+  const render = () => {
+    const menu = document.createElement('div'); document.body.append(menu);
+    const opener = ui.add(menu, { title: 'Same title', source, close() { menu.remove(); }, back() { return render(); }, options() {
+      const capturedCodec = codec, capturedLanguage = language;
+      return [
+        { id: 'video', label: capturedCodec, async run() { ran.push(capturedCodec); return 'video.mp4'; } },
+        { id: 'subtitle', compatibilityKey: `subtitle:${capturedLanguage}`, label: capturedLanguage,
+          async run() { ran.push(capturedLanguage); return 'subtitle.txt'; } },
+      ];
+    } });
+    opener.focus = () => { focus = opener; }; return opener;
+  };
+  render().click();
+  for (const input of document.querySelectorAll('input')) { input.checked = true; input.dispatchEvent(new document.defaultView.Event('change')); }
+  document.querySelector('[data-action="back"]')?.click(); await new Promise(setImmediate);
+  assert.ok(document.querySelector('.mendo-package-open'), 'Back returns to single choices');
+  codec = 'H.264/AAC'; language = 'ru'; focus.click();
+  let inputs = [...document.querySelectorAll('input')];
+  assert.equal(inputs[0].checked, true, 'compatible video choice survives refreshed codec settings');
+  assert.equal(Boolean(inputs[1].checked), false, 'a changed subtitle track is a different choice');
+  assert.match(document.querySelector('.mendo-package-list').textContent, /H\.264\/AAC/);
+  document.querySelector('[data-mode="files"]').click();
+  while (ui.running) await new Promise(setImmediate);
+  assert.deepEqual(ran, ['H.264/AAC'], 'the new plan uses current settings');
+  document.querySelector('[data-action="back"]').click(); await new Promise(setImmediate);
+  source = 'B'; render().click(); inputs = [...document.querySelectorAll('input')];
+  assert.ok(inputs.every(input => !input.checked), 'equal titles cannot transfer selection to another source');
+});
+
+test('late queue callbacks cannot replace a newer run status or prepared row', async () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const callbacks = [], calls = [];
+  let finishText, textEntered;
+  const textPending = new Promise(resolve => { finishText = resolve; });
+  const entered = new Promise(resolve => { textEntered = resolve; });
+  const queue = require('../extension/package_queue.js');
+  const ui = create({ document, queue: { run(items, effects) { callbacks.push(effects); return queue.run(items, effects); } }, runtime: {
+    async sendMessage(message) { calls.push(message); return { ok: true }; },
+  } });
+  ui.add(document.getElementById('menu'), { title: 'Clip', options: [
+    { id: 'video', label: 'Video', async run() { return 'video.mp4'; } },
+    { id: 'text', label: 'Text', async run() { textEntered(); await textPending; return 'text.txt'; } },
+  ] });
+  document.querySelector('.mendo-package-open').click();
+  const dialog = document.querySelector('dialog'), inputs = [...dialog.querySelectorAll('input')];
+  const change = (input, checked) => { input.checked = checked; input.dispatchEvent(new document.defaultView.Event('change')); };
+  change(inputs[0], true); dialog.querySelector('[data-mode="files"]').click();
+  while (ui.running) await new Promise(setImmediate);
+  change(inputs[0], false); change(inputs[1], true); dialog.querySelector('[data-mode="files"]').click(); await entered;
+  const status = dialog.querySelector('[role="status"]'), before = status.textContent;
+  callbacks[0].onChange({ phase: 'processing', index: 0 });
+  assert.equal(status.textContent, before, 'a completed run cannot re-publish its old choice');
+  await assert.rejects(callbacks[0].complete(0), { name: 'AbortError' });
+  assert.equal(status.textContent, before);
+  assert.equal(dialog.querySelector('[data-action="back"]').disabled, true);
+  finishText(); while (ui.running) await new Promise(setImmediate);
+  assert.equal(dialog.querySelector('[data-action="back"]').disabled, false);
+  assert.equal(calls.filter(message => message.t === 'mendosave-package-begin').length, 2);
+});
+
+test('Back activation cannot bubble into the freshly restored menu outside-click listener', async () => {
+  const { document } = parseHTML('<html><body></body></html>');
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: { async sendMessage() { return { ok: true }; } } });
+  let liveMenu;
+  const render = () => {
+    const menu = document.createElement('div'); document.body.append(menu); liveMenu = menu;
+    const onOutside = event => { if (!menu.contains(event.target)) { menu.remove(); document.removeEventListener('click', onOutside); } };
+    document.addEventListener('click', onOutside);
+    return ui.add(menu, { title: 'Clip', close() { menu.remove(); document.removeEventListener('click', onOutside); }, back: render,
+      options: ['video', 'audio'].map(id => ({ id, label: id, async run() { return `${id}.file`; } })) });
+  };
+  render().click();
+  document.querySelector('[data-action="back"]').click(); await new Promise(setImmediate);
+  assert.equal(liveMenu.isConnected, true, 'the old Back click cannot dismiss the new menu');
+  assert.equal(document.querySelectorAll('.mendo-package-open').length, 1);
+});
+
+test('format group headings retain choice order and run only checked formats in their original order', async () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const ran = [];
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: { async sendMessage() { return { ok: true }; } } });
+  ui.add(document.getElementById('menu'), { title: 'Clip', options: [
+    ['video-720', 'Видео', '720p'], ['audio-mp3', 'Аудио', 'MP3'], ['sub-srt', 'Субтитры', 'SRT · RU · с таймкодами'],
+  ].map(([id, group, label]) => ({ id, group, label, async run() { ran.push(id); return `${id}.file`; } })) });
+  document.querySelector('.mendo-package-open').click();
+  const list = document.querySelector('.mendo-package-list');
+  assert.deepEqual([...list.querySelectorAll('.mendo-package-group')].map(heading => heading.textContent), ['Видео', 'Аудио', 'Субтитры']);
+  const inputs = [...list.querySelectorAll('input')];
+  assert.deepEqual(inputs.map(input => input.value), ['video-720', 'audio-mp3', 'sub-srt']);
+  for (const input of [inputs[0], inputs[2]]) { input.checked = true; input.dispatchEvent(new document.defaultView.Event('change')); }
+  document.querySelector('[data-mode="files"]').click();
+  while (ui.running) await new Promise(setImmediate);
+  assert.deepEqual(ran, ['video-720', 'sub-srt']);
+  assert.equal(inputs[1].checked, false);
+  assert.equal(list.querySelectorAll('.mendo-package-group').length, 3);
 });

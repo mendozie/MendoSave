@@ -17,16 +17,25 @@
   overflow-wrap: anywhere; text-align: left; cursor: pointer;
 }
 .mendo-package-resume[hidden] { display: none !important; }
-.mendo-package-dialog h2 { font: 600 19px/1.3 system-ui, sans-serif; margin: 0 0 8px; }
+.mendo-package-dialog h2 { font: 600 19px/1.3 system-ui, sans-serif; margin: 0 0 5px; }
 .mendo-package-dialog p { margin: 12px 0; overflow-wrap: anywhere; color: #ced8d1; }
+.mendo-package-header { display: grid; gap: 12px; }
+.mendo-package-header p { margin: 0; }
+.mendo-package-header button { justify-self: start; padding: 2px 0; border: 0; background: transparent; color: #b7ddc6; font: inherit; cursor: pointer; }
+.mendo-package-choices { margin-top: 16px; padding: 12px 0 16px; border-top: 1px solid #34443a; border-bottom: 1px solid #34443a; }
+.mendo-package-choices [role="status"] { font-size: 13px; }
 .mendo-package-list { display: grid; gap: 3px; }
+.mendo-package-group { margin: 9px 5px 1px; color: #a8ccb7; font: 600 12px/1.4 system-ui, sans-serif; }
+.mendo-package-group:first-child { margin-top: 0; }
 .mendo-package-list label { display: flex; align-items: flex-start; gap: 10px; padding: 9px 5px; cursor: pointer; }
 .mendo-package-list span { overflow-wrap: anywhere; }
 .mendo-package-list input { flex: none; width: 17px; height: 17px; margin: 2px 0; accent-color: #35d477; }
 .mendo-package-dialog progress { width: 100%; height: 12px; accent-color: #35d477; }
 .mendo-package-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .mendo-package-actions button { flex: 1 1 120px; padding: 10px; color: #ecfff3; background: #21583b; border: 1px solid #41835d; border-radius: 7px; font: inherit; cursor: pointer; }
-.mendo-package-actions button:last-child { background: #282f2b; border-color: #5b6860; }
+.mendo-package-actions [data-action="hide"] { flex: 0 1 auto; background: #282f2b; border-color: #5b6860; }
+.mendo-package-actions [data-action="cancel"] { background: #3a2727; border-color: #885353; }
+.mendo-package-dialog [hidden] { display: none !important; }
 .mendo-package-dialog button:disabled { opacity: .5; cursor: default; }
 .mendo-package-dialog :focus-visible, .mendo-package-open:focus-visible, .mendo-package-resume:focus-visible { outline: 2px solid #78e4a8; outline-offset: 3px; }
 @media (max-width: 400px) { .mendo-package-dialog { padding: 14px; } .mendo-package-actions button { flex-basis: 100%; } }

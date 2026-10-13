@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "MendoSave",
-  "version": "0.2.0",
-  "description": "Локальное сохранение видео, аудио и субтитров. Разрабатываемая версия.",
+  "version": "0.3.2",
+  "description": "Локальное сохранение видео, аудио и субтитров. Тестовый кандидат для ручной проверки.",
   "permissions": [
     "downloads",
     "offscreen",
@@ -87,6 +87,7 @@
       "js": [
         "package_queue.js",
         "package_ui.js",
+        "menu.js",
         "rutube.js"
       ],
       "css": [
@@ -106,6 +107,7 @@
         "package_queue.js",
         "package_ui.js",
         "settings.js",
+        "menu.js",
         "twitch_ui.js"
       ],
       "css": [
@@ -123,6 +125,7 @@
       "js": [
         "package_queue.js",
         "package_ui.js",
+        "menu.js",
         "coub.js"
       ],
       "css": [
@@ -135,6 +138,17 @@
     },
     {
       "matches": [
+        "https://vkvideo.ru/video_ext.php*",
+        "https://*.vkvideo.ru/video_ext.php*",
+        "https://vk.com/video_ext.php*"
+      ],
+      "js": ["vk_source.js", "vk_bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
         "https://vkvideo.ru/*",
         "https://*.vkvideo.ru/*",
         "https://vk.com/video*",
@@ -143,6 +157,8 @@
       "js": [
         "package_queue.js",
         "package_ui.js",
+        "menu.js",
+        "vk_source.js",
         "vk.js"
       ],
       "css": [
@@ -159,6 +175,7 @@
       "js": [
         "package_queue.js",
         "package_ui.js",
+        "menu.js",
         "zvuk.js"
       ],
       "css": [
@@ -176,6 +193,7 @@
       "js": [
         "package_queue.js",
         "package_ui.js",
+        "menu.js",
         "tiktok.js"
       ],
       "css": [

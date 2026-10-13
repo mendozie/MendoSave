@@ -74,6 +74,7 @@
   const GQL_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
   const SEGMENT_CONCURRENCY = 6;
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
+  const METADATA_TIMEOUT = 30_000;
   // A VOD past this is spooled to disk by the muxer instead of being held in
   // memory, so the old honest refusal at 1.5 GB is gone: the ceiling is now free
   // disk space. Kept only as the hint that decides it up front.
@@ -91,6 +92,7 @@
   let stopReason = '';
   let injectFrame;
   let menu;
+  let menuAnchor;
   let busy = false;
 
   // ---- page kind -----------------------------------------------------------
@@ -130,7 +132,7 @@
 
   // Plain queries, not persisted ones: a persisted query depends on a hash that
   // Twitch rotates, and a rotated hash would break downloads silently.
-  async function gql(query) {
+  async function gql(query, signal) {
     let response;
     try {
       response = await mendoFetch(GQL_URL, {
@@ -138,6 +140,7 @@
         headers: { 'Client-ID': GQL_CLIENT_ID, 'Content-Type': 'application/json' },
         body: JSON.stringify({ query }),
         credentials: 'omit',
+        signal,
       });
     } catch (error) {
       mendoCheck();
@@ -157,7 +160,7 @@
 
   const ACCESS_PARAMS = 'params: { platform: "web", playerBackend: "mediaplayer", playerType: "site" }';
 
-  async function loadClip(slug) {
+  async function loadClip(slug, signal) {
     const data = await gql(`{
       clip(slug: "${slug}") {
         title
@@ -166,7 +169,7 @@
         videoQualities { frameRate quality sourceURL }
         playbackAccessToken(${ACCESS_PARAMS}) { signature value }
       }
-    }`);
+    }`, signal);
     const clip = data.clip;
     if (!clip) throw new Error('клип не найден');
     const token = clip.playbackAccessToken;
@@ -191,11 +194,11 @@
     };
   }
 
-  async function loadVod(id) {
+  async function loadVod(id, signal) {
     const data = await gql(`{
       video(id: "${id}") { title lengthSeconds owner { displayName } }
       videoPlaybackAccessToken(id: "${id}", ${ACCESS_PARAMS}) { signature value }
-    }`);
+    }`, signal);
     const token = data.videoPlaybackAccessToken;
     if (!token?.value) throw new Error('Twitch не выдал токен воспроизведения');
     const master = new URL(`https://usher.ttvnw.net/vod/${id}.m3u8`);
@@ -204,7 +207,7 @@
     master.searchParams.set('player', 'twitchweb');
     master.searchParams.set('sig', token.signature);
     master.searchParams.set('token', token.value);
-    const response = await mendoFetch(master.href, { credentials: 'omit' });
+    const response = await mendoFetch(master.href, { credentials: 'omit', signal });
     if (!response.ok) throw new Error(`плейлист недоступен (HTTP ${response.status})`);
     const qualities = parseMasterPlaylist(await response.text(), response.url || master.href);
     if (!qualities.length) throw new Error('в плейлисте нет ни одной ступени качества');
@@ -431,20 +434,23 @@
     }, 5000);
   }
 
-  function closeMenu() {
+  function closeMenu(restoreFocus = false) {
     document.removeEventListener('keydown', onMenuKeydown, true);
     menu?.remove();
     menu = null;
+    if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
+    menuAnchor = undefined;
   }
 
   function onMenuKeydown(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    closeMenu();
+    closeMenu(true);
   }
 
   function openMenu(button, info) {
     closeMenu();
+    menuAnchor = button;
     menu = document.createElement('div');
     menu.id = MENU_ID;
     const header = document.createElement('div');
@@ -464,12 +470,20 @@
     }
     if (info.qualities.length > 1) globalThis.MendoPackageUI?.add(menu, {
       title: info.title, source: `twitch:${info.kind}:${info.id}`, close: closeMenu,
-      options: info.qualities.map((quality, index) => ({
-        id: `twitch-${index}`, label: quality.label,
+      back: async () => {
+        const current = document.getElementById(BUTTON_ID);
+        if (!current?.isConnected) return null;
+        await openCurrentDownloadMenu(current);
+        return menu?.querySelector('.mendo-package-open') || current;
+      },
+      options: info.qualities.map((quality) => ({
+        id: `twitch-${quality.label}`, label: quality.label, compatibilityKey: quality.label,
+        group: quality.sourceName === 'audio_only' && !quality.height ? 'Аудио' : 'Видео',
         run: () => runDownload(info, quality),
       })),
     });
     document.body.append(menu);
+    globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-twitch-menu-item,.mendo-package-open');
     document.addEventListener('keydown', onMenuKeydown, true);
     const box = button.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -526,17 +540,38 @@
       toast('MendoSave: на этой странице нечего скачивать');
       return;
     }
+    await openCurrentDownloadMenu(button);
+  }
+
+  async function openCurrentDownloadMenu(button) {
+    const sourceHref = location.href, page = pageKind();
+    if (page.kind !== 'clip' && page.kind !== 'vod') return;
     if (busy) return;
     busy = true;
+    const controller = new AbortController();
+    let timer, loadingRevision;
     try {
       toast('MendoSave: читаю данные…', true);
-      const info = page.kind === 'clip' ? await loadClip(page.slug) : await loadVod(page.id);
+      loadingRevision = toast.revision;
+      // Bound the complete metadata read, including response bodies and the VOD
+      // master playlist. A stalled request must release the trigger for retry.
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error('Twitch не ответил за 30 секунд. Повторите попытку.'));
+          controller.abort();
+        }, METADATA_TIMEOUT);
+      });
+      const info = await Promise.race([timeout, page.kind === 'clip'
+        ? loadClip(page.slug, controller.signal) : loadVod(page.id, controller.signal)]);
+      if (location.href !== sourceHref || !button.isConnected) return;
       toast('');
       document.getElementById('mendosave-twitch-toast')?.classList.remove('show');
       openMenu(button, info);
     } catch (error) {
-      toast(`MendoSave: ${String(error?.message || error)}`);
+      if (location.href === sourceHref && button.isConnected) toast(`MendoSave: ${String(error?.message || error)}`);
     } finally {
+      clearTimeout(timer);
+      if (toast.revision === loadingRevision) document.getElementById('mendosave-twitch-toast')?.classList.remove('show');
       busy = false;
     }
   }

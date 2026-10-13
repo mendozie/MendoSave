@@ -83,8 +83,9 @@ async function fixture(site, save, mode = 'video') {
   app.context.MendoPackageUI.add = (_menu, picker) => { app.picker = picker; };
   app.click(app.document.querySelector(button)); await app.settle();
   assert.ok(app.picker, `${site} exposes its existing package formats`);
+  const options = typeof app.picker.options === 'function' ? app.picker.options() : app.picker.options;
   app.context.MendoPackageUI.running = true;
-  return { app, item: app.picker.options.find(select), box: () => app.document.querySelector(toast), timers };
+  return { app, item: options.find(select), box: () => app.document.querySelector(toast), timers };
 }
 
 test('Coub package cancellation sets terminal progress and schedules its dismissal before rethrow', async () => {

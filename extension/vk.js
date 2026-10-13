@@ -1,10 +1,11 @@
 // VK Video adapter (vkvideo.ru, vk.com/video…).
 //
 // The page is a lazy SPA: no <video> exists until playback starts and the HTML
-// carries no media URLs at all. The player's own embed endpoint does —
-// `/video_ext.php?oid=…&id=…` answers with the player payload, and its `files`
-// object holds progressive `mp4_144…mp4_720` plus `dash_sep`, a DASH manifest
-// with video and audio in separate AdaptationSets.
+// carries no media URLs at all. Legacy `/video_ext.php` embeds the player data;
+// its modern bootstrap runs native `video.getEmbed` in a controlled frame.
+// The bundled observer projects only matching metadata, keeping site
+// authentication in that document. Both modes return progressive MP4 files
+// and `dash_sep`, with video and audio in separate AdaptationSets.
 //
 // Two consequences shape everything below:
 //   * a progressive file needs no assembly, so it goes straight to
@@ -77,6 +78,7 @@
   const VIDEO_ID_RE = /\/(?:video|clip)(-?\d+)_(\d+)/;
 
   let menu;
+  let menuRequest;
   let busy = false;
   let toastBox;
 
@@ -132,11 +134,14 @@
   // The payload is HTML with an embedded JSON blob; `files` is pulled out by
   // brace matching rather than by a regex, because the URLs inside carry
   // escaped slashes and their own punctuation.
-  function extractObject(html, key) {
-    const at = html.indexOf(`"${key}"`);
+  function extractObject(html, key, from = 0) {
+    const at = html.indexOf(`"${key}"`, from);
     if (at < 0) return null;
-    const open = html.indexOf('{', at);
-    if (open < 0) return null;
+    let open = at + key.length + 2;
+    while (/\s/.test(html[open] || 'x')) open += 1;
+    if (html[open++] !== ':') return null;
+    while (/\s/.test(html[open] || 'x')) open += 1;
+    if (html[open] !== '{') return null;
     let depth = 0;
     let quoted = false;
     let escaped = false;
@@ -168,36 +173,170 @@
   }
 
   function extractString(html, key) {
-    const match = html.match(new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`));
+    const match = html.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
     if (!match) return '';
     try { return JSON.parse(`"${match[1]}"`); } catch (e) { return ''; }
   }
 
-  async function loadVideo(target) {
+  function legacyVideo(html, ids) {
+    let selected, structured = false, at = -1;
+    for (let count = 0; count < 32; count++) {
+      at = html.indexOf('"response"', at + 1);
+      if (at < 0) break;
+      const response = extractObject(html, 'response', at);
+      if (!Array.isArray(response?.items)) continue;
+      structured = true;
+      if (response.items.length > 32) throw new Error('ответ плеера превышает допустимый размер');
+      selected = response.items.find(value => value && String(value.owner_id) === ids.oid && String(value.id) === ids.id);
+      if (selected) break;
+    }
+    if (!selected && at >= 0 && html.indexOf('"response"', at + 1) >= 0) {
+      throw new Error('ответ плеера превышает допустимый размер');
+    }
+    if (structured && !selected) throw new Error('ответ плеера относится к другому видео');
+    const files = selected ? selected.files : extractObject(html, 'files');
+    if (!files || typeof files !== 'object' || Array.isArray(files)) return null;
+    const durationMatch = html.match(/"duration"\s*:\s*(\d+)/);
+    const fallbackTitle = `video${ids.oid}_${ids.id}`;
+    return { ...ids, files,
+      duration: selected ? Number(selected.duration) || 0 : (durationMatch ? Number(durationMatch[1]) : 0),
+      title: selected ? (selected.title || selected.md_title || fallbackTitle)
+        : (extractString(html, 'md_title') || extractString(html, 'title') || fallbackTitle) };
+  }
+
+  async function readPlayerBody(response, signal) {
+    const limit = globalThis.MendoVKSource?.MAX_RESPONSE_BYTES || 2 * 1024 * 1024;
+    const tooLarge = () => new Error('ответ плеера превышает допустимый размер');
+    if (Number(response.headers.get('content-length')) > limit) {
+      await response.body?.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const buffer = await response.arrayBuffer();
+      signal?.throwIfAborted();
+      if (buffer.byteLength > limit) throw tooLarge();
+      return decodeBody(buffer, response.headers.get('content-type'));
+    }
+    const chunks = [];
+    let total = 0;
+    const abort = () => { reader.cancel().catch(() => {}); };
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        const next = await reader.read();
+        signal?.throwIfAborted();
+        if (next.done) break;
+        total += next.value.byteLength;
+        if (total > limit) { await reader.cancel(); throw tooLarge(); }
+        chunks.push(new Uint8Array(next.value));
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      return decodeBody(bytes.buffer, response.headers.get('content-type'));
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      reader.releaseLock();
+    }
+  }
+
+  function loadNativeVideo(ids, url, signal) {
+    const schema = globalThis.MendoVKSource;
+    if (!schema) throw new Error('не удалось запустить загрузчик штатного плеера');
+    const source = schema.source(location.href);
+    if (!schema.same(source, ids)) throw schema.error('SOURCE_MISMATCH');
+    return new Promise((resolve, reject) => {
+      const frame = document.createElement('iframe');
+      frame.hidden = true;
+      frame.style.display = 'none';
+      frame.setAttribute('aria-hidden', 'true');
+      frame.title = 'MendoSave: данные VK';
+      frame.src = url;
+      const request = { __mendosave_vk_to_player: true, kind: 'request',
+        requestId: crypto.randomUUID().replaceAll('-', '_'), sourceHref: source.href,
+        oid: ids.oid, id: ids.id, frameHref: url };
+      let settled = false, timeout;
+      const finish = (failure, video) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener('message', receive);
+        signal?.removeEventListener('abort', abort);
+        frame.remove();
+        if (failure) reject(failure); else resolve(video);
+      };
+      const abort = () => {
+        const failure = new Error('получение данных отменено'); failure.name = 'AbortError';
+        finish(failure);
+      };
+      const ask = () => {
+        if (settled) return;
+        try { frame.contentWindow?.postMessage(request, location.origin); }
+        catch (failure) { finish(schema.error('PLAYER_UNAVAILABLE')); }
+      };
+      const receive = event => {
+        if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+        const data = event.data;
+        if (!data || data.__mendosave_vk_from_player !== true || data.frameHref !== url) return;
+        if (data.kind === 'ready') { ask(); return; }
+        if (data.kind !== 'result' || data.requestId !== request.requestId
+          || data.sourceHref !== request.sourceHref || data.oid !== ids.oid || data.id !== ids.id) return;
+        if (!schema.same(schema.source(location.href), source) || signal?.aborted) { abort(); return; }
+        try {
+          const fields = new Set(['__mendosave_vk_from_player', 'kind', 'frameHref', 'requestId', 'sourceHref',
+            'oid', 'id', 'video', 'code']);
+          if (Object.keys(data).length !== 8 || Object.keys(data).some(key => !fields.has(key))) {
+            throw schema.error('INVALID_RESPONSE');
+          }
+          if (data.code !== undefined) {
+            if (typeof data.code !== 'string') throw schema.error('INVALID_RESPONSE');
+            throw schema.error(data.code);
+          }
+          const video = schema.video(data.video, ids);
+          const videoFields = new Set(['oid', 'id', 'title', 'duration', 'files']);
+          if (Object.keys(data.video).length !== 5 || Object.keys(data.video).some(key => !videoFields.has(key))) {
+            throw schema.error('INVALID_RESPONSE');
+          }
+          // Serialize only the bounded projection, never unsolicited page data.
+          if (new TextEncoder().encode(JSON.stringify(video)).byteLength > schema.MAX_PROJECTION_BYTES) {
+            throw schema.error('RESPONSE_TOO_LARGE');
+          }
+          finish(null, video);
+        } catch (failure) { finish(failure); }
+      };
+      window.addEventListener('message', receive);
+      signal?.addEventListener('abort', abort, { once: true });
+      frame.addEventListener('load', ask);
+      timeout = setTimeout(() => finish(schema.error('TIMEOUT')), 12_000);
+      if (signal?.aborted) { abort(); return; }
+      document.body.appendChild(frame);
+    });
+  }
+
+  async function loadVideo(target, signal) {
     const ids = videoIdFrom(target) || videoIdFrom(location.pathname);
     if (!ids) throw new Error('не удалось определить видео');
     const url = `${location.origin}/video_ext.php?oid=${encodeURIComponent(ids.oid)}`
       + `&id=${encodeURIComponent(ids.id)}&hd=4&autoplay=0`;
     // With cookies: age-restricted and closed-group videos answer with an error
     // payload otherwise, and the site itself loads the player the same way.
-    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store' });
+    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store', signal });
+    signal?.throwIfAborted();
     if (!response.ok) throw new Error(`страница плеера не открылась (HTTP ${response.status})`);
     // VK still serves this endpoint as windows-1251. Read as UTF-8 the title
     // decodes to replacement characters and the saved file is called
     // "VK - ???????.m4a", so the charset is taken from the response itself.
-    const html = decodeBody(await response.arrayBuffer(), response.headers.get('content-type'));
-    const files = extractObject(html, 'files');
-    if (!files) {
+    const html = await readPlayerBody(response, signal);
+    signal?.throwIfAborted();
+    const legacy = legacyVideo(html, ids);
+    if (!legacy) {
+      if (/window\.isBFF\s*=\s*true\b/.test(html)) return loadNativeVideo(ids, url, signal);
       const reason = extractString(html, 'error_msg') || extractString(html, 'msg');
       throw new Error(reason || 'в ответе плеера нет ссылок на файлы');
     }
-    const durationMatch = html.match(/"duration":(\d+)/);
-    return {
-      ...ids,
-      files,
-      duration: durationMatch ? Number(durationMatch[1]) : 0,
-      title: extractString(html, 'md_title') || extractString(html, 'title') || `video${ids.oid}_${ids.id}`,
-    };
+    return legacy;
   }
 
   function progressiveRungs(files) {
@@ -526,6 +665,8 @@
   // ---- menu ------------------------------------------------------------------
 
   function closeMenu() {
+    menuRequest?.controller.abort();
+    menuRequest = undefined;
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
@@ -610,11 +751,35 @@
     }
   }
 
-  async function openMenu(button, event) {
+  function openMenu(button, event) {
     event.preventDefault();
     event.stopPropagation();
     if (packageRunning()) return;
+    if (menu && menuRequest?.source !== location.href) closeMenu();
     if (menu) { closeMenu(); return; }
+    return showMenu(button);
+  }
+
+  async function loadMenuVideo(request) {
+    const signal = request.controller.signal;
+    let timeout, onAbort;
+    try {
+      return await new Promise((resolve, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        timeout = setTimeout(() => request.controller.abort(globalThis.MendoVKSource?.error('TIMEOUT')
+          || new Error('плеер не ответил вовремя; повторите попытку')), 20_000);
+        loadVideo(request.source, signal).then(resolve, reject);
+      });
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async function showMenu(button, cachedInfo) {
+    if (packageRunning()) return button;
+    closeMenu();
     menu = createElement('div', 'mendosave-vk-menu');
     const heading = createElement('div', 'mendosave-vk-head', `MendoSave v${chrome.runtime.getManifest().version}`);
     const loading = createElement('div', 'mendosave-vk-item mendosave-vk-muted', 'Читаю данные видео…');
@@ -623,9 +788,14 @@
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
 
+    const request = { menu, source: location.href, controller: new AbortController() };
+    menuRequest = request;
+    const ownsMenu = () => menuRequest === request && menu === request.menu
+      && location.href === request.source;
+
     try {
-      const info = await loadVideo(location.href);
-      if (!menu) return;
+      const info = cachedInfo || await loadMenuVideo(request);
+      if (!ownsMenu()) return;
       loading.remove();
       const choices = buildChoices(info);
       if (!choices.length) throw new Error('у этого видео нет доступных файлов');
@@ -640,24 +810,59 @@
         });
         item.append(createElement('span', 'mendosave-vk-text', choice.text));
         if (choice.hint) item.append(createElement('span', 'mendosave-vk-hint', choice.hint));
-        item.addEventListener('click', () => { closeMenu(); void runChoice(info, choice); });
+        item.addEventListener('click', () => {
+          if (!ownsMenu()) { closeMenu(); return; }
+          closeMenu(); void runChoice(info, choice);
+        });
         menu.append(item);
       }
-      if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
+      const opener = choices.length > 1 ? globalThis.MendoPackageUI?.add(menu, {
         title: info.title, source: `vk:${info.oid}_${info.id}`, close: closeMenu,
-        options: choices.map((choice, index) => ({
-          id: `vk-${index}`, label: choice.text,
-          run: () => runChoice(info, choice),
-        })),
-      });
+        back: async () => {
+          schedule();
+          const anchor = playerShadowRoot()?.querySelector(`.${BUTTON_CLASS}`)
+            || document.querySelector(`.${BUTTON_CLASS}`) || (button?.isConnected ? button : null);
+          const current = videoIdFrom(location.href);
+          const reusable = current?.oid === info.oid && current?.id === info.id;
+          return showMenu(anchor, reusable ? info : undefined);
+        },
+        options: () => {
+          if (!ownsMenu()) { closeMenu(); void showMenu(button); return []; }
+          return choices.map(choice => ({
+            id: choice.kind === 'video' ? `vk-video-${choice.rung.height}` : `vk-audio-${choice.audioFormat}`,
+            label: choice.text, group: choice.kind === 'video' ? 'Видео' : 'Аудио',
+            run: () => runChoice(info, choice),
+          }));
+        },
+      }) : null;
+      bindMenu(button);
       positionMenu(button);
+      return opener || button;
     } catch (error) {
-      if (!menu) return;
+      if (!ownsMenu() || error?.name === 'AbortError') return;
       loading.remove();
       menu.append(createElement('div', 'mendosave-vk-item mendosave-vk-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
+      const retry = createElement('button', 'mendosave-vk-item', 'Повторить');
+      retry.type = 'button';
+      retry.setAttribute('role', 'button');
+      retry.addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation();
+        if (ownsMenu()) void showMenu(button);
+      });
+      menu.append(retry);
+      bindMenu(button);
+      positionMenu(button);
       log('menu', `list failed: ${String(error?.message || error)}`);
+      return retry;
     }
+  }
+
+  function bindMenu(button) {
+    globalThis.MendoMenu?.bind(menu, () => {
+      closeMenu();
+      if (button?.isConnected) button.focus();
+    }, '.mendosave-vk-item[role="button"],.mendo-package-open');
   }
 
   function positionMenu(button) {
@@ -794,7 +999,10 @@
   // An interval, not requestAnimationFrame: rAF does not run in a hidden tab,
   // and the SPA re-renders the player on every in-page navigation anyway.
   function schedule() {
-    try { ensureButton(); } catch (error) {}
+    try {
+      if (menuRequest && menuRequest.source !== location.href) closeMenu();
+      ensureButton();
+    } catch (error) {}
   }
   setInterval(schedule, 1000);
   document.addEventListener('visibilitychange', schedule);

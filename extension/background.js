@@ -467,7 +467,7 @@ async function handleMessage(message, sender) {
         referrer: 'https://www.youtube.com/',
       });
       const text = await response.text();
-      return { ok: response.ok, status: response.status, len: text.length, text };
+      return { ok: response.ok, status: response.status, url: response.url, len: text.length, text };
     }
 
     case 'mendosave-register-job':

@@ -13,8 +13,11 @@ const names = new Set(['captionTracks', 'playerResponse', 'pickTrack', 'getTrack
   'getTimedSubtitles', 'timedSubtitleTrackUrl', 'timedSubtitleTrackIdentity', 'decodeTimedCaptionEntities', 'buildTimedTranscriptResult',
   'fetchTimedInnertube', 'decodeTimedTranscriptParams', 'timedTranscriptTuple', 'findTimedTranscriptParams', 'parseTimedInnertube', 'walkTimedMetadata', 'getTimedPanelSubtitles',
   'rememberTimedText', 'snapshotTimedCaptionSource', 'readRememberedTimedCaptions', 'triggerTimedPlayerCaptions', 'timedPlayerTrackMatches', 'inspectFetchResponse', 'isTimedCaptionRequest',
-  'decodeModernTranscriptVideo', 'findModernTranscriptRequest', 'modernTranscriptTrackCurrent', 'parseModernTimedTranscript', 'fetchModernTimedTranscript', 'readOwnedTimedChapters']);
-const flow = declarations.filter((node) => node.type === 'FunctionDeclaration' && names.has(node.id.name))
+  'decodeModernTranscriptVideo', 'findModernTranscriptRequest', 'parseModernTimedTranscript', 'fetchModernTimedTranscript', 'readOwnedTimedChapters',
+  'currentSubtitleSource', 'subtitleSourcesMatch', 'subsAvailable', 'captionResponseTrackMatches', 'nativeDefaultCaptionSelection', 'modernTranscriptAttribution']);
+const flow = declarations.filter((node) => (node.type === 'FunctionDeclaration' && names.has(node.id.name))
+  || (node.type === 'VariableDeclaration' && node.declarations.some((value) => value.id.name === 'subtitleSourceState'))
+  || (node.type === 'ExpressionStatement' && source.slice(...node.range).startsWith("document.addEventListener('yt-navigate-start', () =>")))
   .map((node) => source.slice(...node.range)).join('\n');
 const bridge = declarations.find((node) => node.type === 'ExpressionStatement'
   && source.slice(...node.range).includes("else if (cmd === 'subtitles')"));
@@ -33,6 +36,7 @@ function harness(tracks = [track('ru'), track('en')]) {
   window.__mendosave_captured_timedtext_sources = [];
   let videoId = 'fixture01';
   let reply;
+  let requestSequence = 1;
   const requests = [], proxyRequests = [], fallbacks = [];
   const player = { getPlayerResponse: () => ({ videoDetails: { videoId, lengthSeconds: '10' }, captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } } }) };
   const location = new URL('https://www.youtube.com/watch?v=fixture01');
@@ -52,21 +56,25 @@ function harness(tracks = [track('ru'), track('en')]) {
   vm.runInContext(`const TO_HOOK = '__mendosave_to_hook', FROM_HOOK = '__mendosave_from_hook'; ${source.slice(...bridge.range)}`, context);
   return { context, document, window, tracks, player, requests, proxyRequests, fallbacks,
     navigate(id) { videoId = id; },
-    requestTimed() {
+    request(cmd, payload = {}) {
       return new Promise((resolve) => {
         reply = resolve;
         const event = new window.Event('message');
         event.source = window; event.origin = location.origin;
-        event.data = { __mendosave_to_hook: true, reqId: 1, cmd: 'subtitles', format: 'timed-txt' };
+        event.data = { __mendosave_to_hook: true, reqId: requestSequence++, cmd, ...payload };
         window.dispatchEvent(event);
       });
+    },
+    async requestTimed() {
+      const available = await this.request('subs-available');
+      return this.request('subtitles', { format: 'timed-txt', source: available.source });
     },
   };
 }
 
 test('timed TXT fetches the selected Russian track instead of relabelling an open English transcript', async () => {
   const h = harness();
-  const result = await h.context.getSubtitles(true);
+  const result = await h.context.getSubtitles();
   assert.equal(result.text, 'Русская реплика.');
   assert.equal(result.lang, 'ru');
   assert.equal(h.requests[0].url, h.tracks[0].baseUrl);
@@ -96,7 +104,7 @@ test('timed TXT falls back to a fresh exact attributed Innertube endpoint when t
     return url.includes('/youtubei/') ? { ok: true, text: async () => JSON.stringify(transcriptResponse(params, 'Hello <literal> &amp;\n🙂')) } : { ok: false, status: 403 };
   };
   h.context.sendToBackground = async () => ({ ok: false });
-  const result = await h.context.getSubtitles(true);
+  const result = await h.context.getSubtitles();
   assert.equal(result.text, 'Hello <literal> &amp;\n🙂');
   assert.equal(result.cues[0].start, 1.25);
   assert.equal(result.lang, 'en');
@@ -114,7 +122,7 @@ test('Innertube fallback rejects contradictory selected language or automatic ca
     h.context.sendToBackground = async () => ({ ok: false });
     // The default picker prioritizes Russian; force the exact selected English choice.
     h.context.pickTrack = () => h.tracks[0];
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
   });
 });
 
@@ -130,7 +138,7 @@ test('Innertube endpoint binding rejects old video, unknown selector, mismatchin
     h.window.ytInitialData = { getTranscriptEndpoint: { params: value.params } };
     h.context.fetch = async (url) => { h.requests.push({ url }); return { ok: false, status: 403 }; };
     h.context.sendToBackground = async () => ({ ok: false });
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
     assert.ok(h.requests.every(({ url }) => !url.includes('/youtubei/')));
   });
 });
@@ -144,7 +152,7 @@ test('fresh Innertube fallback preserves exact named manual and automatic track 
       ? { ok: true, text: async () => JSON.stringify(transcriptResponse(params)) }
       : { ok: false, status: 403 };
     h.context.sendToBackground = async () => ({ ok: false });
-    assert.equal((await h.context.getSubtitles(true)).text, 'Actual selected speech');
+    assert.equal((await h.context.getSubtitles()).text, 'Actual selected speech');
   });
 });
 
@@ -158,7 +166,7 @@ test('navigation during fresh Innertube response rejects its old cues', async ()
     return { ok: true, text: async () => JSON.stringify(transcriptResponse(params)) };
   };
   h.context.sendToBackground = async () => ({ ok: false });
-  await assert.rejects(h.context.getSubtitles(true), /Материал.*изменился/);
+  await assert.rejects(h.context.getSubtitles(), /Материал.*изменился/);
 });
 
 test('Innertube parser rejects invalid and missing actual times and bounds metadata/text', () => {
@@ -199,7 +207,7 @@ test('native transcript fallback consumes attributed structured panel cues after
   app.resolveCommand = (value) => { command = value; panel.data = transcriptResponse(params, 'Native selected speech'); };
   h.context.fetch = async () => ({ ok: false, status: 400 });
   h.context.sendToBackground = async () => ({ ok: false });
-  const result = await h.context.getSubtitles(true);
+  const result = await h.context.getSubtitles();
   assert.equal(result.text, 'Native selected speech');
   assert.equal(command.getTranscriptEndpoint.params, params);
 });
@@ -212,7 +220,7 @@ test('native panel requires exact selected footer even when unknown DOM and stru
   h.document.body.append(panel);
   h.context.fetch = async () => ({ ok: false, status: 400 });
   h.context.sendToBackground = async () => ({ ok: false });
-  await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+  await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
 });
 
 test('native fallback reveals the exact continuation panel so on-item-shown transport can load it', async () => {
@@ -228,7 +236,7 @@ test('native fallback reveals the exact continuation panel so on-item-shown tran
   };
   h.context.fetch = async () => ({ ok: false, status: 400 });
   h.context.sendToBackground = async () => ({ ok: false });
-  assert.equal((await h.context.getSubtitles(true)).text, 'Loaded by native shown continuation');
+  assert.equal((await h.context.getSubtitles()).text, 'Loaded by native shown continuation');
   assert.equal(commands[0].changeEngagementPanelVisibilityAction.targetId, 'engagement-panel-searchable-transcript');
   assert.equal(commands[0].changeEngagementPanelVisibilityAction.visibility, 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED');
 });
@@ -240,10 +248,10 @@ test('native player fallback uses the selected full track and accepts only its o
   let chosen;
   h.player.setOption = (_module, _option, value) => {
     chosen = value;
-    h.context.rememberTimedText(payload('Native exact English'), h.tracks[0].baseUrl + '&fmt=json3', { videoId: 'fixture01', playerVideoId: 'fixture01' }, true);
+    h.context.rememberTimedText(payload('Native exact English'), h.tracks[0].baseUrl + '&fmt=json3', h.context.snapshotTimedCaptionSource(), true);
   };
   h.player.getOption = () => chosen;
-  assert.equal((await h.context.getSubtitles(true)).text, 'Native exact English');
+  assert.equal((await h.context.getSubtitles()).text, 'Native exact English');
   assert.equal(chosen.vssId, h.tracks[0].vssId);
   assert.equal(chosen.baseUrl, h.tracks[0].baseUrl);
 });
@@ -261,8 +269,8 @@ test('remembered response provenance rejects mismatching manual/auto, named trac
     const h = harness([track('en', '', 'first'), track('en', '', 'second')]);
     h.context.fetch = async () => ({ ok: false, status: 400 });
     h.context.sendToBackground = async () => ({ ok: false });
-    h.context.rememberTimedText(payload('Unverified caption'), value.url, value.source || { videoId: 'fixture01', playerVideoId: 'fixture01' }, value.ok !== false);
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    h.context.rememberTimedText(payload('Unverified caption'), value.url, value.source || h.context.snapshotTimedCaptionSource(), value.ok !== false);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
   });
 });
 
@@ -272,7 +280,7 @@ test('fetch response observer retains original URL/source proof and keeps legacy
   const snapshot = h.context.snapshotTimedCaptionSource();
   await h.context.inspectFetchResponse({ ok: true, url: h.tracks[0].baseUrl + '&fmt=json3', clone: () => ({ text: async () => raw }) }, h.tracks[0].baseUrl, snapshot);
   assert.equal(h.window.__mendosave_captured_timedtext[0], raw);
-  assert.equal((await h.context.getSubtitles(true)).text, 'Captured original response');
+  assert.equal((await h.context.getSubtitles()).text, 'Captured original response');
   assert.equal(h.requests.length, 0);
   const entry = h.window.__mendosave_captured_timedtext_sources[0];
   assert.equal(entry.url, h.tracks[0].baseUrl + '&fmt=json3');
@@ -283,7 +291,7 @@ test('fetch response observer retains original URL/source proof and keeps legacy
 test('observer classifies actual relative timedtext requests and rejects lookalike URLs', async () => {
   const h = harness([track('en')]), url = '/api/timedtext?v=fixture01&lang=en';
   await h.context.inspectFetchResponse({ ok: true, url: 'https://www.youtube.com' + url, clone: () => ({ text: async () => payload('Relative native response') }) }, url, h.context.snapshotTimedCaptionSource());
-  assert.equal((await h.context.getSubtitles(true)).text, 'Relative native response');
+  assert.equal((await h.context.getSubtitles()).text, 'Relative native response');
   h.window.__mendosave_captured_timedtext_sources = [];
   await h.context.inspectFetchResponse({ ok: true, url: 'https://attacker.test/youtube.com/api/timedtext?v=fixture01&lang=en', clone: () => ({ text: async () => payload('Lookalike response') }) }, 'https://attacker.test/youtube.com/api/timedtext?v=fixture01&lang=en', h.context.snapshotTimedCaptionSource());
   assert.equal(h.context.readRememberedTimedCaptions(h.tracks[0], h.tracks, 'fixture01'), null);
@@ -319,7 +327,7 @@ test('native player must confirm the selected track rather than an unknown or au
     h.context.sendToBackground = async () => ({ ok: false });
     h.player.setOption = () => h.context.rememberTimedText(payload('Unexpected caption'), h.tracks[0].baseUrl, h.context.snapshotTimedCaptionSource(), true);
     h.player.getOption = () => actual;
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
   });
 });
 
@@ -335,7 +343,7 @@ test('same-language distinct tracks cannot fall back to an ambiguous language-on
   const h = harness([track('ru', '', 'first'), track('ru', '', 'second')]);
   h.context.fetch = async (url) => { h.requests.push({ url }); return { ok: !url.includes('sig=fixture'), text: async () => payload('Generic Russian track') }; };
   h.context.sendToBackground = async (message) => { h.proxyRequests.push(message); return { ok: false }; };
-  await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+  await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
   assert.ok(h.requests.every(({ url }) => url === h.tracks[0].baseUrl));
   assert.ok(h.proxyRequests.every(({ url }) => url === h.tracks[0].baseUrl));
 });
@@ -343,7 +351,7 @@ test('same-language distinct tracks cannot fall back to an ambiguous language-on
 test('navigation during a timed track request rejects the old material instead of returning its captions', async () => {
   const h = harness();
   h.context.fetch = async () => { h.navigate('otherVideo'); return { ok: true, text: async () => payload() }; };
-  await assert.rejects(h.context.getSubtitles(true), /Материал.*изменился/);
+  await assert.rejects(h.context.getSubtitles(), /Материал.*изменился/);
 });
 
 test('missing event times are unavailable timed cues rather than invented zero timestamps', async () => {
@@ -351,7 +359,7 @@ test('missing event times are unavailable timed cues rather than invented zero t
   const untimed = JSON.stringify({ events: [{ segs: [{ utf8: 'Untimed caption' }] }] });
   h.context.fetch = async () => ({ ok: true, text: async () => untimed });
   h.context.sendToBackground = async () => ({ ok: true, text: untimed });
-  await assert.rejects(h.context.getSubtitles(true), /реальными таймкодами/);
+  await assert.rejects(h.context.getSubtitles(), /реальными таймкодами/);
 });
 
 test('optional chapter traversal failure delivers actual timed speech with explicit unavailable chapters status', async () => {
@@ -371,7 +379,7 @@ test('timed track choice distinguishes manual captions from automatic captions a
   for (const value of cases) await t.test(value.speech, async () => {
     const h = harness(value.tracks);
     h.context.fetch = async (url) => { h.requests.push({ url }); return { ok: true, text: async () => payload(value.speech) }; };
-    const result = await h.context.getSubtitles(true);
+    const result = await h.context.getSubtitles();
     assert.equal(result.text, value.speech);
     assert.equal(h.requests[0].url, value.tracks[value.selected].baseUrl);
     assert.equal(new URL(h.requests[0].url).searchParams.get('kind') || '', value.tracks[value.selected].kind);
@@ -381,7 +389,7 @@ test('timed track choice distinguishes manual captions from automatic captions a
 test('a unique requested video/language/kind tuple retains direct timedtext fallback', async () => {
   const h = harness([track('ru', 'asr'), track('en')]);
   h.context.fetch = async (url) => { h.requests.push({ url }); return { ok: !url.includes('sig=fixture'), text: async () => payload('Automatic direct track') }; };
-  const result = await h.context.getSubtitles(true);
+  const result = await h.context.getSubtitles();
   assert.equal(result.text, 'Automatic direct track');
   assert.equal(h.requests[1].url, 'https://www.youtube.com/api/timedtext?v=fixture01&lang=ru&kind=asr&fmt=json3');
 });
@@ -389,7 +397,7 @@ test('a unique requested video/language/kind tuple retains direct timedtext fall
 test('exact signed selected track remains usable through background proxy retries', async () => {
   const h = harness([track('ru', '', 'first'), track('ru', '', 'second')]);
   h.context.fetch = async (url, options) => { h.requests.push({ url, credentials: options.credentials }); return { ok: false, status: 403 }; };
-  const result = await h.context.getSubtitles(true);
+  const result = await h.context.getSubtitles();
   assert.equal(result.text, 'Русская реплика.');
   assert.deepEqual(h.requests.map(({ credentials }) => credentials), ['omit', 'include']);
   assert.equal(h.proxyRequests[0].url, h.tracks[0].baseUrl);
@@ -399,7 +407,7 @@ test('failed selected-track requests cannot relabel unknown DOM, player or panel
   const h = harness([track('ru')]);
   h.context.fetch = async (url) => { h.requests.push({ url }); return { ok: false, status: 403 }; };
   h.context.sendToBackground = async (message) => { h.proxyRequests.push(message); return { ok: false }; };
-  await assert.rejects(h.context.getSubtitles(true), /Язык и версия открытой расшифровки не подтверждены/);
+  await assert.rejects(h.context.getSubtitles(), /Язык и версия открытой расшифровки не подтверждены/);
   assert.deepEqual(h.fallbacks, []);
   assert.ok(h.requests.length > 0 && h.proxyRequests.length > 0);
 });
@@ -414,7 +422,7 @@ test('stale, mismatching and translated caption URLs cannot bind a selected orig
   for (const [label, before, after] of variants) await t.test(label, async () => {
     const selected = track('ru'); selected.baseUrl = selected.baseUrl.replace(before, after);
     const h = harness([selected]);
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
     assert.equal(h.requests.length + h.proxyRequests.length, 0);
   });
 });
@@ -423,26 +431,27 @@ test('stale player material and track changes during a request are rejected', as
   await t.test('stale player response', async () => {
     const h = harness();
     h.player.getPlayerResponse = () => ({ videoDetails: { videoId: 'oldVideo' }, captions: { playerCaptionsTracklistRenderer: { captionTracks: h.tracks } } });
-    await assert.rejects(h.context.getSubtitles(true), /подтвердить материал/);
+    await assert.rejects(h.context.getSubtitles(), /подтвердить материал/);
     assert.equal(h.requests.length, 0);
   });
   await t.test('selected track changed', async () => {
     const h = harness();
     h.context.fetch = async () => { h.tracks[0].baseUrl += '&name=changed'; return { ok: true, text: async () => payload() }; };
-    await assert.rejects(h.context.getSubtitles(true), /дорожка субтитров изменилась/);
+    await assert.rejects(h.context.getSubtitles(), /дорожка субтитров изменилась/);
   });
   await t.test('navigate away and return', async () => {
     const h = harness();
     h.context.fetch = async () => { h.document.dispatchEvent(new h.window.Event('yt-navigate-start')); return { ok: true, text: async () => payload() }; };
-    await assert.rejects(h.context.getSubtitles(true), /Материал.*изменился/);
+    await assert.rejects(h.context.getSubtitles(), /Материал.*изменился/);
   });
 });
 
-test('ordinary subtitle path retains its open-DOM behavior', async () => {
+test('ordinary subtitle formats use selected-track attribution instead of relabelling an open DOM transcript', async () => {
   const h = harness();
-  const result = await h.context.getSubtitles(false);
-  assert.equal(result.text, 'English caption');
-  assert.equal(h.requests.length, 0);
+  const result = await h.context.getSubtitles();
+  assert.equal(result.text, 'Русская реплика.');
+  assert.equal(result.lang, 'ru');
+  assert.equal(h.requests[0].url, h.tracks[0].baseUrl);
 });
 
 test('timed JSON segments retain literal text and line breaks without inserted spaces or entity decoding', async () => {
@@ -464,7 +473,7 @@ test('invalid or missing XML/VTT timestamps cannot produce synthetic timed speec
     const h = harness([track('ru')]);
     h.context.fetch = async () => ({ ok: true, text: async () => value });
     h.context.sendToBackground = async () => ({ ok: true, text: value });
-    await assert.rejects(h.context.getSubtitles(true), /реальными таймкодами/);
+    await assert.rejects(h.context.getSubtitles(), /реальными таймкодами/);
   });
 });
 
@@ -566,9 +575,173 @@ function setupModern(h, body = modernResponse()) {
   };
   h.context.sendToBackground = async () => ({ ok: false });
 }
+
+function setupNativeDefaults(h, defaultIndex = 0) {
+  const read = h.player.getPlayerResponse;
+  h.player.getPlayerResponse = () => {
+    const response = read();
+    Object.assign(response.captions.playerCaptionsTracklistRenderer, { defaultAudioTrackIndex: 0,
+      audioTracks: [{ captionTrackIndices: h.tracks.map((_track, index) => index), defaultCaptionTrackIndex: defaultIndex }] });
+    return response;
+  };
+}
+
+test('every subtitle format can use the explicit current native default track among multiple languages', async (t) => {
+  for (const format of ['srt', 'txt', 'timed-txt']) await t.test(format, async () => {
+    const h = harness([track('en'), track('de')]); setupModern(h); setupNativeDefaults(h);
+    h.player.getOption = () => ({});
+    const available = await h.request('subs-available');
+    const result = await h.request('subtitles', { format, source: available.source });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.lang, 'en');
+    assert.equal(result.videoId, 'fixture01');
+    assert.equal(result.text, ' Actual <literal> &amp;\n🙂');
+    assert.equal(result.cues[0].start, 1);
+    assert.equal(result.attribution, 'native-default-caption-track');
+  });
+});
+
+test('native default inference refuses nondefault, missing, malformed and ambiguous native selection metadata', async (t) => {
+  const cases = [
+    ['nondefault selected language', (list) => { list.audioTracks[0].defaultCaptionTrackIndex = 1; }],
+    ['missing audio index', (list) => { delete list.defaultAudioTrackIndex; }],
+    ['invalid audio index', (list) => { list.defaultAudioTrackIndex = -1; }],
+    ['fractional audio index', (list) => { list.defaultAudioTrackIndex = 0.5; }],
+    ['missing caption index', (list) => { delete list.audioTracks[0].defaultCaptionTrackIndex; }],
+    ['invalid caption index', (list) => { list.audioTracks[0].defaultCaptionTrackIndex = 2; }],
+    ['missing referenced track', (list) => { list.audioTracks[0].captionTrackIndices = [1]; }],
+    ['duplicate caption indices', (list) => { list.audioTracks[0].captionTrackIndices = [0, 0]; }],
+    ['foreign caption index', (list) => { list.audioTracks[0].captionTrackIndices = [0, 2]; }],
+    ['empty audio list', (list) => { list.audioTracks = []; }],
+    ['ambiguous exact track', (list, h) => { if (h.tracks.length === 2) h.tracks.push({ ...h.tracks[0] }); list.audioTracks[0].captionTrackIndices = [0, 1, 2]; }],
+  ];
+  for (const [label, mutate] of cases) await t.test(label, async () => {
+    const h = harness([track('en'), track('de')]); setupModern(h); setupNativeDefaults(h);
+    const read = h.player.getPlayerResponse;
+    h.player.getPlayerResponse = () => { const response = read(); mutate(response.captions.playerCaptionsTracklistRenderer, h); return response; };
+    h.player.getOption = () => ({});
+    const available = await h.request('subs-available');
+    const result = await h.request('subtitles', { format: 'srt', source: available.source });
+    assert.equal(result.ok, false);
+    assert.equal(result.text, undefined);
+    assert.ok(h.requests.every(({ url }) => !url.includes('/get_panel')));
+  });
+});
+
+test('native default inference refuses contradictory active CC, translation and response language selectors', async (t) => {
+  const active = [track('de'), track('en', 'asr'), { ...track('en'), name: 'another' },
+    { ...track('en'), translationLanguage: { languageCode: 'de' } }];
+  for (const value of active) await t.test(`active ${value.languageCode}/${value.kind}/${value.name || ''}/${!!value.translationLanguage}`, async () => {
+    const h = harness([track('en'), track('de')]); setupModern(h); setupNativeDefaults(h);
+    h.player.getOption = () => value;
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
+    assert.ok(h.requests.every(({ url }) => !url.includes('/get_panel')));
+  });
+  for (const change of ['language', 'kind', 'translation', 'footer', 'source']) await t.test(`response ${change}`, async () => {
+    const body = modernResponse(), h = harness([track('en'), track('de')]);
+    if (change === 'language') body.captionMetadata = { languageCode: 'de' };
+    if (change === 'kind') body.captionMetadata = { languageCode: 'en', kind: 'asr' };
+    if (change === 'translation') body.translationLanguage = { languageCode: 'de' };
+    if (change === 'footer') body.footer = { transcriptFooterRenderer: { languageMenu: {} } };
+    if (change === 'source') body.content.engagementPanelSectionListRenderer.content.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].macroMarkersPanelItemViewModel.onTap.innertubeCommand.watchEndpoint.videoId = 'oldVideo';
+    setupModern(h, body); setupNativeDefaults(h); h.player.getOption = () => ({});
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
+  });
+});
+
+test('native default metadata participates in the immutable source and response ownership checks', async (t) => {
+  for (const when of ['before request', 'during response', 'active CC changed']) await t.test(when, async () => {
+    const h = harness([track('en'), track('de')]); setupModern(h);
+    let selected = 0, cc = {};
+    const read = h.player.getPlayerResponse;
+    h.player.getPlayerResponse = () => {
+      const response = read();
+      Object.assign(response.captions.playerCaptionsTracklistRenderer, { defaultAudioTrackIndex: 0,
+        audioTracks: [{ captionTrackIndices: [0, 1], defaultCaptionTrackIndex: selected }] });
+      return response;
+    };
+    h.player.getOption = () => cc;
+    const available = await h.request('subs-available'), fetch = h.context.fetch;
+    if (when === 'before request') selected = 1;
+    h.context.fetch = async (url, options) => {
+      if (url.includes('/get_panel')) {
+        if (when === 'during response') selected = 1;
+        if (when === 'active CC changed') cc = track('de');
+      }
+      return fetch(url, options);
+    };
+    const result = await h.request('subtitles', { format: 'srt', source: available.source });
+    assert.equal(result.ok, false);
+    assert.equal(result.text, undefined);
+    if (when === 'before request') assert.equal(h.requests.length, 0);
+  });
+});
+
+function chapterOnlySection(videoId = 'fixture01', startTimeSeconds = 17) {
+  return { itemSectionRenderer: { trackingParams: 'fixture', sectionIdentifier: 'trailing-chapter',
+    header: { macroMarkersPanelItemViewModel: { panelId: 'PAmodern_transcript_view',
+      item: { timelineChapterViewModel: { title: 'Actual final chapter' } },
+      onTap: { innertubeCommand: { watchEndpoint: { videoId, startTimeSeconds } } } } } } };
+}
+
+test('all subtitle formats preserve native speech when the final section contains only a chapter header', async (t) => {
+  for (const format of ['srt', 'txt', 'timed-txt']) await t.test(format, async () => {
+    const h = harness([track('en'), track('de')]), body = modernResponse('fixture01', 'Actual speech');
+    // Captured native schema: the trailing section has trackingParams, header
+    // and sectionIdentifier, with no contents field. It is not a speech row.
+    body.content.engagementPanelSectionListRenderer.content.sectionListRenderer.contents.push(chapterOnlySection());
+    setupModern(h, body); setupNativeDefaults(h); h.player.getOption = () => ({});
+    h.context.video = () => ({ duration: 20 });
+    const available = await h.request('subs-available');
+    const result = await h.request('subtitles', { format, source: available.source });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.cues.length, 1);
+    assert.equal(result.cues[0].start, 1);
+    assert.equal(result.cues[0].text, 'Actual speech');
+    assert.equal(result.text, 'Actual speech');
+    if (format === 'timed-txt') assert.equal(result.timedText, '[00:01] Actual speech\n\n[00:17] Actual final chapter\n\n');
+  });
+});
+
+test('a chapter-only native section still requires a valid owned chapter endpoint and section schema', async (t) => {
+  const cases = [
+    ['foreign owner', (section) => { section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.onTap.innertubeCommand.watchEndpoint.videoId = 'oldVideo'; }],
+    ['wrong panel', (section) => { section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.panelId = 'other-panel'; }],
+    ['missing own endpoint', (section) => { delete section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.onTap; }],
+    ['missing actual start', (section) => { delete section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.onTap.innertubeCommand.watchEndpoint.startTimeSeconds; }],
+    ['negative start', (section) => { section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.onTap.innertubeCommand.watchEndpoint.startTimeSeconds = -1; }],
+    ['non-numeric start', (section) => { section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.onTap.innertubeCommand.watchEndpoint.startTimeSeconds = '17'; }],
+    ['out of range start', (section) => { section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.onTap.innertubeCommand.watchEndpoint.startTimeSeconds = 7 * 86400 + 1; }],
+    ['not a chapter model', (section) => { delete section.itemSectionRenderer.header.macroMarkersPanelItemViewModel.item.timelineChapterViewModel; }],
+    ['missing header', (section) => { delete section.itemSectionRenderer.header; }],
+    ['null contents', (section) => { section.itemSectionRenderer.contents = null; }],
+    ['malformed contents', (section) => { section.itemSectionRenderer.contents = 'unsupported'; }],
+  ];
+  for (const [label, mutate] of cases) await t.test(label, async () => {
+    const h = harness([track('en'), track('de')]), body = modernResponse(), section = chapterOnlySection();
+    mutate(section);
+    body.content.engagementPanelSectionListRenderer.content.sectionListRenderer.contents.push(section);
+    setupModern(h, body); setupNativeDefaults(h); h.player.getOption = () => ({});
+    const available = await h.request('subs-available');
+    const result = await h.request('subtitles', { format: 'srt', source: available.source });
+    assert.equal(result.ok, false);
+    assert.equal(result.text, undefined);
+  });
+});
+
+test('native chapter-only sections cannot produce a successful transcript without speech cues', async () => {
+  const h = harness([track('en'), track('de')]), body = modernResponse();
+  body.content.engagementPanelSectionListRenderer.content.sectionListRenderer.contents = [chapterOnlySection()];
+  setupModern(h, body); setupNativeDefaults(h); h.player.getOption = () => ({});
+  const available = await h.request('subs-available');
+  const result = await h.request('subtitles', { format: 'timed-txt', source: available.source });
+  assert.equal(result.ok, false);
+  assert.equal(result.timedText, undefined);
+});
+
 test('sole automatic track uses a fresh native modern request bound to its video, preserving actual cue text and time', async () => {
   const h = harness([track('en', 'asr')]); setupModern(h);
-  const result = await h.context.getSubtitles(true);
+  const result = await h.context.getSubtitles();
   assert.equal(result.text, ' Actual <literal> &amp;\n🙂');
   assert.equal(result.cues[0].start, 1);
   assert.equal(result.lang, 'en');
@@ -583,12 +756,12 @@ test('modern native inference accepts a sole manual or named track but rejects e
   for (const kind of ['', 'asr']) await t.test(`sole ${kind || 'manual'} named`, async () => {
     const h = harness([track('en', kind, 'original')]); setupModern(h);
     h.player.getOption = () => ({ ...h.tracks[0], name: 'original', translationLanguage: null });
-    assert.equal((await h.context.getSubtitles(true)).attribution, 'unique-native-caption-track');
+    assert.equal((await h.context.getSubtitles()).attribution, 'unique-native-caption-track');
   });
   for (const other of [track('ru'), track('en', 'asr'), track('en', '', 'other')]) await t.test(`additional ${other.languageCode}/${other.kind}/${other.vssId}`, async () => {
     const h = harness([track('en'), other]); setupModern(h);
     h.context.pickTrack = () => h.tracks[0];
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
     assert.equal(h.requests.filter(r => r.url.includes('/get_panel')).length, 0);
   });
 });
@@ -596,7 +769,7 @@ test('modern native inference accepts a sole manual or named track but rejects e
 test('modern inference rejects translated, unknown and contradictory native track metadata', async (t) => {
   for (const actual of [{}, { ...track('en'), translationLanguage: { languageCode: 'de' } }, track('en', 'asr'), { ...track('en'), name: 'other' }]) await t.test(JSON.stringify([actual.languageCode, actual.kind, actual.name, actual.translationLanguage?.languageCode]), async () => {
     const h = harness([track('en')]); setupModern(h); h.player.getOption = () => actual;
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
     assert.equal(h.requests.filter(r => r.url.includes('/get_panel')).length, 0);
   });
 });
@@ -605,7 +778,7 @@ test('modern inference requires the complete current player caption list, not a 
   const h = harness([track('en')]); setupModern(h);
   h.player.getPlayerResponse = () => ({ videoDetails: { videoId: 'fixture01' }, streamingData: {} });
   h.player.getOption = (module, option) => option === 'tracklist' ? h.tracks : { ...h.tracks[0], name: '', translationLanguage: null };
-  await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+  await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
   assert.equal(h.requests.filter(r => r.url.includes('/get_panel')).length, 0);
 });
 
@@ -619,13 +792,13 @@ test('modern response cannot contradict video, language, kind, translation or an
   ];
   for (const [label, mutate] of cases) await t.test(label, async () => {
     const body = modernResponse(); mutate(body); const h = harness([track('en')]); setupModern(h, body);
-    await assert.rejects(h.context.getSubtitles(true), /выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /выбранную дорожку/);
   });
 });
 
 test('modern fallback rejects stale commands, navigation and changed sole track after a fresh response', async (t) => {
   const stale = harness([track('en')]); setupModern(stale); stale.window.ytInitialData = modernRequest('oldVideo');
-  await assert.rejects(stale.context.getSubtitles(true), /выбранную дорожку/);
+  await assert.rejects(stale.context.getSubtitles(), /выбранную дорожку/);
   assert.equal(stale.requests.filter(r => r.url.includes('/get_panel')).length, 0);
   for (const change of ['navigate', 'second track', 'kind', 'name']) await t.test(change, async () => {
     const h = harness([track('en')]); setupModern(h); const fetch = h.context.fetch;
@@ -638,7 +811,7 @@ test('modern fallback rejects stale commands, navigation and changed sole track 
       }
       return fetch(url, options);
     };
-    await assert.rejects(h.context.getSubtitles(true), /изменился|выбранную дорожку/);
+    await assert.rejects(h.context.getSubtitles(), /изменилась|изменился|выбранную дорожку/);
   });
 });
 

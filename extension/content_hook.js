@@ -13,6 +13,14 @@
   const FROM_HOOK = '__mendosave_from_hook';
   let backgroundRequestSequence = 1;
   const backgroundRequests = new Map();
+  const subtitleSourceState = { revision: 0, identity: null };
+  document.addEventListener('yt-navigate-start', () => {
+    subtitleSourceState.revision += 1;
+    subtitleSourceState.identity = null;
+    // A return to the same video must not revive a response from its previous
+    // visit. Requests in flight keep their own immutable source snapshot.
+    window.__mendosave_captured_timedtext_sources = [];
+  });
 
   window.addEventListener('message', (ev) => {
     if (ev.source !== window || ev.origin !== location.origin || !ev.data || ev.data[FROM_UI] !== true) return;
@@ -339,7 +347,11 @@
     return `${u8.length}:${hash >>> 0}`;
   }
   function snapshotTimedCaptionSource() {
-    try { return { videoId: vidId(), playerVideoId: playerResponse()?.videoDetails?.videoId || null }; }
+    try {
+      currentSubtitleSource();
+      return { videoId: vidId(), playerVideoId: playerResponse()?.videoDetails?.videoId || null,
+        sourceRevision: subtitleSourceState.revision };
+    }
     catch (e) { return null; }
   }
 
@@ -360,6 +372,7 @@
     // response receipt, including the material captured at request start.
     if (!ok || typeof text !== 'string' || text.length > 4 * 1024 * 1024
       || typeof rawUrl !== 'string' || rawUrl.length > 8192 || !source?.videoId
+      || !Number.isSafeInteger(source.sourceRevision) || source.sourceRevision !== subtitleSourceState.revision
       || source.playerVideoId !== source.videoId || vidId() !== source.videoId
       || playerResponse()?.videoDetails?.videoId !== source.videoId) return;
     try {
@@ -367,7 +380,7 @@
       if (url.protocol !== 'https:' || !['youtube.com', 'www.youtube.com', 'music.youtube.com'].includes(url.hostname)
         || url.pathname !== '/api/timedtext' || url.searchParams.get('v') !== source.videoId) return;
       const entries = window.__mendosave_captured_timedtext_sources ||= [];
-      entries.push({ url: url.href, text, videoId: source.videoId, playerVideoId: source.playerVideoId });
+      entries.push({ url: url.href, text, videoId: source.videoId, playerVideoId: source.playerVideoId, sourceRevision: source.sourceRevision });
       let bytes = entries.reduce((sum, entry) => sum + (entry.text.length + entry.url.length) * 2, 0);
       while (entries.length > 20 || bytes > 8 * 1024 * 1024) {
         const removed = entries.shift(); bytes -= (removed.text.length + removed.url.length) * 2;
@@ -1974,9 +1987,9 @@
       return false;
     }
   }
-  function availableHeights() {
+  function availableHeights(p = player()) {
     try {
-      return (player().getAvailableQualityLevels() || []).map((quality) => HEIGHT_BY_QUALITY[quality]).filter(Boolean);
+      return (p.getAvailableQualityLevels() || []).map((quality) => HEIGHT_BY_QUALITY[quality]).filter(Boolean);
     } catch (e) { return []; }
   }
   async function lowestAvailableHeight(timeoutMs = 4_000) {
@@ -7326,7 +7339,7 @@
     return null;
   }
 
-  async function fetchCaptionFromTrack(track, requireSelectedTrack = false, tracks = []) {
+  async function fetchCaptionFromTrack(track, requireSelectedTrack = false, tracks = [], sourceCurrent = () => true) {
     const lang = getTrackLang(track);
     const kind = getTrackKind(track);
     const vid = vidId();
@@ -7339,7 +7352,9 @@
     }
     const uniqueTuple = tracks.filter((candidate) => getTrackLang(candidate) === lang && getTrackKind(candidate) === kind).length === 1;
     if (vid && lang && (!requireSelectedTrack || (attributedUrl && uniqueTuple))) {
-      const direct = 'https://www.youtube.com/api/timedtext?v=' + vid + '&lang=' + encodeURIComponent(lang) + (kind ? '&kind=' + encodeURIComponent(kind) : '') + '&fmt=json3';
+      const name = requireSelectedTrack ? timedTranscriptTuple(track, vid)?.[3] : '';
+      const direct = 'https://www.youtube.com/api/timedtext?v=' + vid + '&lang=' + encodeURIComponent(lang)
+        + (kind ? '&kind=' + encodeURIComponent(kind) : '') + (name ? '&name=' + encodeURIComponent(name) : '') + '&fmt=json3';
       candidates.push(direct);
     }
 
@@ -7349,10 +7364,14 @@
     // Strategy 0: use the signed timedtext URL immediately. Do not wait for the
     // player caption module unless every direct request fails.
     for (const u of uniqueCandidates) {
+      if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
       try {
         const r = await fetch(u, { credentials: 'omit' });
+        if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
+        if (requireSelectedTrack && !captionResponseTrackMatches(r, u, track, tracks, vid)) { failLog.push('omit_source_mismatch'); continue; }
         if (r.ok) {
           const text = await r.text();
+          if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
           if (text && text.length > 5) {
             const parsed = tryParse(text, track, requireSelectedTrack);
             if (parsed) return { parsed, diag: 'main_omit len=' + text.length };
@@ -7364,10 +7383,14 @@
 
     // Strategy 1: Fetch from main world with credentials: 'include'
     for (const u of uniqueCandidates) {
+      if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
       try {
         const r = await fetch(u, { credentials: 'include' });
+        if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
+        if (requireSelectedTrack && !captionResponseTrackMatches(r, u, track, tracks, vid)) { failLog.push('include_source_mismatch'); continue; }
         if (r.ok) {
           const text = await r.text();
+          if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
           if (text && text.length > 5) {
             const parsed = tryParse(text, track, requireSelectedTrack);
             if (parsed) return { parsed, diag: 'main_include len=' + text.length };
@@ -7379,7 +7402,10 @@
 
     // Strategy 2: Background proxy fetch
     for (const u of uniqueCandidates) {
+      if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
       const bg = await fetchViaBackground(u);
+      if (!sourceCurrent()) return { parsed: null, diag: 'source-changed' };
+      if (requireSelectedTrack && !captionResponseTrackMatches(bg, u, track, tracks, vid)) { failLog.push('bg_source_mismatch'); continue; }
       if (bg && bg.ok && bg.text && bg.text.length > 5) {
         const parsed = tryParse(bg.text, track, requireSelectedTrack);
         if (parsed) return { parsed, diag: 'bg len=' + bg.text.length };
@@ -7390,6 +7416,17 @@
     }
 
     return { parsed: null, diag: 'all_failed[' + failLog.join(',') + ']' };
+  }
+
+  function captionResponseTrackMatches(response, requestedUrl, track, tracks, videoId) {
+    // Some bridge responses omit a final URL; their original exact request is
+    // the receipt. A returned URL must confirm that redirects kept the track.
+    if (!response?.url) return true;
+    const selected = timedTranscriptTuple(track, videoId), identity = JSON.stringify(selected);
+    const actual = timedTranscriptTuple({ languageCode: getTrackLang(track), kind: getTrackKind(track), baseUrl: response.url }, videoId);
+    if (!selected || !actual || JSON.stringify(actual) !== identity) return false;
+    const unique = tracks.filter((candidate) => JSON.stringify(timedTranscriptTuple(candidate, videoId)) === identity).length === 1;
+    return unique || response.url === requestedUrl;
   }
 
   function timedSubtitleTrackUrl(track, videoId) {
@@ -7587,7 +7624,7 @@
     return cues;
   }
 
-  async function getSubtitles(requireActualTiming = false) {
+  async function getSubtitles(expectedSource = null) {
     const tracks = captionTracks();
     if (!tracks.length) {
       const pr = playerResponse();
@@ -7596,100 +7633,71 @@
     }
     const track = pickTrack(tracks);
     if (!track) throw new Error('субтитры недоступны');
-    if (requireActualTiming) return getTimedSubtitles(track, tracks);
-    const lang = getTrackLang(track);
-    let fetchDiag = '';
-
-    // 0. Instant DOM check: if user already has transcript panel open in DOM
-    const instantCues = extractTranscriptCuesFromDOM();
-    if (instantCues && instantCues.lines && instantCues.lines.length
-      && (!requireActualTiming || instantCues.cues?.length)) {
-      log('subs', 'got ' + instantCues.lines.length + ' lines directly from open DOM panel');
-      const cues = (instantCues.cues && instantCues.cues.length) ? instantCues.cues : buildCuesFromLines(instantCues.lines);
-      closeTranscriptPanelIfOpen();
-      return { text: instantCues.lines.join('\n'), cues: cues, lang: lang };
-    }
-
-    // 1. Primary: the caption track already contains a signed timedtext URL.
-    // This is normally one small request and avoids scanning the full page data.
-    try {
-      const { parsed, diag: d } = await fetchCaptionFromTrack(track);
-      if (d) fetchDiag += d;
-      if (parsed && parsed.lines && parsed.lines.length) {
-        closeTranscriptPanelIfOpen();
-        return { text: parsed.lines.join('\n'), cues: parsed.cues || null, lang: parsed.lang || lang };
-      }
-    } catch (e) { fetchDiag += ' timedtext_err=' + (e && e.message); }
-
-    // 2. Fallback: innertube get_transcript API (modern YouTube)
-    const vid = vidId();
-    const kind = getTrackKind(track);
-    if (vid) {
-      const itRes = await fetchViaInnertube(vid, lang, kind);
-      if (itRes && itRes.parsed && itRes.parsed.lines && itRes.parsed.lines.length) {
-        log('subs', 'got ' + itRes.parsed.lines.length + ' lines via innertube');
-        closeTranscriptPanelIfOpen();
-        return { text: itRes.parsed.lines.join('\n'), cues: itRes.parsed.cues || null, lang: itRes.parsed.lang || lang };
-      }
-      fetchDiag += (itRes && itRes.diag ? itRes.diag : 'innertube=empty') + ' ';
-    }
-
-    // Only failed network paths reach the player-driven fallback, which may
-    // wait up to 1.5 seconds for YouTube to load its caption module.
-    const playerResult = await triggerPlayerCaptions(track);
-    if (playerResult) {
-      closeTranscriptPanelIfOpen();
-      return { text: playerResult.lines.join('\n'), cues: playerResult.cues || null, lang: playerResult.lang || lang };
-    }
-
-    // 3. Last resort: transcript panel scraping
-    const diagSink = [];
-    const panelResult = await getSubtitlesViaPanel(diagSink);
-    if (panelResult?.cues?.length) {
-      closeTranscriptPanelIfOpen();
-      return { text: panelResult.lines.join('\n'), cues: panelResult.cues, lang };
-    }
-
-    // All methods failed — dump diagnostics
-    let dump = '=== transcript buttons ===\n';
-    try {
-      const btns = [...document.querySelectorAll('button, a, tp-yt-paper-button')].filter(b => /transcript|расшифров|транскрипт/i.test((b.getAttribute && (b.getAttribute('aria-label') || '')) || b.textContent || ''));
-      dump += btns.slice(0, 12).map(b => (b.outerHTML || '').slice(0, 300)).join('\n---\n') || '(none found)';
-    } catch (e) { dump += 'err ' + e.message; }
-    dump += '\n=== PAmodern_transcript_view #content (loaded) ===\n';
-    try {
-      const p = [...document.querySelectorAll('ytd-engagement-panel-section-list-renderer')].find(x => (x.getAttribute('target-id') || '').includes('transcript'));
-      const c = p && (p.querySelector('#content') || p);
-      dump += c ? c.outerHTML.slice(0, 3500) : '(panel not found)';
-    } catch (e) { dump += 'err ' + e.message; }
-    const diag = 'track=' + (track.languageCode || '?') + ' kind=' + (track.kind || '?') +
-      ' fetch=[' + fetchDiag + '] panelDiag=[' + diagSink.join(' || ') + ']\n' + dump.slice(0, 4000);
-    throw new Error('не удалось получить субтитры (' + diag + ')');
+    // SRT, plain TXT and timed TXT share the verified source/track path. Plain
+    // DOM text and the old best-effort language fallback cannot prove ownership.
+    return getTimedSubtitles(track, tracks, expectedSource);
   }
 
-  // Timed TXT needs track attribution, not just the language label chosen by
-  // pickTrack. Existing DOM/player transcript text does not provide that proof.
-  async function getTimedSubtitles(track, tracks) {
+  function currentSubtitleSource(track = pickTrack(captionTracks())) {
+    const videoId = vidId(), response = playerResponse(), playerVideoId = response?.videoDetails?.videoId || null;
+    const identity = JSON.stringify([videoId, playerVideoId, track ? timedSubtitleTrackIdentity(track) : null,
+      nativeDefaultCaptionSelection(response).identity]);
+    if (subtitleSourceState.identity !== null && subtitleSourceState.identity !== identity) subtitleSourceState.revision += 1;
+    subtitleSourceState.identity = identity;
+    const languageProof = track && ['languageCode', 'langCode', 'language', 'vssId', 'vss_id']
+      .some((key) => typeof track[key] === 'string' && track[key].length > 0);
+    if (!track || !videoId || playerVideoId !== videoId || !languageProof
+      || typeof getTrackLang(track) !== 'string' || getTrackLang(track).length > 64
+      || typeof getTrackKind(track) !== 'string' || getTrackKind(track).length > 32) return null;
+    const tuple = timedTranscriptTuple(track, videoId);
+    const trackId = JSON.stringify([getTrackLang(track), getTrackKind(track), track.vssId || track.vss_id || '', tuple?.[3] || '']);
+    return Object.freeze({ videoId, lang: getTrackLang(track), trackId, revision: subtitleSourceState.revision });
+  }
+
+  function subtitleSourcesMatch(expected, actual) {
+    return !!expected && !!actual && typeof expected.videoId === 'string' && typeof expected.lang === 'string'
+      && typeof expected.trackId === 'string' && Number.isSafeInteger(expected.revision) && expected.revision >= 0
+      && expected.videoId === actual.videoId && expected.lang === actual.lang
+      && expected.trackId === actual.trackId && expected.revision === actual.revision;
+  }
+
+  // Track attribution is required for every format, independently of the
+  // language label shown by the menu or an already open native transcript.
+  async function getTimedSubtitles(track, tracks, expectedSource = null) {
+    // Copy provider metadata once. A reused player object may be mutated by SPA
+    // navigation while a request is waiting, including the signed track URL.
+    tracks = Object.freeze(tracks.map((candidate) => Object.freeze({ ...candidate })));
+    track = Object.freeze({ ...track });
     const videoId = vidId();
+    const source = currentSubtitleSource(track);
     const identity = timedSubtitleTrackIdentity(track);
     if (!videoId || playerResponse()?.videoDetails?.videoId !== videoId) throw new Error('Не удалось подтвердить материал выбранной дорожки субтитров');
+    if (!source) throw new Error('Не удалось подтвердить язык и выбранную дорожку субтитров');
+    if (expectedSource && !subtitleSourcesMatch(expectedSource, source)) throw new Error('Материал или выбранная дорожка субтитров изменились. Откройте меню заново.');
     let navigated = false;
     const onNavigate = () => { navigated = true; };
+    const sourceCurrent = () => !navigated && subtitleSourcesMatch(source, currentSubtitleSource());
+    const checkSource = () => {
+      if (navigated || vidId() !== videoId || playerResponse()?.videoDetails?.videoId !== videoId) throw new Error('Материал изменился во время получения расшифровки');
+      if (timedSubtitleTrackIdentity(pickTrack(captionTracks()) || {}) !== identity) throw new Error('Выбранная дорожка субтитров изменилась во время получения расшифровки');
+      if (!sourceCurrent()) throw new Error('Материал изменился во время получения расшифровки');
+    };
     document.addEventListener('yt-navigate-start', onNavigate);
     try {
+      checkSource();
       let parsed = readRememberedTimedCaptions(track, tracks, videoId);
-      if (!parsed) ({ parsed } = await fetchCaptionFromTrack(track, true, tracks));
-      if (!parsed && !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId) parsed = await fetchTimedInnertube(track, tracks, videoId);
-      if (!parsed) parsed = await triggerTimedPlayerCaptions(track, tracks, videoId,
-        () => !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId);
-      if (!parsed) parsed = await getTimedPanelSubtitles(track, tracks, videoId,
-        () => !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId);
-      if (!parsed) parsed = await fetchModernTimedTranscript(track, tracks, videoId,
-        () => !navigated && vidId() === videoId && playerResponse()?.videoDetails?.videoId === videoId);
-      if (navigated || vidId() !== videoId || playerResponse()?.videoDetails?.videoId !== videoId) throw new Error('Материал изменился во время получения расшифровки');
-      if (timedSubtitleTrackIdentity(track) !== identity || !captionTracks().some((candidate) => timedSubtitleTrackIdentity(candidate) === identity)) throw new Error('Выбранная дорожка субтитров изменилась во время получения расшифровки');
+      if (!parsed) ({ parsed } = await fetchCaptionFromTrack(track, true, tracks, sourceCurrent));
+      checkSource();
+      if (!parsed) parsed = await fetchTimedInnertube(track, tracks, videoId, sourceCurrent);
+      checkSource();
+      if (!parsed) parsed = await triggerTimedPlayerCaptions(track, tracks, videoId, sourceCurrent);
+      checkSource();
+      if (!parsed) parsed = await getTimedPanelSubtitles(track, tracks, videoId, sourceCurrent);
+      checkSource();
+      if (!parsed) parsed = await fetchModernTimedTranscript(track, tracks, videoId, sourceCurrent);
+      checkSource();
       if (!parsed?.cues?.length) throw new Error('Не удалось получить выбранную дорожку субтитров с реальными таймкодами. Язык и версия открытой расшифровки не подтверждены');
-      return { text: parsed.lines.join('\n'), cues: parsed.cues, lang: getTrackLang(track), videoId,
+      return { text: parsed.lines.join('\n'), cues: parsed.cues, lang: getTrackLang(track), videoId, source,
         ...(parsed.attribution ? { attribution: parsed.attribution } : {}),
         ...(parsed.chapterMetadata ? { chapterMetadata: parsed.chapterMetadata } : {}) };
     } finally {
@@ -7715,7 +7723,8 @@
     }
     for (let index = entries.length - 1; index >= 0; index--) {
       const entry = entries[index];
-      if (entry.videoId !== videoId || entry.playerVideoId !== videoId || (!unique && entry.url !== exactUrl)) continue;
+      if (entry.videoId !== videoId || entry.playerVideoId !== videoId || entry.sourceRevision !== subtitleSourceState.revision
+        || (!unique && entry.url !== exactUrl)) continue;
       const candidate = { languageCode: getTrackLang(track), kind: getTrackKind(track), baseUrl: entry.url };
       if (JSON.stringify(timedTranscriptTuple(candidate, videoId)) !== identity) continue;
       const parsed = tryParse(entry.text, track, true);
@@ -7881,7 +7890,7 @@
     return { cues, lines: cues.map((cue) => cue.text), chapterMetadata: data };
   }
 
-  async function fetchTimedInnertube(track, tracks, videoId) {
+  async function fetchTimedInnertube(track, tracks, videoId, sourceCurrent = () => true) {
     const params = findTimedTranscriptParams(track, tracks, videoId);
     if (!params) return null;
     try {
@@ -7896,10 +7905,12 @@
       const key = getInnertubeCfg('INNERTUBE_API_KEY');
       const url = 'https://www.youtube.com/youtubei/v1/get_transcript' + (key ? '?key=' + encodeURIComponent(key) : '');
       for (const credentials of ['include', 'omit']) {
+        if (!sourceCurrent()) return null;
         const response = await fetch(url, { method: 'POST', credentials, headers, body: JSON.stringify({ context, params }) });
+        if (!sourceCurrent()) return null;
         if (!response.ok) continue;
         const body = await response.text();
-        if (body.length > 8 * 1024 * 1024) return null;
+        if (body.length > 8 * 1024 * 1024 || !sourceCurrent()) return null;
         return parseTimedInnertube(JSON.parse(body), timedTranscriptTuple(track, videoId));
       }
     } catch (e) { return null; }
@@ -7908,9 +7919,8 @@
 
   async function getTimedPanelSubtitles(track, tracks, videoId, sourceCurrent) {
     if (!sourceCurrent()) return null;
-    const params = findTimedTranscriptParams(track, tracks, videoId);
-    if (!params) return null;
     const tuple = timedTranscriptTuple(track, videoId);
+    if (!tuple || tracks.filter((candidate) => JSON.stringify(timedTranscriptTuple(candidate, videoId)) === JSON.stringify(tuple)).length !== 1) return null;
     const read = () => {
       const panels = document.querySelectorAll('ytd-engagement-panel-section-list-renderer');
       if (panels.length > 32) return null;
@@ -7920,8 +7930,12 @@
       }
       return null;
     };
+    // After the first native load the request endpoint can disappear, while
+    // the ready panel retains its exact selected-language continuation proof.
     const existing = read();
     if (existing) return existing;
+    const params = findTimedTranscriptParams(track, tracks, videoId);
+    if (!params) return null;
     const app = document.querySelector('ytd-app');
     if (typeof app?.resolveCommand !== 'function') return null;
     try {
@@ -7947,24 +7961,55 @@
     return null;
   }
 
-  // Modern get_panel has no caption selector. Its native captions can be
-  // attributed by exclusion only when the full current player response lists
-  // exactly one track, with translation off. Never apply this to multi-track
-  // videos, or infer a language from the text, UI locale or CC selection.
-  function modernTranscriptTrackCurrent(track, tracks, videoId) {
+  function nativeDefaultCaptionSelection(response) {
+    const list = response?.captions?.playerCaptionsTracklistRenderer;
+    if (!list || (list.defaultAudioTrackIndex === undefined && list.audioTracks === undefined)) return { present: false, index: null, identity: null };
+    const invalid = { present: true, index: null, identity: 'invalid-native-default' };
+    const captions = list.captionTracks, audio = list.audioTracks, audioIndex = list.defaultAudioTrackIndex;
+    if (!Array.isArray(captions) || !captions.length || captions.length > 200 || !Array.isArray(audio) || !audio.length || audio.length > 32
+      || !Number.isSafeInteger(audioIndex) || audioIndex < 0 || audioIndex >= audio.length) return invalid;
+    const indices = [];
+    for (const entry of audio) {
+      const values = entry?.captionTrackIndices, defaultIndex = entry?.defaultCaptionTrackIndex;
+      if (!Array.isArray(values) || !values.length || values.length > captions.length || new Set(values).size !== values.length
+        || values.some((value) => !Number.isSafeInteger(value) || value < 0 || value >= captions.length)) return invalid;
+      if (defaultIndex !== undefined && (!Number.isSafeInteger(defaultIndex) || !values.includes(defaultIndex))) return invalid;
+      indices.push([values, defaultIndex ?? null]);
+    }
+    const index = audio[audioIndex].defaultCaptionTrackIndex;
+    if (!Number.isSafeInteger(index)) return invalid;
+    return { present: true, index, identity: JSON.stringify([audioIndex, indices]) };
+  }
+
+  // Fresh source-only get_panel responses were observed to keep the explicit
+  // native default caption track when CC changed from English to German. This
+  // fallback infers ownership from that bounded native metadata relationship;
+  // it never guesses a language from text or locale. Contradictory active CC
+  // or response selectors still refuse the export. Without explicit defaults,
+  // retain the stricter sole-track rule.
+  function modernTranscriptAttribution(track, tracks, videoId) {
     const response = playerResponse();
     const completeTracks = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (response?.videoDetails?.videoId !== videoId || !Array.isArray(completeTracks) || completeTracks.length !== 1
-      || tracks.length !== 1 || captionTracks().length !== 1 || !timedTranscriptTuple(track, videoId)
+    const currentTracks = captionTracks(), identity = timedSubtitleTrackIdentity(track);
+    if (response?.videoDetails?.videoId !== videoId || !Array.isArray(completeTracks) || !completeTracks.length || completeTracks.length > 200
+      || completeTracks.length !== tracks.length || currentTracks.length !== tracks.length || !timedTranscriptTuple(track, videoId)
       || !(track.languageCode || track.langCode || track.language || track.vssId || track.vss_id)
-      || timedSubtitleTrackIdentity(tracks[0]) !== timedSubtitleTrackIdentity(track)
-      || timedSubtitleTrackIdentity(completeTracks[0]) !== timedSubtitleTrackIdentity(track)
-      || timedSubtitleTrackIdentity(captionTracks()[0]) !== timedSubtitleTrackIdentity(track)
-      || track.translationLanguage) return false;
+      || completeTracks.some((candidate, index) => timedSubtitleTrackIdentity(candidate) !== timedSubtitleTrackIdentity(tracks[index])
+        || timedSubtitleTrackIdentity(currentTracks[index]) !== timedSubtitleTrackIdentity(tracks[index]))
+      || completeTracks.filter((candidate) => timedSubtitleTrackIdentity(candidate) === identity).length !== 1
+      || track.translationLanguage) return null;
+    const defaults = nativeDefaultCaptionSelection(response);
+    if (defaults.present) {
+      if (defaults.index === null || timedSubtitleTrackIdentity(completeTracks[defaults.index]) !== identity) return null;
+    } else if (completeTracks.length !== 1) return null;
     try {
       const actual = player()?.getOption?.('captions', 'track');
-      return !!actual && !actual.translationLanguage && timedPlayerTrackMatches(actual, track, tracks, videoId);
-    } catch (e) { return false; }
+      if (actual?.translationLanguage) return null;
+      const explicit = actual && (actual.languageCode || actual.langCode || actual.language || actual.vssId || actual.vss_id);
+      if (explicit && !timedPlayerTrackMatches(actual, track, tracks, videoId)) return null;
+      if (!defaults.present && !explicit) return null;
+      return defaults.present ? 'native-default-caption-track' : 'unique-native-caption-track';
+    } catch (e) { return null; }
   }
 
   function decodeModernTranscriptVideo(params) {
@@ -8022,7 +8067,7 @@
     return candidates.size === 1 ? [...candidates][0] : null;
   }
 
-  function parseModernTimedTranscript(data, track, tracks, videoId) {
+  function parseModernTimedTranscript(data, track, tracks, videoId, attribution = 'unique-native-caption-track') {
     const panel = data?.content?.engagementPanelSectionListRenderer;
     if (panel?.identifier?.tag !== 'PAmodern_transcript_view'
       || panel.identifier.surface !== 'ENGAGEMENT_PANEL_SURFACE_WATCH') return null;
@@ -8037,7 +8082,18 @@
       const sections = panel.content?.sectionListRenderer?.contents;
       if (!Array.isArray(sections) || sections.length > 2000) return null;
       for (const section of sections) {
-        const items = section?.itemSectionRenderer?.contents;
+        const renderer = section?.itemSectionRenderer, items = renderer?.contents;
+        if (items === undefined) {
+          // Native transcript sections can end with a chapter header and no
+          // speech contents. Preserve the other real cues; chapters are read
+          // separately and must still carry their own current-video endpoint.
+          const header = renderer?.header?.macroMarkersPanelItemViewModel;
+          const endpoint = header?.onTap?.innertubeCommand?.watchEndpoint;
+          if (header?.panelId !== 'PAmodern_transcript_view' || !header.item?.timelineChapterViewModel
+            || endpoint?.videoId !== videoId || typeof endpoint.startTimeSeconds !== 'number'
+            || !Number.isFinite(endpoint.startTimeSeconds) || endpoint.startTimeSeconds < 0 || endpoint.startTimeSeconds > 7 * 86400) return null;
+          continue;
+        }
         if (!Array.isArray(items) || items.length > 50000) return null;
         for (const item of items) {
           const row = item?.macroMarkersPanelItemViewModel;
@@ -8061,11 +8117,12 @@
     } catch (e) { return null; }
     if (invalid || !cues.length) return null;
     cues.sort((left, right) => left.start - right.start);
-    return { cues, lines: cues.map((cue) => cue.text), attribution: 'unique-native-caption-track', chapterMetadata: panel };
+    return { cues, lines: cues.map((cue) => cue.text), attribution, chapterMetadata: panel };
   }
 
   async function fetchModernTimedTranscript(track, tracks, videoId, sourceCurrent) {
-    if (!sourceCurrent() || !modernTranscriptTrackCurrent(track, tracks, videoId)) return null;
+    const attribution = modernTranscriptAttribution(track, tracks, videoId);
+    if (!sourceCurrent() || !attribution) return null;
     const params = findModernTranscriptRequest(videoId);
     const rawContext = getInnertubeCfg('INNERTUBE_CONTEXT');
     if (!params || !rawContext || typeof rawContext !== 'object') return null;
@@ -8077,8 +8134,8 @@
       });
       if (!response.ok) return null;
       const body = await response.text();
-      if (body.length > 8 * 1024 * 1024 || !sourceCurrent() || !modernTranscriptTrackCurrent(track, tracks, videoId)) return null;
-      return parseModernTimedTranscript(JSON.parse(body), track, tracks, videoId);
+      if (body.length > 8 * 1024 * 1024 || !sourceCurrent() || modernTranscriptAttribution(track, tracks, videoId) !== attribution) return null;
+      return parseModernTimedTranscript(JSON.parse(body), track, tracks, videoId, attribution);
     } catch (e) { return null; }
   }
 
@@ -8121,14 +8178,22 @@
   function subsAvailable() {
     const tracks = captionTracks();
     const track = pickTrack(tracks);
-    return { available: !!track, lang: track ? (track.languageCode || 'txt') : null };
+    const source = currentSubtitleSource(track);
+    let chaptersAvailable = false;
+    if (source) {
+      try {
+        const duration = Number(video()?.duration) || Number(playerResponse()?.videoDetails?.lengthSeconds) || 0;
+        chaptersAvailable = readOwnedTimedChapters(source.videoId, duration).length > 0;
+      } catch (e) {}
+    }
+    return { available: !!source, lang: source?.lang || null, source, chaptersAvailable };
   }
 
   // Codec/bitrate of the best source audio stream, so the UI can offer a true
   // passthrough option (.opus stays .opus) and hide pointless re-encodes.
-  function bestAudioSource() {
+  function bestAudioSource(response = playerResponse()) {
     try {
-      const formats = playerResponse()?.streamingData?.adaptiveFormats;
+      const formats = response?.streamingData?.adaptiveFormats;
       const audio = (Array.isArray(formats) ? formats : [])
         .filter((format) => /^audio\//i.test(format?.mimeType || ''))
         .sort((left, right) => {
@@ -8210,14 +8275,40 @@
       }
       if (cmd === 'info') {
         const p = player();
-        const rawDuration = video() && video().duration;
+        // Title and media belong to this actual player. A caption response may
+        // have switched videos before getVideoData() and the media element do.
+        let metadata = null;
+        try {
+          const data = p?.getVideoData?.();
+          if (data) {
+            const { video_id: nativeVideoId, videoId: alternateVideoId, title, isLive: dataIsLive } = data;
+            metadata = Object.freeze({
+              videoId: typeof nativeVideoId === 'string' && nativeVideoId ? nativeVideoId
+                : (typeof alternateVideoId === 'string' && alternateVideoId ? alternateVideoId : null),
+              title: typeof title === 'string' ? title : '',
+              isLive: Boolean(dataIsLive),
+            });
+          }
+        } catch (e) {}
+        const media = p?.querySelector('video') || document.querySelector('video');
+        const rawDuration = media?.duration;
         let dur = rawDuration;
         if (!isFinite(dur) || dur <= 0) dur = 0;
-        let isLive = rawDuration === Infinity;
-        try { isLive = isLive || Boolean(p?.getVideoData?.()?.isLive); } catch (e) {}
+        const isLive = rawDuration === Infinity || Boolean(metadata?.isLive);
+        const heights = availableHeights(p);
+        let ownedResponse = null;
+        try {
+          const response = playerResponse();
+          if (metadata?.videoId && response?.videoDetails?.videoId === metadata.videoId) ownedResponse = response;
+        } catch (e) {}
         let musicVideoType = '';
-        try { musicVideoType = String(playerResponse()?.videoDetails?.musicVideoType || ''); } catch (e) {}
-        const resp = { ok: true, videoId: vidId(), title: (p && p.getVideoData && p.getVideoData().title) || document.title.replace(/ - YouTube(?: Music)?$/, ''), duration: dur, heights: availableHeights(), isLive, liveRecording: Boolean(store.liveSession), audioSource: bestAudioSource(), musicVideoType };
+        try { musicVideoType = String(ownedResponse?.videoDetails?.musicVideoType || ''); } catch (e) {}
+        const audioSource = bestAudioSource(ownedResponse);
+        currentSubtitleSource();
+        const resp = { ok: true, videoId: vidId(), playerVideoId: metadata?.videoId || null,
+          sourceRevision: subtitleSourceState.revision,
+          title: metadata?.title || metadata?.videoId || document.title.replace(/ - YouTube(?: Music)?$/, ''),
+          duration: dur, heights, isLive, liveRecording: Boolean(store.liveSession), audioSource, musicVideoType };
         const ctx = isShortsPage() ? 'shorts'
           : (location.pathname.indexOf('/embed/') === 0 ? 'embed' : 'page');
         log('info', JSON.stringify({ ctx, dur, heights: resp.heights, hasPlayer: !!p, isLive }));
@@ -9038,17 +9129,19 @@
         }
       } else if (cmd === 'subtitles') {
         const timedTranscript = format === 'timed-txt';
-        const res = await getSubtitles(timedTranscript);
+        if (!ev.data.source || typeof ev.data.source !== 'object') throw new Error('Не удалось подтвердить исходный материал субтитров. Откройте меню заново.');
+        const res = await getSubtitles(ev.data.source);
+        if (!subtitleSourcesMatch(res.source, currentSubtitleSource())) throw new Error('Материал изменился перед подготовкой субтитров');
         let timedResult;
         if (timedTranscript) {
           const duration = Number(video()?.duration) || Number(playerResponse()?.videoDetails?.lengthSeconds) || 0;
           timedResult = buildTimedTranscriptResult(res, duration);
         }
-        reply({ ok: true, done: true, text: res.text, cues: res.cues || null, lang: res.lang, ...(timedTranscript ? timedResult : {}),
-          ...(timedTranscript && res.attribution ? { attribution: res.attribution } : {}) });
+        reply({ ok: true, done: true, videoId: res.videoId, source: res.source, text: res.text, cues: res.cues || null, lang: res.lang, ...(timedTranscript ? timedResult : {}),
+          ...(res.attribution ? { attribution: res.attribution } : {}) });
       } else if (cmd === 'subs-available') {
         const a = subsAvailable();
-        reply({ ok: true, available: a.available, lang: a.lang });
+        reply({ ok: true, ...a });
       }
     } catch (e) {
       reply({ ok: false, error: String((e && e.message) || e), details: e?.details });

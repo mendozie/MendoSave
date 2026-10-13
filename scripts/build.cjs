@@ -12,7 +12,7 @@ for (const target of ['firefox', 'chromium']) {
   const manifest = structuredClone(original);
   manifest.name = 'MendoSave';
   manifest.version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-  manifest.description = 'Локальное сохранение видео, аудио и субтитров. Разрабатываемая версия.';
+  manifest.description = original.description;
   manifest.host_permissions = manifest.host_permissions.filter((host) => !/github/.test(host));
   if (target === 'firefox') {
     manifest.permissions = manifest.permissions.filter((permission) => permission !== 'offscreen');

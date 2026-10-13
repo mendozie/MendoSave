@@ -82,6 +82,7 @@
   const PLAYER_ID = /xgwrapper-(?:\d+-)?(\d{6,})/;
 
   let menu;
+  let menuAnchor;
   let busy = false;
   let toastBox;
 
@@ -624,9 +625,11 @@
 
   // ---- menu ------------------------------------------------------------------
 
-  function closeMenu() {
+  function closeMenu(restoreFocus = false) {
     menu?.remove();
     menu = undefined;
+    if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
+    menuAnchor = undefined;
     document.removeEventListener('click', onOutsideClick, true);
     document.removeEventListener('keydown', onMenuKeydown, true);
   }
@@ -634,7 +637,7 @@
   function onMenuKeydown(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    closeMenu();
+    closeMenu(true);
   }
 
   function onOutsideClick(event) {
@@ -693,7 +696,15 @@
     event.stopPropagation();
     if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
+    menuAnchor = button;
     menu = createElement('div', 'mendosave-tiktok-menu');
+    const openedMenu = menu, sourceHref = location.href;
+    const rail = button.closest(RAIL_SELECTOR);
+    const current = () => {
+      if (menu !== openedMenu) return false;
+      if (location.href !== sourceHref || (rail && entryForRail(rail)?.id !== entry.id)) { closeMenu(); return false; }
+      return true;
+    };
     menu.append(createElement('div', 'mendosave-tiktok-head',
       `MendoSave v${chrome.runtime.getManifest().version}`));
     const loading = createElement('div', 'mendosave-tiktok-item mendosave-tiktok-muted', 'Читаю данные видео…');
@@ -705,7 +716,7 @@
 
     try {
       const info = await loadItem(entry.id, entry.href);
-      if (!menu) return;
+      if (!current()) return;
       entry.info = info;
       loading.remove();
       menu.append(createElement('div', 'mendosave-tiktok-menu-note',
@@ -729,21 +740,35 @@
           () => void runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }));
       }
       const options = info.rungs.map((rung, index) => ({
-        id: `tiktok-video-${index}`, label: `Видео · ${rung.label}`,
+        id: `tiktok-video-${encodeURIComponent(rung.gear)}-${rung.bitrate}-${rung.width}-${rung.pixelHeight}-${rung.size}`,
+        label: `Видео · ${rung.label}`,
+        compatibilityKey: JSON.stringify([rung.gear, rung.bitrate, rung.width, rung.pixelHeight, rung.size]), group: 'Видео',
         run: () => runChoice(entry, { kind: 'video', rung }),
       }));
       if (info.music.url) options.push(
-        { id: 'tiktok-sound-original', label: 'Только звук · исходный файл',
+        { id: 'tiktok-sound-original', label: 'Только звук · исходный файл', group: 'Аудио',
           run: () => runChoice(entry, { kind: 'sound', audioFormat: 'original' }) },
-        { id: 'tiktok-sound-mp3', label: 'Только звук · MP3',
+        { id: 'tiktok-sound-mp3', label: 'Только звук · MP3', group: 'Аудио',
           run: () => runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }) },
       );
       if (options.length > 1) globalThis.MendoPackageUI?.add(menu, {
         title: info.title || info.id, source: `tiktok:${info.id || entry.id}`, options, close: closeMenu,
+        back: async () => {
+          const currentId = videoIdFrom(location.pathname);
+          const rails = [...document.querySelectorAll(RAIL_SELECTOR)];
+          const rail = rails.find((candidate) => entryForRail(candidate)?.id === currentId)
+            || (!currentId && button.isConnected ? button.closest(RAIL_SELECTOR) : null);
+          const current = rail?.querySelector(`.${BUTTON_CLASS}`);
+          const currentEntry = rail && entryForRail(rail);
+          if (!current?.isConnected || !currentEntry) return null;
+          await openMenu(current, currentEntry, { preventDefault() {}, stopPropagation() {} });
+          return menu?.querySelector('.mendo-package-open') || current;
+        },
       });
+      globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-tiktok-item[role="button"],.mendo-package-open');
       positionMenu(button);
     } catch (error) {
-      if (!menu) return;
+      if (!current()) return;
       loading.remove();
       menu.append(createElement('div', 'mendosave-tiktok-item mendosave-tiktok-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
@@ -804,7 +829,10 @@
     button.title = 'Скачать видео (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
-    button.addEventListener('click', (event) => { void openMenu(button, entry, event); });
+    button.addEventListener('click', (event) => {
+      const currentEntry = entryForRail(button.closest(RAIL_SELECTOR));
+      if (currentEntry) void openMenu(button, currentEntry, event);
+    });
     rail.insertBefore(button, rail.firstElementChild);
   }
 
