@@ -294,7 +294,16 @@ type SampleEncryptionAuxInfo = {
 
 const MENDO_MAX_EXPANDED_MP4_SAMPLES = 1_000_000;
 
+function mendoClaimMp4Table(demuxer: IsobmffDemuxer, count: number) {
+	if (!Number.isSafeInteger(count) || count < 0
+		|| count > MENDO_MAX_EXPANDED_MP4_SAMPLES * 4 - demuxer.mendoMetadataEntries) {
+		throw new Error("MP4 table metadata limit");
+	}
+	demuxer.mendoMetadataEntries += count;
+}
+
 export class IsobmffDemuxer extends Demuxer {
+	mendoMetadataEntries = 0;
 	reader: Reader;
 	moovSlice: FileSlice | null = null;
 
@@ -742,6 +751,7 @@ export class IsobmffDemuxer extends Demuxer {
 					this.reader,
 					track.encryptionInfo,
 					trackData.encryptionAuxInfo,
+					this,
 				);
 
 				for (let i = 0; i < Math.min(trackData.samples.length, entries.length); i++) {
@@ -1775,6 +1785,7 @@ export class IsobmffDemuxer extends Demuxer {
 				slice.skip(4); // Version + flags
 
 				const entryCount = readU32Be(slice);
+				mendoClaimMp4Table(this, entryCount);
 
 				let currentIndex = 0;
 				let currentTimestamp = 0;
@@ -1808,6 +1819,7 @@ export class IsobmffDemuxer extends Demuxer {
 				slice.skip(1 + 3); // Version + flags
 
 				const entryCount = readU32Be(slice);
+				mendoClaimMp4Table(this, entryCount);
 
 				let sampleIndex = 0;
 				for (let i = 0; i < entryCount; i++) {
@@ -1838,6 +1850,7 @@ export class IsobmffDemuxer extends Demuxer {
 
 				const sampleSize = readU32Be(slice);
 				const sampleCount = readU32Be(slice);
+				mendoClaimMp4Table(this, sampleSize === 0 ? sampleCount : 1);
 
 				if (sampleSize === 0) {
 					for (let i = 0; i < sampleCount; i++) {
@@ -1866,6 +1879,7 @@ export class IsobmffDemuxer extends Demuxer {
 				if (![4, 8, 16].includes(fieldSize)) throw new Error("Invalid MP4 compact sample width");
 				const sampleCount = readU32Be(slice);
 
+				mendoClaimMp4Table(this, sampleCount);
 				const bytes = readBytes(slice, Math.ceil(sampleCount * fieldSize / 8));
 				const bitstream = new Bitstream(bytes);
 
@@ -1890,6 +1904,7 @@ export class IsobmffDemuxer extends Demuxer {
 				track.sampleTable.keySampleIndices = [];
 
 				const entryCount = readU32Be(slice);
+				mendoClaimMp4Table(this, entryCount + 1);
 				for (let i = 0; i < entryCount; i++) {
 					const sampleIndex = readU32Be(slice) - 1; // Convert to 0-indexed
 					track.sampleTable.keySampleIndices.push(sampleIndex);
@@ -1915,6 +1930,7 @@ export class IsobmffDemuxer extends Demuxer {
 				slice.skip(4);
 
 				const entryCount = readU32Be(slice);
+				mendoClaimMp4Table(this, entryCount + track.sampleTable.sampleToChunk.length);
 
 				for (let i = 0; i < entryCount; i++) {
 					const startChunkIndex = readU32Be(slice) - 1; // Convert to 0-indexed
@@ -1955,6 +1971,7 @@ export class IsobmffDemuxer extends Demuxer {
 				slice.skip(4); // Version + flags
 
 				const entryCount = readU32Be(slice);
+				mendoClaimMp4Table(this, entryCount);
 
 				for (let i = 0; i < entryCount; i++) {
 					const chunkOffset = readU32Be(slice);
@@ -1975,6 +1992,7 @@ export class IsobmffDemuxer extends Demuxer {
 				slice.skip(4); // Version + flags
 
 				const entryCount = readU32Be(slice);
+				mendoClaimMp4Table(this, entryCount);
 
 				for (let i = 0; i < entryCount; i++) {
 					const chunkOffset = readU64Be(slice);
@@ -2037,6 +2055,7 @@ export class IsobmffDemuxer extends Demuxer {
 				const readSampleNum = functions[lengthSizeOfSampleNum]!;
 
 				const numberOfEntries = readU32Be(slice);
+				mendoClaimMp4Table(this, numberOfEntries + track.fragmentLookupTable.length);
 				for (let i = 0; i < numberOfEntries; i++) {
 					const time = version === 1 ? readU64Be(slice) : readU32Be(slice);
 					const moofOffset = version === 1 ? readU64Be(slice) : readU32Be(slice);
@@ -2055,15 +2074,13 @@ export class IsobmffDemuxer extends Demuxer {
 				track.fragmentLookupTable.sort((a, b) => a.timestamp - b.timestamp);
 
 				// Remove multiple entries for the same time
-				for (let i = 0; i < track.fragmentLookupTable.length - 1; i++) {
-					const entry1 = track.fragmentLookupTable[i]!;
-					const entry2 = track.fragmentLookupTable[i + 1]!;
-
-					if (entry1.timestamp === entry2.timestamp) {
-						track.fragmentLookupTable.splice(i + 1, 1);
-						i--;
+				let write = 0;
+				for (const entry of track.fragmentLookupTable) {
+					if (write === 0 || track.fragmentLookupTable[write - 1]!.timestamp !== entry.timestamp) {
+						track.fragmentLookupTable[write++] = entry;
 					}
 				}
+				track.fragmentLookupTable.length = write;
 			}; break;
 
 			case 'moof': {
@@ -2151,7 +2168,11 @@ export class IsobmffDemuxer extends Demuxer {
 					break;
 				}
 
-				const psshBox = parsePsshBoxContents(readBytes(slice, boxInfo.contentSize));
+				const contents = readBytes(slice, boxInfo.contentSize);
+				const keyCount = contents[0]! > 0 && contents.length >= 24
+					? toDataView(contents).getUint32(20) : 0;
+				mendoClaimMp4Table(this, keyCount + 1);
+				const psshBox = parsePsshBoxContents(contents);
 
 				if (this.currentFragment) {
 					this.currentFragment.psshBoxes.push(psshBox);
@@ -2367,6 +2388,7 @@ export class IsobmffDemuxer extends Demuxer {
 
 				const defaultSampleInfoSize = readU8(slice);
 				const sampleCount = readU32Be(slice);
+				mendoClaimMp4Table(this, sampleCount);
 
 				let sampleSizes: Uint8Array | null = null;
 				if (defaultSampleInfoSize === 0 && sampleCount > 0) {
@@ -2438,6 +2460,7 @@ export class IsobmffDemuxer extends Demuxer {
 				const ivSize = track.encryptionInfo.defaultPerSampleIvSize;
 				assert(ivSize !== null);
 
+				mendoClaimMp4Table(this, Math.min(sampleCount, trackData.samples.length));
 				for (let i = 0; i < Math.min(sampleCount, trackData.samples.length); i++) {
 					// Normalize the IV to 16 bytes so downstream code can assume a full-length buffer. For CTR with
 					// an 8-byte per-sample IV the lower 8 bytes are zero (that's the CENC spec's block counter start);
@@ -2452,6 +2475,7 @@ export class IsobmffDemuxer extends Demuxer {
 					let subsamples: SampleEncryptionInfo['subsamples'] = null;
 					if (useSubsamples) {
 						const subsampleCount = readU16Be(slice);
+						mendoClaimMp4Table(this, subsampleCount);
 						subsamples = [];
 						for (let j = 0; j < subsampleCount; j++) {
 							const clearLen = readU16Be(slice);
@@ -3116,6 +3140,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
 					this.internalTrack.demuxer.reader,
 					this.internalTrack.encryptionInfo,
 					this.internalTrack.encryptionAuxInfo,
+					this.internalTrack.demuxer,
 				);
 
 				if (sampleIndex < entries.length) {
@@ -3659,6 +3684,7 @@ const resolveEncryptionAuxInfo = async (
 	reader: Reader,
 	encryptionInfo: TrackEncryptionInfo,
 	aux: SampleEncryptionAuxInfo,
+	demuxer: IsobmffDemuxer,
 ) => {
 	if (aux.resolved) {
 		return aux.resolved;
@@ -3706,6 +3732,7 @@ const resolveEncryptionAuxInfo = async (
 		let subsamples: { clearLen: number; protectedLen: number }[] | null = null;
 		if (entrySize > ivSize) {
 			const subsampleCount = readU16Be(slice);
+			mendoClaimMp4Table(demuxer, subsampleCount);
 			subsamples = [];
 			for (let j = 0; j < subsampleCount; j++) {
 				const clearLen = readU16Be(slice);

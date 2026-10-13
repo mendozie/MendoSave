@@ -1,14 +1,16 @@
 # Установка, обновление и удаление
 
-## Версии для проверки
+## Готовые версии и сборки для разработки
+
+Выпуск 0.3.3 готовится по разрешению от 13-10-2026; подпись и публикация подтверждаются отдельным readback. Последняя опубликованная подписанная версия - 0.3.1. [Релизная проверка 0.3.3](RELEASE_VERIFICATION_033.md) фиксирует итог. Промежуточная отправка 0.3.2 заменяется после PR review; первоначальные локальные кандидаты и r2 сохранены отдельно, [инструкция r2](V032_R2_VERIFICATION.md) остаётся историей ручной приёмки.
 
 Основная проверенная среда - Zen на Windows; точные версии и сценарии находятся в [SITE_MATRIX](SITE_MATRIX.md). Chromium - дополнительная сборка из общего кода. Совместимость других браузеров и ОС не подтверждается совпадением движка.
 
-Готовые пакеты находятся в [Release 0.3.1](https://github.com/mendozie/MendoSave/releases/tag/v0.3.1). Репозиторий приватный, поэтому для скачивания нужен доступ к нему. Сверь SHA-256 скачанного файла с `SIGNED_SHA256SUMS` из того же Release.
+Готовые пакеты находятся в [Releases](https://github.com/mendozie/MendoSave/releases). Для Firefox/Zen используй `firefox-signed.xpi`, для Chromium - `chromium-unsigned.zip`. Открытие репозитория разрешено после отдельной проверки приватных данных; saved state фиксируется в roadmap. Сверь SHA-256 скачанного файла с `SIGNED_SHA256SUMS` из того же Release.
 
 До подписания Firefox/Zen candidate устанавливается временно только в отдельный тестовый профиль через `about:debugging` → This Firefox → Load Temporary Add-on → `dist/firefox/manifest.json`. Установка исчезает после полного перезапуска браузера; это свойство временной установки. Не отключай signature checks рабочего профиля. [Описание Mozilla](https://extensionworkshop.com/documentation/develop/temporary-installation-in-firefox/).
 
-Для Chromium распакуй `mendosave-0.3.1-chromium-unsigned.zip` в постоянную папку. Открой `chrome://extensions`, включи developer mode, выбери «Загрузить распакованное расширение» и распакованную папку с `manifest.json`. Проверки выполнялись в отдельном профиле Chromium 148.0.7778.96 на Windows. Для developer-сборки из исходников используй `dist/chromium`.
+Для Chromium распакуй `mendosave-<version>-chromium-unsigned.zip` в постоянную папку. Открой `chrome://extensions`, включи developer mode, выбери «Загрузить распакованное расширение» и распакованную папку с `manifest.json`. Проверки выполнялись в отдельном профиле Chromium 148.0.7778.96 на Windows. Для developer-сборки из исходников используй `dist/chromium`.
 
 ## Подписанный файл для Firefox / Zen
 

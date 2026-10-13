@@ -2,6 +2,50 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { browserContext } = require('./background-harness.cjs');
 
+function sharedDetails(depth = 12) {
+  let value = { message: 'controlled detail', token: 'fixture-secret' };
+  for (let i = 0; i < depth; i++) value = { left: value, right: value };
+  return value;
+}
+
+test('diagnostics bound shared graphs before serialization and redact retained fields', () => {
+  const { sanitize } = require('../extension/diagnostics.js');
+  const output = sanitize(sharedDetails());
+  assert.ok(output.length <= 50_000, `small shared graph expanded to ${output.length} characters`);
+  assert.equal(output.includes('fixture-secret'), false);
+  assert.ok(JSON.parse(output));
+});
+
+test('diagnostic projection bounds cycles, wide objects, strings and sensitive keys', () => {
+  const { project, sanitize } = require('../extension/diagnostics.js');
+  const details = { self: null, ordinary: 'z'.repeat(100_000), cookie: 'fixture-cookie' };
+  details.self = details;
+  for (let i = 0; i < 2000; i++) details[`field-${i}`] = { message: 'x'.repeat(1000) };
+  const projected = project(details);
+  assert.doesNotThrow(() => JSON.stringify(projected));
+  assert.ok(sanitize(details).length <= 50_000);
+  assert.equal(JSON.stringify(projected).includes('fixture-cookie'), false);
+  assert.ok(Object.keys(projected).length <= 33);
+});
+
+test('shared error details stay bounded in the actual background report path', async () => {
+  const browser = browserContext();
+  let report;
+  browser.chrome.tabs.create = async () => ({ id: 19 });
+  browser.chrome.storage.local.get = async keys => Object.fromEntries(
+    (Array.isArray(keys) ? keys : [keys]).map(key => [key, browser.data[key]]));
+  browser.chrome.runtime.sendMessage = async message => {
+    if (message.t === 'mendosave-host-probe') return { ok: true, instanceId: message.instanceId };
+    assert.equal(message.t, 'mendosave-save-text'); report = message.text; return { ok: true, id: 42 };
+  };
+  assert.equal((await browser.message({ t: 'mendosave-error', context: 'controlled',
+    error: 'controlled failure', details: sharedDetails() })).ok, true);
+  assert.equal(report.includes('[truncated]'), false, 'post-serialization clipping must not be the graph budget');
+  assert.ok(report.length < 50_000);
+  await browser.chrome.storage.local.set({ nova_settings: { ask: true }, nova_recovered: [] });
+  assert.equal(browser.data.nova_settings.ask, true);
+});
+
 test('page-relayed diagnostics reject oversized fields and leave settings and recovery writable', async () => {
   const browser = browserContext();
   for (const fields of [{ tag: 'x'.repeat(129), text: 'short' },
@@ -77,6 +121,28 @@ test('diagnostic storage removes secrets before writing a log entry', async () =
   assert.equal(browser.data.nova_logs.length, 1);
   assert.equal(browser.data.nova_logs[0].text.includes('private-'), false);
   assert.equal(browser.data.nova_logs[0].text.includes('/secret/path'), false);
+});
+
+test('a bounded error export preserves state and the newest journal entries', async () => {
+  const browser = browserContext();
+  let report;
+  browser.chrome.storage.local.get = async keys => Object.fromEntries(
+    (Array.isArray(keys) ? keys : [keys]).map(key => [key, browser.data[key]]));
+  browser.chrome.tabs.create = async () => ({ id: 19 });
+  browser.chrome.runtime.sendMessage = async message => {
+    if (message.t === 'mendosave-host-probe') return { ok: true, instanceId: message.instanceId };
+    assert.equal(message.t, 'mendosave-save-text'); report = message.text; return { ok: true, id: 42 };
+  };
+  browser.data.nvs_playlist_queue = { state: 'current queue sentinel' };
+  browser.data.nova_logs = Array.from({ length: 400 }, (_, i) => ({ ts: i + 1,
+    tag: 'network', text: i === 399 ? 'newest failure sentinel' : `old-${i} ${'x'.repeat(300)}` }));
+  assert.equal((await browser.message({ t: 'mendosave-error', context: 'controlled',
+    error: 'failure ' + 'x'.repeat(40_000), details: { message: 'current detail sentinel' } })).ok, true);
+  assert.ok(report.includes('newest failure sentinel'));
+  assert.ok(report.includes('current queue sentinel'));
+  assert.ok(report.includes('current detail sentinel'));
+  assert.ok(report.length < 50_000);
+  assert.equal(report.includes('old-0 '), false, 'the oldest journal data yields to the failure context');
 });
 
 test('diagnostics hide complete quoted and unquoted private paths with spaces', async () => {

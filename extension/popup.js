@@ -29,11 +29,15 @@ async function setupSettings() {
   const youtubeLock = document.getElementById('yt-lock');
   const twitchQuality = document.getElementById('tw-quality');
   const twitchLock = document.getElementById('tw-lock');
+  const controls = [saveAs, youtubeQuality, youtubeLock, twitchQuality, twitchLock];
+  const readyHint = settingsHint.textContent;
+  for (const control of controls) control.disabled = true;
+  settingsHint.textContent = 'Загружаю настройки…';
 
   fillQualitySelect(youtubeQuality, YOUTUBE_HEIGHTS);
   fillQualitySelect(twitchQuality, TWITCH_HEIGHTS);
 
-  const current = await load();
+  const current = await load({ strict: true });
   saveAs.checked = current.saveAs;
   youtubeQuality.value = String(current.youtubeQuality);
   youtubeLock.checked = current.youtubeLock;
@@ -76,10 +80,12 @@ async function setupSettings() {
       ? 'Качество Twitch закреплено: авто-режим плеера выключен.'
       : 'Twitch снова может выбирать качество сам.',
   ));
+  note(readyHint);
+  for (const control of controls) control.disabled = false;
 }
 
 setupSettings().catch((error) => {
-  settingsHint.textContent = `Настройки недоступны: ${String(error?.message || error)}`;
+  settingsHint.textContent = `Настройки недоступны: ${String(error?.message || error)}. Закрой и снова открой окно расширения.`;
 });
 
 // Files that finished processing but that the browser did not accept for

@@ -30,7 +30,7 @@ function coub(audio, declaredVideoBytes = 8, actualVideoBytes = 8, send, streami
 async function combine(app) {
   app.click(app.document.querySelector('.mendosave-coub-btn'));
   await app.settle();
-  app.click(app.document.querySelector('[role="button"].mendosave-coub-item'));
+  app.click(app.document.querySelector('[role="menuitem"].mendosave-coub-item'));
   await app.settle();
 }
 
@@ -65,7 +65,7 @@ test('Coub direct video reports an interrupted browser download as an error', as
     ? { ok: true, state: 'interrupted', error: 'NETWORK_FAILED' } : { ok: true, id: 7 });
   app.click(app.document.querySelector('.mendosave-coub-btn'));
   await app.settle();
-  app.click([...app.document.querySelectorAll('[role="button"]')].find((x) => x.textContent.includes('Видео без звука')));
+  app.click([...app.document.querySelectorAll('[role="menuitem"]')].find((x) => x.textContent.includes('Видео без звука')));
   await app.settle();
   assert.match(app.document.querySelector('.mendosave-coub-toast').textContent, /NETWORK_FAILED/);
   assert.doesNotMatch(app.document.querySelector('.mendosave-coub-toast').textContent, /Готово:/);
@@ -109,7 +109,7 @@ test('Coub menu activates the selected audio action once with Enter or Space', a
     const app = coub(mp3(2));
     app.click(app.document.querySelector('.mendosave-coub-btn'));
     await app.settle();
-    const item = [...app.document.querySelectorAll('[role="button"]')].find((x) => x.textContent.includes('Только звук'));
+    const item = [...app.document.querySelectorAll('[role="menuitem"]')].find((x) => x.textContent.includes('Только звук'));
     assert.equal(app.press(item, key, true).defaultPrevented, true);
     assert.equal(app.press(item, 'a').defaultPrevented, false);
     assert.equal(app.messages.some((x) => x.t === 'mendosave-save'), false);
@@ -137,7 +137,7 @@ test('Coub names equal-resolution source variants by their API key and source by
   const app = adapter('coub.js', '<div data-permalink="or1i6abuay"><div class="viewer"></div></div>', 'https://coub.com/view/or1i6abuay', async () => ({ ok: true, json: async () => payload }));
   app.click(app.document.querySelector('.mendosave-coub-btn'));
   await app.settle();
-  const items = [...app.document.querySelectorAll('[role="button"]')].filter((x) => x.textContent.startsWith('Со звуком · 880×720'));
+  const items = [...app.document.querySelectorAll('[role="menuitem"]')].filter((x) => x.textContent.startsWith('Со звуком · 880×720'));
   assert.equal(items.length, 2);
   assert.match(items[0].querySelector('.mendosave-coub-text').textContent, /high/);
   assert.match(items[1].querySelector('.mendosave-coub-text').textContent, /med/);

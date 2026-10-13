@@ -1,5 +1,7 @@
 # MendoSave - проверенная совместимость
 
+Дополнительная проверка 0.3.3 от 13-10-2026: отдельный Zen 1.23.2b / Gecko 157.0.1 завершил bounded diagnostic TXT через actual worker/native download, сохранив последние записи, State и Details и скрыв dummy secret. Popup Save As/персистентность, реальный package component, native keyboard и full-close проверены на viewports 1246×883/326×843 и 1246×983/326×843. Новые MP4 auxiliary guards проверены actual parser regression; прежние site/media scenarios указаны ниже с их собственными revisions. [Финальная релизная проверка](RELEASE_VERIFICATION_033.md).
+
 Проверки версии 0.2.0: 09-10-2026 и 10-10-2026. Основная матрица - Zen 1.23.1b / Gecko 157.0.1 на Windows; lifecycle-проверки Twitch после исправлений - Zen 1.23.2b / Gecko 157.0.1. Дополнительная сборка - Chromium 148.0.7778.96. В 0.3.0 отдельно проверены Coub package/ZIP, YouTube video/audio/SRT, доступный TikTok, live и указанные ниже lifecycle-сценарии в отдельных профилях Zen 1.23.2b и Chromium. Воспроизведение заглушено, аудиодорожки файлов сохранены. Найденный дефект Chromium SRT исправлен; новая содержательная проверка прошла в обоих браузерах.
 
 Фаза 2 технически проверена 10-10-2026, включая итоговый WebM remux. Предыдущая остановка сохранена в [историческом checkpoint](PHASE2_CHECKPOINT.md).
@@ -57,3 +59,9 @@ Live, очередь материалов плейлиста и пакет фо�
 После parser guards Mediabunny в текущей сборке **57 файлов Firefox / 58 Chromium** повторены свежие YouTube MP4, Coub MP3 и Twitch VOD в обоих профилях: шесть complete downloads, конечные tracks/duration/timestamps и полное декодирование прошли, ошибок подключённых extension contexts не зарегистрировано. YouTube прошёл через изменённый Mediabunny worker-remux; Coub source MP3 и Twitch FFmpeg TS-remux подтверждают соответствующие сохранённые пути. Bundle имеет SHA-256 `30dedb32345d3ccc025df5ed6af5c518f79eb589fcf757022ae2af0eaffaec58`. Подробности и граница malformed parser tests - в [отчёте фазы 4](PHASE4_VERIFICATION.md).
 
 Musify отключён и исключён из обеих сборок. Instagram, другие ОС, другие Firefox-производные, произвольные версии Zen и весь каталог каждой площадки не подтверждены.
+
+## Дополнительные проверки перед выпуском 0.3.2 - 13-10-2026
+
+Zen 1.23.2b / Gecko 157.0.1 и Edge 155.0.4283.45 на Windows: настоящие pointer/Enter/Space, отклонение synthetic activation, последовательный пакет двух Coub-файлов и ZIP. MP4/MP3 завершены и bytes совпали между браузерами; full decode и ZIP extraction подтверждены. VK в Zen: scroll/resize/refit, repeat click без download, cancel/cleanup, guarded close и bounded drag. Текущий MP4 parser прочитал полный прежний VK 480p control с теми же bytes и duration; это не новая загрузка. [Релизная проверка](RELEASE_VERIFICATION_032.md).
+
+Скриншоты README относятся к 0.3.2; package screenshot использует нейтральные demo labels реального компонента. Store/signature/постоянная установка подтверждаются отдельным этапом, эти UI checks их не заменяют.

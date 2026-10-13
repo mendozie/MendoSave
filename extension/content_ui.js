@@ -17,6 +17,7 @@
   let requestSequence = 1;
   let menu;
   let menuOpening = false;
+  let menuRequest = 0;
   let downloadInProgress = false;
   let toastHideTimer;
   let buttonFrame;
@@ -68,7 +69,7 @@
     clearTimeout(pending.timeout);
     if (data.ok === false) {
       const error = new Error(data.error || 'page hook failed');
-      error.details = data.details;
+      error.details = MendoDiagnostics.project(data.details);
       pending.reject(error);
     } else pending.resolve(data);
   });
@@ -136,7 +137,8 @@
   async function reportError(context, error, details) {
     const text = [error?.message || String(error), error?.stack].filter(Boolean).join('\n');
     console.error('[MendoSave]', error);
-    return sendWorkerMessage({ t: 'mendosave-error', context, error: text, details }, 30_000).catch(() => null);
+    return sendWorkerMessage({ t: 'mendosave-error', context, error: MendoDiagnostics.text(text),
+      details: MendoDiagnostics.project(details) }, 30_000).catch(() => null);
   }
 
   function sendRuntimeMessage(message, timeoutMs, producer) {
@@ -231,7 +233,7 @@
     } else {
       button.append(createCircleIcon());
     }
-    button.addEventListener('click', openMenu);
+    MendoMenu.onActivate(button, openMenu);
     return button;
   }
 
@@ -319,6 +321,8 @@
   }
 
   function closeMenu() {
+    menuRequest += 1;
+    menuOpening = false;
     if (menu?.contains(document.activeElement)) document.getElementById(BUTTON_ID)?.focus();
     menu?.remove();
     menu = undefined;
@@ -397,11 +401,11 @@
       menu.append(createHeading('Видео'));
       const heights = [...new Set(info.heights || [])].sort((a, b) => b - a);
       for (const height of heights) {
-        packageOptions.push({ id: `video-${height}`, label: `Видео ${height}p`,
+        packageOptions.push({ id: `video-${height}`, label: `Видео ${height}p`, group: 'Видео',
           run: (transcode) => startDownload({ format: 'mp4', height }, info, { transcode }) });
         const item = createElement('div', 'mendosave-menu-item');
         setItemLabel(item, `${height}p`, 'MP4 video');
-        item.addEventListener('click', () => {
+        MendoMenu.onActivate(item, () => {
           closeMenu();
           startDownload({ format: 'mp4', height }, info);
         });
@@ -411,11 +415,11 @@
 
     menu.append(createHeading('Аудио'));
     for (const audio of audioFormatsFor(info)) {
-      packageOptions.push({ id: `audio-${audio.id}`, label: `Аудио ${audio.title} · ${audio.note}`,
+      packageOptions.push({ id: `audio-${audio.id}`, label: `Аудио ${audio.title} · ${audio.note}`, group: 'Аудио',
         run: () => startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, audio.title, audio.note);
-      item.addEventListener('click', () => {
+      MendoMenu.onActivate(item, () => {
         closeMenu();
         startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info);
       });
@@ -432,7 +436,7 @@
     for (const option of options) {
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, option.title, option.note);
-      item.addEventListener('click', () => {
+      MendoMenu.onActivate(item, () => {
         closeMenu();
         void startLiveRecording(info, option.from);
       });
@@ -444,7 +448,7 @@
     menu.append(createHeading('Плейлист'));
     const item = createElement('div', 'mendosave-menu-item');
     setItemLabel(item, 'Скачать плейлист…', `${items.length} видео, выбор в списке`);
-    item.addEventListener('click', () => {
+    MendoMenu.onActivate(item, () => {
       closeMenu();
       openPlaylistPicker(info, items);
     });
@@ -461,20 +465,22 @@
       return;
     }
 
-    const language = availability.lang || 'доступный';
+    const subtitleSource = snapshotSubtitleSource(info, availability);
+    const language = subtitleSource.lang.toUpperCase();
     const formats = [
-      ['.srt', 'srt', 'SRT с таймкодами'],
-      ['.txt', 'txt', 'TXT без таймкодов'],
-      ['.txt', 'timed-txt', 'Расшифровка с таймкодами и главами'],
+      ['SRT', 'srt', 'с таймкодами'],
+      ['TXT', 'txt', 'без таймкодов'],
+      ['TXT', 'timed-txt', availability.chaptersAvailable ? 'с таймкодами и главами' : 'с таймкодами'],
     ];
     for (const [extension, format, description] of formats) {
-      packageOptions.push({ id: `sub-${format}`, label: `${description} · ${extension} · ${language}`,
-        run: () => downloadSubtitles(info, format) });
+      const label = `${extension} · ${language} · ${description}`;
+      packageOptions.push({ id: `sub-${format}`, label, group: 'Субтитры', compatibilityKey: JSON.stringify([format, subtitleSource]),
+        run: () => downloadSubtitles(info, format, subtitleSource) });
       const item = createElement('div', 'mendosave-menu-item');
-      setItemLabel(item, extension, `${language} · ${description}`);
-      item.addEventListener('click', () => {
+      setItemLabel(item, label);
+      MendoMenu.onActivate(item, () => {
         closeMenu();
-        downloadSubtitles(info, format);
+        void downloadSubtitles(info, format, subtitleSource);
       });
       menu.append(item);
     }
@@ -488,7 +494,7 @@
       const text = createElement('span', 'mendosave-radio-txt');
       text.append(createElement('b', null, option.title), createElement('i', null, option.note));
       row.append(createElement('span', 'mendosave-dot'), text);
-      row.addEventListener('click', (event) => {
+      MendoMenu.onActivate(row, (event) => {
         event.stopPropagation();
         selected = option.value;
         if (storageKey === 'transcode') packageTranscode = Boolean(selected);
@@ -517,6 +523,8 @@
     const sourceVideoId = info.videoId;
     return Object.freeze(availableOptions.map((option) => Object.freeze({
       id: option.id,
+      group: option.group,
+      compatibilityKey: option.compatibilityKey || (option.id.startsWith('video-') ? `${option.id}:${transcode}` : option.id),
       label: option.id.startsWith('video-')
         ? `${option.label} · ${transcode ? 'H.264/AAC' : 'исходные кодеки'}` : option.label,
       run: () => {
@@ -537,6 +545,8 @@
     }
     if (menuOpening) return;
     menuOpening = true;
+    const request = ++menuRequest;
+    const sourceVideoId = videoIdFromLocation();
 
     try {
       const [info, availability, settings] = await Promise.all([
@@ -544,7 +554,14 @@
         callHook('subs-available'),
         chrome.storage.local.get(['transcode']),
       ]);
+      if (request !== menuRequest || sourceVideoId !== videoIdFromLocation() || info.videoId !== sourceVideoId) {
+        return document.getElementById(BUTTON_ID);
+      }
+      if (Object.hasOwn(info, 'playerVideoId') && info.playerVideoId !== sourceVideoId) {
+        throw new Error('Плеер ещё переключает материал. Откройте меню через несколько секунд.');
+      }
       menu = createElement('div', 'mendosave-menu');
+      let packageOpener;
       packageOptions = [];
       packageTranscode = Boolean(settings.transcode);
       menu.append(createBrandHeading());
@@ -560,8 +577,9 @@
         addSubtitleItems(info, availability);
         if (!artTrackOnly) addFormatSelector(settings.transcode);
         const availableOptions = packageOptions.slice();
-        globalThis.MendoPackageUI?.add(menu, { title: info.title, source: `youtube:${info.videoId || videoIdFromLocation()}`,
-          options: () => snapshotPackageOptions(info, availableOptions), close: closeMenu });
+        packageOpener = globalThis.MendoPackageUI?.add(menu, { title: info.title, source: `youtube:${info.videoId || videoIdFromLocation()}`,
+          options: () => snapshotPackageOptions(info, availableOptions), close: closeMenu,
+          back: () => openMenu({ stopPropagation() {} }) });
       }
       document.body.append(menu);
 
@@ -570,14 +588,19 @@
         MendoMenu.place(menu, buttonRect, window.innerWidth, window.innerHeight);
       }
       MendoMenu.bind(menu, closeMenu);
-      setTimeout(() => document.addEventListener('click', closeMenuOnOutsideClick, true));
+      const opened = menu;
+      setTimeout(() => { if (menu === opened) document.addEventListener('click', closeMenuOnOutsideClick, true); });
+      return packageOpener || document.getElementById(BUTTON_ID);
     } catch (error) {
+      if (request !== menuRequest || sourceVideoId !== videoIdFromLocation()) return document.getElementById(BUTTON_ID);
+      menu?.remove(); menu = undefined;
       const notification = getToast();
       notification.set(`Ошибка: ${error.message || error}`, 1);
       notification.hide(6000);
       await reportError('ui/menu', error);
+      return document.getElementById(BUTTON_ID);
     } finally {
-      menuOpening = false;
+      if (request === menuRequest) menuOpening = false;
     }
   }
 
@@ -591,7 +614,7 @@
       const cancelButton = createElement('button', 'mendosave-toast-cancel', 'Отменить загрузку');
       cancelButton.type = 'button';
       cancelButton.hidden = true;
-      cancelButton.addEventListener('click', () => box.__mendosaveCancel?.());
+      MendoMenu.onActivate(cancelButton, () => box.__mendosaveCancel?.());
       box.append(createElement('span', 'mendosave-toast-txt'), bar, createElement('div', 'mendosave-toast-stages'), cancelButton);
       document.body.append(box);
     }
@@ -702,16 +725,18 @@
   }
 
   function formatCueTime(seconds, separator) {
-    const value = Math.max(0, seconds);
-    const hours = Math.floor(value / 3600);
-    const minutes = Math.floor((value % 3600) / 60);
-    const wholeSeconds = Math.floor(value % 60);
-    const milliseconds = Math.floor((value - Math.floor(value)) * 1000);
+    // Quantize once before splitting the timestamp. Subtracting whole seconds
+    // first can turn an exact native millisecond into a slightly smaller float.
+    const value = Math.round(Math.max(0, seconds) * 1000);
+    const hours = Math.floor(value / 3600000);
+    const minutes = Math.floor((value % 3600000) / 60000);
+    const wholeSeconds = Math.floor((value % 60000) / 1000);
+    const milliseconds = value % 1000;
     const pad = (number, length = 2) => String(number).padStart(length, '0');
     return `${pad(hours)}:${pad(minutes)}:${pad(wholeSeconds)}${separator}${pad(milliseconds, 3)}`;
   }
 
-  function normalizeCues(cues) {
+  function normalizeCues(cues, duration) {
     if (!Array.isArray(cues)) return [];
     if (cues.length > 50000) throw new Error('Превышен лимит строк субтитров');
     let textLength = 0;
@@ -722,22 +747,33 @@
     }
     const sorted = cues
       .filter((cue) => typeof cue?.text === 'string' && cue.text.trim())
-      .map((cue) => ({ start: Number(cue.start) || 0, end: Number(cue.end) || 0, text: cue.text }))
+      .map((cue) => {
+        const start = Number(cue.start), end = cue.end == null ? 0 : Number(cue.end);
+        if (!Number.isFinite(start) || start < 0 || !Number.isFinite(end)) {
+          throw new Error('Некорректные таймкоды субтитров');
+        }
+        return { start, end, text: cue.text };
+      })
       .sort((a, b) => a.start - b.start);
+    const knownDuration = Number.isFinite(duration) && duration > 0 ? duration : null;
 
     return sorted.map((cue, index) => {
+      if (knownDuration !== null && cue.start >= knownDuration) {
+        throw new Error('Таймкоды субтитров выходят за длительность материала');
+      }
       const next = sorted[index + 1];
       // Supplied times describe the selected caption track. Readability
-      // heuristics must not move starts or extend ends into later cues.
+      // heuristics must not move starts or extend ends into later cues. Missing
+      // final ends use the captured source duration; known bounds constrain ends.
       const end = cue.end > cue.start ? cue.end
-        : next?.start > cue.start ? next.start : cue.start + 4;
-      return { ...cue, end };
+        : next?.start > cue.start ? next.start : knownDuration > cue.start ? knownDuration : cue.start + 4;
+      return { ...cue, end: knownDuration === null ? end : Math.min(end, knownDuration) };
     });
   }
 
-  function buildTimedSubtitles(cues, format) {
+  function buildTimedSubtitles(cues, format, duration) {
     const lines = format === 'vtt' ? ['WEBVTT', ''] : [];
-    normalizeCues(cues).forEach((cue, index) => {
+    normalizeCues(cues, duration).forEach((cue, index) => {
       if (format !== 'vtt') lines.push(String(index + 1));
       const separator = format === 'vtt' ? '.' : ',';
       lines.push(`${formatCueTime(cue.start, separator)} --> ${formatCueTime(cue.end, separator)}`);
@@ -763,19 +799,56 @@
     return error;
   }
 
-  async function downloadSubtitles(info, format) {
+  function subtitleSourcesMatch(expected, actual) {
+    return Boolean(expected && actual && typeof expected.videoId === 'string' && expected.videoId.length > 0
+      && typeof expected.lang === 'string' && expected.lang.length > 0 && expected.lang.length <= 64
+      && typeof expected.trackId === 'string' && expected.trackId.length > 0 && expected.trackId.length <= 4096
+      && Number.isSafeInteger(expected.revision) && expected.revision >= 0
+      && expected.videoId === actual.videoId && expected.lang === actual.lang
+      && expected.trackId === actual.trackId && expected.revision === actual.revision);
+  }
+
+  function snapshotSubtitleSource(info, availability) {
+    const value = availability?.source;
+    if (!availability?.available || !subtitleSourcesMatch(value, value)
+      || value.videoId !== info.videoId || videoIdFromLocation() !== info.videoId
+      || (Number.isSafeInteger(info.sourceRevision) && value.revision !== info.sourceRevision)) {
+      throw new Error('Материал или выбранная дорожка субтитров изменились. Откройте меню заново.');
+    }
+    return Object.freeze({ videoId: value.videoId, lang: value.lang, trackId: value.trackId, revision: value.revision });
+  }
+
+  async function downloadSubtitles(info, format, selectedSource) {
+    // The menu's material and track belong to the click, including its title.
+    // Awaiting page/network work must never recapture a new SPA source.
+    const material = Object.freeze({ videoId: info.videoId, title: String(info.title || ''),
+      sourceRevision: info.sourceRevision, duration: info.duration });
+    const packageSignal = globalThis.MendoPackageUI?.signal;
+    const check = () => {
+      if (packageSignal?.aborted) throw Object.assign(new Error('Пакет отменён'), { name: 'AbortError', cancelled: true });
+      if (videoIdFromLocation() !== material.videoId) throw new Error('Материал на странице изменился. Откройте меню заново.');
+    };
     const notification = getToast();
     notification.set(`Загружаю субтитры (${format || 'txt'})…`, 0.3);
     try {
       const output = SUBTITLE_OUTPUTS[format];
       if (!output) throw new Error(`неизвестный формат субтитров: ${format}`);
-      const response = await callHook('subtitles', { format });
-      const language = response.lang || 'txt';
+      check();
+      const source = selectedSource ? snapshotSubtitleSource(material, { available: true, source: selectedSource }) : null;
+      const requestedSource = source || snapshotSubtitleSource(material, await callHook('subs-available'));
+      check();
+      const response = await callHook('subtitles', { format, source: requestedSource });
+      check();
+      if (!subtitleSourcesMatch(requestedSource, response.source) || response.videoId !== requestedSource.videoId
+        || response.lang !== requestedSource.lang) {
+        throw new Error('Материал или выбранная дорожка субтитров изменились. Откройте меню заново.');
+      }
+      const language = requestedSource.lang;
       if (output.timed && !response.cues?.length) {
         throw new Error(`не удалось сформировать .${output.extension}: отсутствуют таймкоды`);
       }
       const content = output.transcript ? response.timedText
-        : output.timed ? buildTimedSubtitles(response.cues, output.extension) : response.text;
+        : output.timed ? buildTimedSubtitles(response.cues, output.extension, material.duration) : response.text;
       if (typeof content !== 'string') throw new Error('Нет доступной расшифровки с реальными таймкодами');
       // MAIN-world replies remain untrusted. Reject implausible text before
       // Blob allocation, then check actual UTF-8 bytes before producer/OPFS.
@@ -788,7 +861,7 @@
       const nameEncoder = new TextEncoder();
       let nameBytes = nameEncoder.encode(`${suffix}.${output.extension}`).length;
       let title = '';
-      let titleValue = safeFilename(info.title).normalize('NFC');
+      let titleValue = safeFilename(material.title).normalize('NFC');
       if (/^(con|conin\$|conout\$|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\s*\.|$)/i.test(titleValue)) titleValue = `_${titleValue}`;
       for (const character of [...titleValue].slice(0, 120 - [...suffix].length)) {
         const size = nameEncoder.encode(character).length;
@@ -800,6 +873,11 @@
       const text = `\uFEFF${content}`;
       const blob = new Blob([text], { type: output.mime });
       if (blob.size > SUBTITLE_OUTPUT_MAX_BYTES) throw new Error('Размер текстового файла превышает 32 MiB');
+      const availableNow = await callHook('subs-available');
+      check();
+      if (!availableNow?.available || !subtitleSourcesMatch(requestedSource, availableNow.source)) {
+        throw new Error('Материал или выбранная дорожка субтитров изменились. Откройте меню заново.');
+      }
       // Keep small UTF-8 outputs below both legacy text/data-URL bounds,
       // including percent-encoding expansion. Larger accepted transcripts use
       // the existing owned, chunked path through native download completion.
@@ -824,7 +902,7 @@
       notification.set(`Ошибка: ${error.message || error}`, 1);
       notification.hide(6000);
       if (globalThis.MendoPackageUI?.running) throw error;
-      await reportError('ui/subtitles', error, { format, videoId: info.videoId });
+      await reportError('ui/subtitles', error, { format, videoId: material.videoId });
     }
   }
 
@@ -1804,7 +1882,7 @@
       const head = createElement('div', 'mendosave-live-head');
       head.append(createElement('span', 'mendosave-live-dot'), createElement('span', 'mendosave-live-txt'));
       const stopButton = createElement('button', 'mendosave-btn mendosave-live-stop', 'Остановить и сохранить');
-      stopButton.addEventListener('click', () => {
+      MendoMenu.onActivate(stopButton, () => {
         stopButton.disabled = true;
         stopButton.textContent = 'Останавливаю…';
         void callHook('live-stop').catch(() => {});
@@ -2092,7 +2170,7 @@
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) closePlaylistPicker();
     });
-    startButton.addEventListener('click', async () => {
+    MendoMenu.onActivate(startButton, async () => {
       const chosen = items.filter((_, index) => checks[index].checked);
       if (!chosen.length) return;
       const [format, sub] = String(select.value).split(':');
@@ -2128,7 +2206,7 @@
       box.id = 'mendosave-queue';
       const body = createElement('div', 'mendosave-queue-body');
       const cancelButton = createElement('button', 'mendosave-btn mendosave-queue-cancel', 'Отменить очередь');
-      cancelButton.addEventListener('click', async () => {
+      MendoMenu.onActivate(cancelButton, async () => {
         await clearQueue();
         try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
         if (IS_MUSIC) void callHook('music-mute', { mute: false }).catch(() => {});

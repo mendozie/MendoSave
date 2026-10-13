@@ -75,6 +75,7 @@
   const MUX_BYTE_LIMIT = 700_000_000;
 
   let menu;
+  let menuAnchor;
   let busy = false;
   let toastBox;
 
@@ -543,9 +544,11 @@
     };
   }
 
-  function closeMenu() {
+  function closeMenu(restoreFocus = false) {
     menu?.remove();
     menu = undefined;
+    if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
+    menuAnchor = undefined;
     document.removeEventListener('click', onOutsideClick, true);
     document.removeEventListener('keydown', onMenuKeydown, true);
   }
@@ -553,7 +556,7 @@
   function onMenuKeydown(event) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    closeMenu();
+    closeMenu(true);
   }
 
   function onOutsideClick(event) {
@@ -606,7 +609,15 @@
     event.stopPropagation();
     if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
+    menuAnchor = button;
     menu = document.createElement('div');
+    const openedMenu = menu, sourceHref = location.href;
+    const permalink = permalinkFor(button);
+    const current = () => {
+      if (menu !== openedMenu) return false;
+      if (location.href !== sourceHref || permalinkFor(button) !== permalink) { closeMenu(); return false; }
+      return true;
+    };
     menu.className = 'mendosave-coub-menu';
     const heading = document.createElement('div');
     heading.className = 'mendosave-coub-head';
@@ -621,10 +632,9 @@
     document.addEventListener('keydown', onMenuKeydown, true);
 
     try {
-      const permalink = permalinkFor(button);
       if (!permalink) throw new Error('не удалось определить коуб');
       const info = await loadCoub(permalink);
-      if (!menu) return;
+      if (!current()) return;
       loading.remove();
       const choices = buildChoices(info);
       if (!choices.length) throw new Error('у этого коуба нет файлов для скачивания');
@@ -636,11 +646,12 @@
         item.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
-          if (!event.repeat) item.click();
+          if (!event.repeat) MendoMenu.activate(item, event);
         });
         item.append(createElement('span', 'mendosave-coub-text', choice.text));
         if (choice.hint) item.append(createElement('span', 'mendosave-coub-hint', choice.hint));
-        item.addEventListener('click', () => {
+        MendoMenu.onActivate(item, () => {
+          if (!current()) return;
           closeMenu();
           void runChoice(info, choice);
         });
@@ -649,14 +660,25 @@
       if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
         title: info.title || info.permalink, source: `coub:${info.permalink}`,
         close: closeMenu,
-        options: choices.map((choice, index) => ({
-          id: `coub-${index}`, label: choice.text,
+        back: async () => {
+          const currentId = permalinkFor(null);
+          const current = [...document.querySelectorAll(`.${BUTTON_CLASS}`)]
+            .find((candidate) => permalinkFor(candidate) === currentId)
+            || (button.isConnected && (!currentId || permalinkFor(button) === currentId) ? button : null);
+          if (!current) return null;
+          await openMenu(current, { preventDefault() {}, stopPropagation() {} });
+          return menu?.querySelector('.mendo-package-open') || current;
+        },
+        options: choices.map((choice) => ({
+          id: `coub-${choice.kind}-${choice.video?.key || 'mp3'}-${choice.loop ? 'loop' : 'single'}`,
+          label: choice.text, compatibilityKey: choice.text, group: choice.kind === 'audio' ? 'Аудио' : 'Видео',
           run: () => runChoice(info, choice),
         })),
       });
+      globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-coub-item[role="button"],.mendo-package-open');
       positionMenu(button);
     } catch (error) {
-      if (!menu) return;
+      if (!current()) return;
       loading.remove();
       menu.append(createElement('div', 'mendosave-coub-item mendosave-coub-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
@@ -697,7 +719,7 @@
       button.title = 'Скачать коуб (MendoSave)';
       button.setAttribute('aria-label', button.title);
       button.append(createIcon());
-      button.addEventListener('click', (event) => { void openMenu(button, event); });
+      MendoMenu.onActivate(button, (event) => { void openMenu(button, event); });
       if (getComputedStyle(viewer).position === 'static') viewer.style.position = 'relative';
       viewer.appendChild(button);
     }

@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const espree = require('espree');
-const { parseHTML } = require('linkedom');
+const { parseHTML, UserEvent } = require('./user-dom.cjs');
 const { producerPorts } = require('./producer-port-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
 
@@ -64,13 +64,15 @@ function harness(packageRun = true, autoAck = true) {
     muxViaOffscreen: async () => { saved++; return { ok: true, filename: 'fixture.mp4' }; },
     reportError: async () => {}, console,
   });
+  context.MendoMenu = require('../extension/menu.js');
+  context.MendoDiagnostics = require('../extension/diagnostics.js');
   vm.runInContext(`let toastHideTimer, downloadInProgress = false; ${flow}`, context);
   const info = { title: 'Fixture', duration: 10, videoId: 'fixtureVideo', isLive: false };
   return { context, document, info, capture, capturing, warmup, controller, timers, runtimeListeners, signalListeners, messages, hooks, producers,
     stopped: () => stopped, saved: () => saved, packageCancellations: () => packageCancellations,
     progress: (message) => onCapture?.(message),
     text: () => document.querySelector('.mendosave-toast-txt')?.textContent,
-    clickCancel() { document.querySelector('.mendosave-toast-cancel').dispatchEvent(new window.Event('click')); },
+    clickCancel() { document.querySelector('.mendosave-toast-cancel').dispatchEvent(new UserEvent('click')); },
     runTimers() { for (const [id, handler] of [...timers]) { timers.delete(id); handler(); } },
     run() { return context.startDownload({ format: 'mp4', height: 720 }, info); },
   };

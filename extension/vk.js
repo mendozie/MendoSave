@@ -1,14 +1,16 @@
 // VK Video adapter (vkvideo.ru, vk.com/video…).
 //
 // The page is a lazy SPA: no <video> exists until playback starts and the HTML
-// carries no media URLs at all. The player's own embed endpoint does —
-// `/video_ext.php?oid=…&id=…` answers with the player payload, and its `files`
-// object holds progressive `mp4_144…mp4_720` plus `dash_sep`, a DASH manifest
-// with video and audio in separate AdaptationSets.
+// carries no media URLs at all. Legacy `/video_ext.php` embeds the player data;
+// its modern bootstrap runs native `video.getEmbed` in a controlled frame.
+// The bundled observer projects only matching metadata, keeping site
+// authentication in that document. Both modes return progressive MP4 files
+// and `dash_sep`, with video and audio in separate AdaptationSets.
 //
 // Two consequences shape everything below:
-//   * a progressive file needs no assembly, so it goes straight to
-//     chrome.downloads — no fetch, no CORS, no copy in the page;
+//   * a single progressive file goes straight to chrome.downloads. A package
+//     reads bounded ranges from the VK origin: its CDN refuses extension-
+//     origin fetch, so bytes use the existing owned Blob transfer to OPFS;
 //   * the DASH audio track uses SegmentBase addressing, which means each
 //     representation is ONE whole MP4 addressed by byte ranges. Audio-only is
 //     therefore a plain ranged download and needs no segment stitching — and it
@@ -73,10 +75,13 @@
 
   const BUTTON_CLASS = 'mendosave-vk-btn';
   const SLICE_BYTES = 8 * 1024 * 1024;
+  const PACKAGE_SLICE_BYTES = 1024 * 1024;
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
   const VIDEO_ID_RE = /\/(?:video|clip)(-?\d+)_(\d+)/;
 
   let menu;
+  let menuRequest;
+  let cancelMenuFit;
   let busy = false;
   let toastBox;
 
@@ -132,11 +137,14 @@
   // The payload is HTML with an embedded JSON blob; `files` is pulled out by
   // brace matching rather than by a regex, because the URLs inside carry
   // escaped slashes and their own punctuation.
-  function extractObject(html, key) {
-    const at = html.indexOf(`"${key}"`);
+  function extractObject(html, key, from = 0) {
+    const at = html.indexOf(`"${key}"`, from);
     if (at < 0) return null;
-    const open = html.indexOf('{', at);
-    if (open < 0) return null;
+    let open = at + key.length + 2;
+    while (/\s/.test(html[open] || 'x')) open += 1;
+    if (html[open++] !== ':') return null;
+    while (/\s/.test(html[open] || 'x')) open += 1;
+    if (html[open] !== '{') return null;
     let depth = 0;
     let quoted = false;
     let escaped = false;
@@ -168,36 +176,170 @@
   }
 
   function extractString(html, key) {
-    const match = html.match(new RegExp(`"${key}":"((?:[^"\\\\]|\\\\.)*)"`));
+    const match = html.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
     if (!match) return '';
     try { return JSON.parse(`"${match[1]}"`); } catch (e) { return ''; }
   }
 
-  async function loadVideo(target) {
+  function legacyVideo(html, ids) {
+    let selected, structured = false, at = -1;
+    for (let count = 0; count < 32; count++) {
+      at = html.indexOf('"response"', at + 1);
+      if (at < 0) break;
+      const response = extractObject(html, 'response', at);
+      if (!Array.isArray(response?.items)) continue;
+      structured = true;
+      if (response.items.length > 32) throw new Error('ответ плеера превышает допустимый размер');
+      selected = response.items.find(value => value && String(value.owner_id) === ids.oid && String(value.id) === ids.id);
+      if (selected) break;
+    }
+    if (!selected && at >= 0 && html.indexOf('"response"', at + 1) >= 0) {
+      throw new Error('ответ плеера превышает допустимый размер');
+    }
+    if (structured && !selected) throw new Error('ответ плеера относится к другому видео');
+    const files = selected ? selected.files : extractObject(html, 'files');
+    if (!files || typeof files !== 'object' || Array.isArray(files)) return null;
+    const durationMatch = html.match(/"duration"\s*:\s*(\d+)/);
+    const fallbackTitle = `video${ids.oid}_${ids.id}`;
+    return { ...ids, files,
+      duration: selected ? Number(selected.duration) || 0 : (durationMatch ? Number(durationMatch[1]) : 0),
+      title: selected ? (selected.title || selected.md_title || fallbackTitle)
+        : (extractString(html, 'md_title') || extractString(html, 'title') || fallbackTitle) };
+  }
+
+  async function readPlayerBody(response, signal) {
+    const limit = globalThis.MendoVKSource?.MAX_RESPONSE_BYTES || 2 * 1024 * 1024;
+    const tooLarge = () => new Error('ответ плеера превышает допустимый размер');
+    if (Number(response.headers.get('content-length')) > limit) {
+      await response.body?.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const buffer = await response.arrayBuffer();
+      signal?.throwIfAborted();
+      if (buffer.byteLength > limit) throw tooLarge();
+      return decodeBody(buffer, response.headers.get('content-type'));
+    }
+    const chunks = [];
+    let total = 0;
+    const abort = () => { reader.cancel().catch(() => {}); };
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        const next = await reader.read();
+        signal?.throwIfAborted();
+        if (next.done) break;
+        total += next.value.byteLength;
+        if (total > limit) { await reader.cancel(); throw tooLarge(); }
+        chunks.push(new Uint8Array(next.value));
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      return decodeBody(bytes.buffer, response.headers.get('content-type'));
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      reader.releaseLock();
+    }
+  }
+
+  function loadNativeVideo(ids, url, signal) {
+    const schema = globalThis.MendoVKSource;
+    if (!schema) throw new Error('не удалось запустить загрузчик штатного плеера');
+    const source = schema.source(location.href);
+    if (!schema.same(source, ids)) throw schema.error('SOURCE_MISMATCH');
+    return new Promise((resolve, reject) => {
+      const frame = document.createElement('iframe');
+      frame.hidden = true;
+      frame.style.display = 'none';
+      frame.setAttribute('aria-hidden', 'true');
+      frame.title = 'MendoSave: данные VK';
+      frame.src = url;
+      const request = { __mendosave_vk_to_player: true, kind: 'request',
+        requestId: crypto.randomUUID().replaceAll('-', '_'), sourceHref: source.href,
+        oid: ids.oid, id: ids.id, frameHref: url };
+      let settled = false, timeout;
+      const finish = (failure, video) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener('message', receive);
+        signal?.removeEventListener('abort', abort);
+        frame.remove();
+        if (failure) reject(failure); else resolve(video);
+      };
+      const abort = () => {
+        const failure = new Error('получение данных отменено'); failure.name = 'AbortError';
+        finish(failure);
+      };
+      const ask = () => {
+        if (settled) return;
+        try { frame.contentWindow?.postMessage(request, location.origin); }
+        catch (failure) { finish(schema.error('PLAYER_UNAVAILABLE')); }
+      };
+      const receive = event => {
+        if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+        const data = event.data;
+        if (!data || data.__mendosave_vk_from_player !== true || data.frameHref !== url) return;
+        if (data.kind === 'ready') { ask(); return; }
+        if (data.kind !== 'result' || data.requestId !== request.requestId
+          || data.sourceHref !== request.sourceHref || data.oid !== ids.oid || data.id !== ids.id) return;
+        if (!schema.same(schema.source(location.href), source) || signal?.aborted) { abort(); return; }
+        try {
+          const fields = new Set(['__mendosave_vk_from_player', 'kind', 'frameHref', 'requestId', 'sourceHref',
+            'oid', 'id', 'video', 'code']);
+          if (Object.keys(data).length !== 8 || Object.keys(data).some(key => !fields.has(key))) {
+            throw schema.error('INVALID_RESPONSE');
+          }
+          if (data.code !== undefined) {
+            if (typeof data.code !== 'string') throw schema.error('INVALID_RESPONSE');
+            throw schema.error(data.code);
+          }
+          const video = schema.video(data.video, ids);
+          const videoFields = new Set(['oid', 'id', 'title', 'duration', 'files']);
+          if (Object.keys(data.video).length !== 5 || Object.keys(data.video).some(key => !videoFields.has(key))) {
+            throw schema.error('INVALID_RESPONSE');
+          }
+          // Serialize only the bounded projection, never unsolicited page data.
+          if (new TextEncoder().encode(JSON.stringify(video)).byteLength > schema.MAX_PROJECTION_BYTES) {
+            throw schema.error('RESPONSE_TOO_LARGE');
+          }
+          finish(null, video);
+        } catch (failure) { finish(failure); }
+      };
+      window.addEventListener('message', receive);
+      signal?.addEventListener('abort', abort, { once: true });
+      frame.addEventListener('load', ask);
+      timeout = setTimeout(() => finish(schema.error('TIMEOUT')), 12_000);
+      if (signal?.aborted) { abort(); return; }
+      document.body.appendChild(frame);
+    });
+  }
+
+  async function loadVideo(target, signal) {
     const ids = videoIdFrom(target) || videoIdFrom(location.pathname);
     if (!ids) throw new Error('не удалось определить видео');
     const url = `${location.origin}/video_ext.php?oid=${encodeURIComponent(ids.oid)}`
       + `&id=${encodeURIComponent(ids.id)}&hd=4&autoplay=0`;
     // With cookies: age-restricted and closed-group videos answer with an error
     // payload otherwise, and the site itself loads the player the same way.
-    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store' });
+    const response = await mendoFetch(url, { credentials: 'include', cache: 'no-store', signal });
+    signal?.throwIfAborted();
     if (!response.ok) throw new Error(`страница плеера не открылась (HTTP ${response.status})`);
     // VK still serves this endpoint as windows-1251. Read as UTF-8 the title
     // decodes to replacement characters and the saved file is called
     // "VK - ???????.m4a", so the charset is taken from the response itself.
-    const html = decodeBody(await response.arrayBuffer(), response.headers.get('content-type'));
-    const files = extractObject(html, 'files');
-    if (!files) {
+    const html = await readPlayerBody(response, signal);
+    signal?.throwIfAborted();
+    const legacy = legacyVideo(html, ids);
+    if (!legacy) {
+      if (/window\.isBFF\s*=\s*true\b/.test(html)) return loadNativeVideo(ids, url, signal);
       const reason = extractString(html, 'error_msg') || extractString(html, 'msg');
       throw new Error(reason || 'в ответе плеера нет ссылок на файлы');
     }
-    const durationMatch = html.match(/"duration":(\d+)/);
-    return {
-      ...ids,
-      files,
-      duration: durationMatch ? Number(durationMatch[1]) : 0,
-      title: extractString(html, 'md_title') || extractString(html, 'title') || `video${ids.oid}_${ids.id}`,
-    };
+    return legacy;
   }
 
   function progressiveRungs(files) {
@@ -262,36 +404,63 @@
     const response = await mendoFetch(url, {
       credentials: 'omit',
       cache: 'no-store',
+      redirect: 'error',
       headers: { Range: `bytes=${from}-${to}` },
     });
-    if (response.status !== 206 && response.status !== 200) {
-      throw new Error(`сервер отказал на диапазоне (HTTP ${response.status})`);
-    }
-    // A server may ignore Range or return a short body. Appending that body
-    // and advancing by its length can repeat the beginning or silently truncate
-    // the audio. Only accept the exact requested bytes before handing them on.
-    if (response.status === 200 && from !== 0) throw new Error('сервер проигнорировал диапазон аудиодорожки');
-    const range = response.headers.get('content-range');
-    if (range) {
-      // An exposed complete length must agree with the size used to end the
-      // download; exact start/end alone can still accept a truncated track.
-      const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(range);
-      const start = match ? Number(match[1]) : NaN;
-      const end = match ? Number(match[2]) : NaN;
-      const completeLength = match?.[3] === '*' ? null : Number(match?.[3]);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
-          || start !== from || end !== to
-          || (completeLength !== null && (!Number.isSafeInteger(completeLength)
-              || completeLength !== total || completeLength <= end))) {
-        throw new Error('сервер вернул другой диапазон аудиодорожки');
+    const expected = to - from + 1;
+    let reader;
+    try {
+      if (response.status !== 206 && response.status !== 200) {
+        throw new Error(`сервер отказал на диапазоне (HTTP ${response.status})`);
       }
+      // A server may ignore Range or return a short body. Appending that body
+      // and advancing by its length can repeat the beginning or silently truncate
+      // the audio. Only accept the exact requested bytes before handing them on.
+      if (response.status === 200 && from !== 0) throw new Error('сервер проигнорировал диапазон аудиодорожки');
+      const length = response.headers.get('content-length');
+      if (length !== null && (!/^\d+$/.test(length) || Number(length) !== expected)) {
+        throw new Error('сервер вернул неполный или неверный диапазон медиа');
+      }
+      const range = response.headers.get('content-range');
+      if (range) {
+        // An exposed complete length must agree with the size used to end the
+        // download; exact start/end alone can still accept a truncated track.
+        const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(range);
+        const start = match ? Number(match[1]) : NaN;
+        const end = match ? Number(match[2]) : NaN;
+        const completeLength = match?.[3] === '*' ? null : Number(match?.[3]);
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+            || start !== from || end !== to
+            || (completeLength !== null && (!Number.isSafeInteger(completeLength)
+                || completeLength !== total || completeLength <= end))) {
+          throw new Error('сервер вернул другой диапазон аудиодорожки');
+        }
+      }
+      // Bound the body independently of headers: an ignored Range must never
+      // materialize a two-hour progressive file in page memory.
+      reader = response.body?.getReader();
+      if (!reader) throw new Error('сервер не предоставил поток диапазона медиа');
+      const bytes = new Uint8Array(expected);
+      let at = 0;
+      for (;;) {
+        mendoCheck();
+        const { done, value } = await reader.read();
+        mendoCheck();
+        if (done) break;
+        if (!Number.isSafeInteger(value?.byteLength) || value.byteLength > expected - at) {
+          throw new Error('сервер вернул неполный или неверный диапазон медиа');
+        }
+        // Own the network view before species-based subarray/base64 operations.
+        const incoming = new Uint8Array(value);
+        if (incoming.length !== value.byteLength) throw new Error('сервер вернул неверные данные диапазона');
+        bytes.set(incoming, at); at += incoming.length;
+      }
+      if (at !== expected) throw new Error('сервер вернул неполный или неверный диапазон медиа');
+      return bytes;
+    } finally {
+      await (reader || response.body)?.cancel().catch(() => {});
+      reader?.releaseLock();
     }
-    // Own the backing buffer before species-based subarray/base64 operations:
-    // Gecko's view over a DOM-returned ArrayBuffer can retain its foreign realm.
-    const fetchedBytes = new Uint8Array(await response.arrayBuffer());
-    const bytes = new Uint8Array(fetchedBytes);
-    if (bytes.length !== to - from + 1) throw new Error('сервер вернул неполный или неверный диапазон аудиодорожки');
-    return bytes;
   }
 
   // `Content-Range` is not a CORS-safelisted response header, so its value is
@@ -302,7 +471,7 @@
   async function probeSize(url) {
     for (const method of ['HEAD', 'GET']) {
       try {
-        const response = await mendoFetch(url, { method, credentials: 'omit', cache: 'no-store' });
+        const response = await mendoFetch(url, { method, credentials: 'omit', cache: 'no-store', redirect: 'error' });
         const length = response.headers.get('content-length');
         const total = /^\d+$/.test(length || '') ? Number(length) : 0;
         if (method === 'GET') await response.body?.cancel().catch(() => {});
@@ -368,6 +537,49 @@
         state.paused
           ? 'Пауза в браузере'
           : (total ? `Загрузка · ${formatBytes(received)} из ${formatBytes(total)}` : 'Загрузка файла'));
+    }
+  }
+
+  async function downloadPackageVideo(url, filename, notification, producer) {
+    notification.stage('file', null, 'active', 'Читаю размер видео');
+    const total = await probeSize(url);
+    if (!total) throw new Error('сервер не сообщил размер видео');
+    if (total > 1024 ** 3) throw new Error('Размер видео превышает лимит временного хранилища');
+    const transferId = crypto.randomUUID();
+    let opened = false, finished = false, port;
+    const requireOk = response => {
+      if (!response?.ok) throw new Error(response?.error || 'передача видео прервалась');
+      return response;
+    };
+    try {
+      requireOk(await mendoSend({ t: 'mendosave-ensure' }, producer));
+      mendoCheck(); opened = true;
+      requireOk(await mendoSend({ t: 'mendosave-blob-open', transferId, filename,
+        mime: 'video/mp4', size: total }, producer));
+      port = chrome.runtime.connect({ name: `mendosave-transfer:${transferId}` });
+      let sequence = 0;
+      for (let at = 0; at < total;) {
+        // Feed the existing 60s transfer deadline after each 1 MiB range,
+        // rather than waiting for a complete 8 MiB audio-sized read.
+        const end = Math.min(total - 1, at + PACKAGE_SLICE_BYTES - 1);
+        const bytes = await fetchRange(url, at, end, total);
+        for (let offset = 0; offset < bytes.length; offset += 1024 ** 2) {
+          mendoCheck();
+          requireOk(await mendoSend({ t: 'mendosave-blob-chunk', transferId, sequence: sequence++,
+            data: encodeBase64(bytes.subarray(offset, Math.min(offset + 1024 ** 2, bytes.length))) }, producer));
+        }
+        at += bytes.length;
+        notification.stage('file', at / total, 'active', 'Получение видео');
+      }
+      mendoCheck();
+      notification.stage('file', 1, 'active', 'Сохранение видео');
+      const result = requireOk(await mendoSend({ t: 'mendosave-blob-finish', transferId }, producer));
+      mendoCheck(); finished = true;
+      notification.stage('file', 1, 'done', 'Загрузка файла');
+      return result.filename || filename;
+    } finally {
+      if (opened && !finished) await mendoSend({ t: 'mendosave-blob-abort', transferId }, producer).catch(() => {});
+      try { port?.disconnect(); } catch {}
     }
   }
 
@@ -526,9 +738,32 @@
   // ---- menu ------------------------------------------------------------------
 
   function closeMenu() {
+    cancelMenuFit?.(); cancelMenuFit = undefined;
+    menuRequest?.controller.abort();
+    menuRequest = undefined;
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
+    window.removeEventListener('scroll', followMenu, true);
+    window.removeEventListener('resize', followMenu);
+  }
+
+  function followMenu() {
+    if (!menuRequest || cancelMenuFit) return;
+    const fit = () => {
+      cancelMenuFit = undefined;
+      if (!menuRequest || menuRequest.source !== location.href) return;
+      const anchor = playerShadowRoot()?.querySelector(`.${BUTTON_CLASS}`)
+        || document.querySelector(`.${BUTTON_CLASS}`) || menuRequest.button;
+      if (anchor?.isConnected) positionMenu(anchor);
+    };
+    if (typeof window.requestAnimationFrame === 'function') {
+      const id = window.requestAnimationFrame(fit);
+      cancelMenuFit = () => window.cancelAnimationFrame(id);
+    } else {
+      const id = setTimeout(fit, 0);
+      cancelMenuFit = () => clearTimeout(id);
+    }
   }
 
   // `event.target` is retargeted to the shadow host for anything inside the
@@ -569,19 +804,23 @@
     const notification = getToast();
     let producer;
     try {
-      if (choice.kind !== 'video') producer = await reserveProcessor();
+      if (choice.kind !== 'video' || bundled) producer = await reserveProcessor();
       let filename;
       if (choice.kind === 'video') {
         filename = `VK - ${safeName(info.title)} [${choice.rung.height}p].mp4`;
         notification.begin(`Скачиваю ${choice.rung.height}p…`, [{ id: 'file', label: 'Загрузка файла' }]);
-        notification.stage('file', null, 'active', 'Передача браузеру');
-        const downloadId = await saveDirect(choice.rung.url, filename);
-        log('video', `handed to downloads; height=${choice.rung.height} id=${downloadId}`);
-        // The browser only ACCEPTED it here; the bytes keep arriving for a
-        // while, so the panel follows the real transfer instead of claiming
-        // "готово" against a downloads list that says otherwise.
-        await followBrowserDownload(downloadId, notification);
-        filename = downloadId?.filename || filename;
+        if (bundled) {
+          filename = await downloadPackageVideo(choice.rung.url, filename, notification, producer);
+        } else {
+          notification.stage('file', null, 'active', 'Передача браузеру');
+          const downloadId = await saveDirect(choice.rung.url, filename);
+          log('video', `handed to downloads; height=${choice.rung.height} id=${downloadId}`);
+          // The browser only ACCEPTED it here; the bytes keep arriving for a
+          // while, so the panel follows the real transfer instead of claiming
+          // "готово" against a downloads list that says otherwise.
+          await followBrowserDownload(downloadId, notification);
+          filename = downloadId?.filename || filename;
+        }
         notification.set(`Готово: ${filename}`, 1);
       } else {
         notification.begin(`Скачиваю звук · ${choice.audioFormat === 'mp3' ? 'MP3' : 'M4A'}…`, [
@@ -610,11 +849,35 @@
     }
   }
 
-  async function openMenu(button, event) {
+  function openMenu(button, event) {
     event.preventDefault();
     event.stopPropagation();
     if (packageRunning()) return;
+    if (menu && menuRequest?.source !== location.href) closeMenu();
     if (menu) { closeMenu(); return; }
+    return showMenu(button);
+  }
+
+  async function loadMenuVideo(request) {
+    const signal = request.controller.signal;
+    let timeout, onAbort;
+    try {
+      return await new Promise((resolve, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        timeout = setTimeout(() => request.controller.abort(globalThis.MendoVKSource?.error('TIMEOUT')
+          || new Error('плеер не ответил вовремя; повторите попытку')), 20_000);
+        loadVideo(request.source, signal).then(resolve, reject);
+      });
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async function showMenu(button, cachedInfo) {
+    if (packageRunning()) return button;
+    closeMenu();
     menu = createElement('div', 'mendosave-vk-menu');
     const heading = createElement('div', 'mendosave-vk-head', `MendoSave v${chrome.runtime.getManifest().version}`);
     const loading = createElement('div', 'mendosave-vk-item mendosave-vk-muted', 'Читаю данные видео…');
@@ -623,9 +886,16 @@
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
 
+    const request = { menu, button, source: location.href, controller: new AbortController() };
+    menuRequest = request;
+    window.addEventListener('scroll', followMenu, true);
+    window.addEventListener('resize', followMenu);
+    const ownsMenu = () => menuRequest === request && menu === request.menu
+      && location.href === request.source;
+
     try {
-      const info = await loadVideo(location.href);
-      if (!menu) return;
+      const info = cachedInfo || await loadMenuVideo(request);
+      if (!ownsMenu()) return;
       loading.remove();
       const choices = buildChoices(info);
       if (!choices.length) throw new Error('у этого видео нет доступных файлов');
@@ -636,39 +906,95 @@
         item.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
-          item.click();
+          MendoMenu.activate(item, event);
         });
         item.append(createElement('span', 'mendosave-vk-text', choice.text));
         if (choice.hint) item.append(createElement('span', 'mendosave-vk-hint', choice.hint));
-        item.addEventListener('click', () => { closeMenu(); void runChoice(info, choice); });
+        MendoMenu.onActivate(item, () => {
+          if (!ownsMenu()) { closeMenu(); return; }
+          closeMenu(); void runChoice(info, choice);
+        });
         menu.append(item);
       }
-      if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
+      const opener = choices.length > 1 ? globalThis.MendoPackageUI?.add(menu, {
         title: info.title, source: `vk:${info.oid}_${info.id}`, close: closeMenu,
-        options: choices.map((choice, index) => ({
-          id: `vk-${index}`, label: choice.text,
-          run: () => runChoice(info, choice),
-        })),
-      });
+        back: async () => {
+          schedule();
+          const anchor = playerShadowRoot()?.querySelector(`.${BUTTON_CLASS}`)
+            || document.querySelector(`.${BUTTON_CLASS}`) || (button?.isConnected ? button : null);
+          const current = videoIdFrom(location.href);
+          const reusable = current?.oid === info.oid && current?.id === info.id;
+          return showMenu(anchor, reusable ? info : undefined);
+        },
+        options: () => {
+          if (!ownsMenu()) { closeMenu(); void showMenu(button); return []; }
+          return choices.map(choice => ({
+            id: choice.kind === 'video' ? `vk-video-${choice.rung.height}` : `vk-audio-${choice.audioFormat}`,
+            label: choice.text, group: choice.kind === 'video' ? 'Видео' : 'Аудио',
+            run: () => runChoice(info, choice),
+          }));
+        },
+      }) : null;
+      bindMenu(button);
       positionMenu(button);
+      return opener || button;
     } catch (error) {
-      if (!menu) return;
+      if (!ownsMenu() || error?.name === 'AbortError') return;
       loading.remove();
       menu.append(createElement('div', 'mendosave-vk-item mendosave-vk-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
+      const retry = createElement('button', 'mendosave-vk-item', 'Повторить');
+      retry.type = 'button';
+      retry.setAttribute('role', 'button');
+      MendoMenu.onActivate(retry, event => {
+        event.preventDefault(); event.stopPropagation();
+        if (ownsMenu()) void showMenu(button);
+      });
+      menu.append(retry);
+      bindMenu(button);
+      positionMenu(button);
       log('menu', `list failed: ${String(error?.message || error)}`);
+      return retry;
     }
+  }
+
+  function bindMenu(button) {
+    globalThis.MendoMenu?.bind(menu, () => {
+      closeMenu();
+      if (button?.isConnected) button.focus();
+    }, '.mendosave-vk-item[role="button"],.mendo-package-open');
   }
 
   function positionMenu(button) {
     if (!menu || !button) return;
+    const margin = 8;
+    const clamp = (value, limit) => Math.max(margin, Math.min(value, limit));
+    menu.style.maxHeight = `${Math.max(1, window.innerHeight - 2 * margin)}px`;
+    menu.style.maxWidth = `${Math.max(1, window.innerWidth - 2 * margin)}px`;
     const box = button.getBoundingClientRect();
     const width = menu.getBoundingClientRect().width || 280;
-    const height = menu.getBoundingClientRect().height || 200;
-    menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, box.right - width))}px`;
-    menu.style.top = box.top > height + 16
-      ? `${box.top - height - 8}px`
-      : `${Math.min(window.innerHeight - height - 8, box.bottom + 8)}px`;
+    let height = menu.getBoundingClientRect().height || 200;
+    const above = box.top - 2 * margin;
+    const below = window.innerHeight - box.bottom - 2 * margin;
+    let left = clamp(box.right - width, window.innerWidth - width - margin);
+    let top;
+    if (above >= height) top = box.top - height - margin;
+    else if (below >= height) top = box.bottom + margin;
+    else if (box.left >= width + 2 * margin) {
+      left = box.left - width - margin;
+      top = clamp(box.top, window.innerHeight - height - margin);
+    } else if (window.innerWidth - box.right >= width + 2 * margin) {
+      left = box.right + margin;
+      top = clamp(box.top, window.innerHeight - height - margin);
+    } else {
+      // A narrow viewport cannot fit the list beside the icon. Scroll the
+      // list above or below it so a repeat click still targets the icon.
+      menu.style.maxHeight = `${Math.max(1, Math.max(above, below))}px`;
+      height = menu.getBoundingClientRect().height || 200;
+      top = above >= below ? box.top - height - margin : box.bottom + margin;
+    }
+    menu.style.left = `${clamp(left, window.innerWidth - width - margin)}px`;
+    menu.style.top = `${clamp(top, window.innerHeight - height - margin)}px`;
   }
 
   // ---- mounting ----------------------------------------------------------------
@@ -746,7 +1072,7 @@
     button.title = 'Скачать видео (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
-    button.addEventListener('click', (event) => { void openMenu(button, event); });
+    MendoMenu.onActivate(button, (event) => { void openMenu(button, event); });
     return button;
   }
 
@@ -794,10 +1120,13 @@
   // An interval, not requestAnimationFrame: rAF does not run in a hidden tab,
   // and the SPA re-renders the player on every in-page navigation anyway.
   function schedule() {
-    try { ensureButton(); } catch (error) {}
+    try {
+      if (menuRequest && menuRequest.source !== location.href) closeMenu();
+      ensureButton();
+      if (menuRequest) followMenu();
+    } catch (error) {}
   }
   setInterval(schedule, 1000);
   document.addEventListener('visibilitychange', schedule);
-  window.addEventListener('scroll', () => { if (menu) closeMenu(); }, { passive: true });
   schedule();
 })();

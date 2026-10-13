@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function browserContext(overrides = {}) {
+  const { fetch: fetchOverride, ...browserOverrides } = overrides;
   const listeners = {};
   const event = (name) => ({ addListener(fn) { listeners[name] = fn; } });
   const data = {};
@@ -22,13 +23,17 @@ function browserContext(overrides = {}) {
     action: { async setBadgeText() {}, async setBadgeBackgroundColor() {}, async setBadgeTextColor() {} },
     downloads: { async download() { return 1; }, async search() { return []; } },
     tabs: { onRemoved: event('tabRemoved'), async query() { return []; } },
-    ...overrides,
+    ...browserOverrides,
   };
   const context = vm.createContext({
     chrome, URL, console, setTimeout, clearTimeout, AbortSignal,
     MendoProcessorHost: { async ensure() {} },
     navigator: { userAgent: 'test' },
-    fetch: async (url) => { network.push(url); throw new Error('unexpected network'); },
+    fetch: async (url, options) => {
+      network.push(url);
+      if (fetchOverride) return fetchOverride(url, options);
+      throw new Error('unexpected network');
+    },
   });
   vm.runInContext(fs.readFileSync('browser-hosts/firefox.js', 'utf8'), context);
   if (fs.existsSync('extension/platform.js')) vm.runInContext(fs.readFileSync('extension/platform.js', 'utf8'), context);

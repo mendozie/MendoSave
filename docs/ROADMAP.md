@@ -1,11 +1,51 @@
 # MendoSave - roadmap
 
 Основание: [PROJECT_SPEC.md](PROJECT_SPEC.md).
-Актуализировано: 11-10-2026.
+Актуализировано: 13-10-2026.
 
 `[ ]` - не начато; `[~]` - выполняется либо остаётся необходимая проверка; `[x]` - результат технически проверен. Пользовательская приёмка и публикация отмечаются отдельно. Дальние этапы уточняются перед выполнением по spec; они не расширяют разрешения автоматически.
 
 ## Текущее состояние
+
+Срез `0.3.2-r2` принят пользователем 13-10-2026. Выпуск 0.3.2, PR/review/merge в main и Mozilla unlisted signing прямо разрешены; прежний local-only запрет снят для этого результата. Новое поручение разрешает обновить README, описание и скриншоты и сделать существующий GitHub-репозиторий публичным после проверки файлов, истории и внешних материалов на секреты и приватные данные. Публикация выполняется после release checks и устранения подтверждённых blockers. Исходные кандидаты и evidence сохраняются. Последняя опубликованная подписанная версия пока 0.3.1.
+
+### Выпуск 0.3.3 и открытие репозитория
+
+0.3.2 уже отправлена в Mozilla, но не распространяется через GitHub Release. Последующие PR corrections входят в новый patch version 0.3.3; [проверки](RELEASE_VERIFICATION_033.md).
+
+- [x] Пользовательская приёмка r2 и прямое разрешение на merge, подписание, Release обоих движков и публичную видимость после проверок.
+- [x] Совокупный code review и Standard security scan завершены. Четыре security findings и live-anchor VK correction исправлены, independently reviewed и проверены 862 tests/native Zen; [область и ограничения](SECURITY_REVIEW_032.md). Git history, GitHub materials, 22 Actions logs, 44 Actions archives/132 nested archives и опубликованные пакеты проверены без обнаруженных приватных данных. Финальный outgoing/source readback остаётся gate публикации.
+- [~] README, Mozilla reviewer description, privacy и реальные скриншоты итоговой 0.3.3 обновлены; public GitHub description и финальная инструкция подписанного выпуска ожидают readback. Provenance и условия библиотек сохранены.
+- [~] Managed review промежуточного head завершён; три замечания воспроизведены и исправлены. Полная suite 0.3.3: 867 PASS, native diagnostic export и новые фотографии проверены. Итоговый независимый correction review недоступен после cybersecurity flag; собственная проверка закрыла дополнительные PSSH/senc/lazy-subsample gaps. CI нового head выполняется; merge только проверенного head.
+- [ ] Получить unlisted signed XPI, сравнить application bytes/source, проверить постоянное обновление и restart отдельного Zen, готовый файл.
+- [ ] После privacy gate открыть репозиторий, опубликовать Release с обоими пакетами/source/manifest/hashes, прочитать saved state и убрать merged task branch.
+
+### Локальный срез 0.3.2
+
+**Рубеж ручной приёмки - 13-10-2026.** При возобновлении все 38 файлов WIP совпали с копией остановки; base `5fea4facdd383444bb0692283393edf35b5f7859`, branch `fix/032-source-and-package-ux`. Старый checkpoint, patch, copies и hashes сохранены в ignored `.local/qa/candidate-032-12-10-2026/SAFE_STOP.md` и `safe-stop/`. Новые результаты находятся в `.local/qa/candidate-032-13-10-2026/`. Финальные correction reviews завершены; дополнительно исправлены миллисекунды SRT, бесконечное ожидание Twitch metadata и классификация `audio_only`. Собственные native browsers остановлены, необходимые профили и доказательства сохранены.
+
+- [x] Согласованы результат, UX и local-only граница; чистый checkout `5fea4fa`, отдельная task branch.
+- [x] Реализованы source binding SRT/plain/timed TXT и современный VK с сохранением legacy. Ready-panel correction прошла independent review 13/13; native Edge подтвердил тройной экспорт и точные SRT milliseconds. Specific legacy DOM reuse сегодня сайт не предоставил - его captured shape и regression evidence отмечены отдельно.
+- [x] Исправлены Back/focus/keyboard, актуальность idle plan и подписи.
+- [x] Финальный runtime: 824/824 tests, lint 0 errors / 17 warnings, обе сборки по 60 файлов, build/dependency/outgoing checks и совокупный review прошли. Native media/subtitles/ZIP bytes, доступные UX controls и wide/narrow screenshots проверены. Непроверенные и отрицательные пути не объявлены успешными; подробности - в отчёте 0.3.2.
+- [x] Локальная поставка: unsigned XPI, Chromium ZIP, matching source, SHA-256/manifest и инструкция отдельного тестового профиля; точный revision фиксируется manifest из чистого локального commit.
+- [x] Пользователь проверил исходный кандидат и поручил исправления; повторная техническая проверка и поставка r2 завершены локально. Новая ручная приёмка отмечена ниже.
+
+### Исправления после ручной проверки 0.3.2
+
+Статус реализации: `[x]`; пользовательская приёмка r2 остаётся отдельно. Base повторного среза - чистый локальный commit `5ef99bb01e508f9e0b6ffc428b2fdfd33f64d567`. Последующее решение добавляет R-006d и R-014a; прежнее ограничение idle Close заменено прямым запросом на два крестика. Во время загрузки и cancellation cleanup крестики отключены, Hide/Cancel сохраняются. Нового решения пользователя для этих исправлений не требуется.
+
+- [x] В исходном XPI и отдельном Zen воспроизведены закрытие VK-меню при фактической прокрутке и NetworkError пакета 480p на сообщённом материале. Тот же фактический CDN URL отвечает HTTP 200 из VK page origin и HTTP 400/NetworkError из extension origin; signed query и cookies не сохранены. Профиль анонимный, штатное видео играет.
+- [x] Убрать scroll-close; добавить bounded page-origin transport пакета с существующими producer/Blob/OPFS contracts, проверкой bytes и отменой. Реальный ISOLATED Range дал HTTP 206 и Origin/ACAO страницы; полный 480p завершён и декодирован. Одиночный native 144p завершён с теми же bytes; код пути сохранён.
+- [x] Добавить LMB drag верхней области, границы viewport, resize/hide/reopen, два guarded ×. Native Zen 1726×1183/326×843 и Edge 1440×1000/360×800, pointer/keyboard и disabled close/cancel/retry проверены. Дополнительно исправлено реальное перекрытие значка длинным VK-меню; итоговый repeat click не создаёт download.
+- [x] Проверить место и работу Save As, исправить доказанную startup race без изменения default или размещения controls; native popup/persistence в обеих средах прошли. Physical toolbar/chooser остаются ручной проверкой.
+- [x] Завершить совокупный review и обязательные checks: 851/851, lint 0 errors / 17 прежних warnings, оба build inventories по 60 файлов, dependencies и web-ext прошли. Полный 480p, отмена и новый ZIP, media/CRC/bytes проверены; [отчёт r2](V032_R2_VERIFICATION.md).
+- [x] Локальный runtime commit `94a04d46fa090d26d0c6653ec377dbef97959fe4`; отдельные unsigned archives/matching source/manifest/hashes r2 сохранены из чистого состояния. Readback подтвердил CRC/bytes обоих inventories по 60 entries и 167 source entries с точными Git bytes. Исходные 124 защищённых файла и пакета не изменились. Этот последующий документальный commit фиксирует завершение поставки и не меняет runtime или её source revision.
+- [x] Повторная пользовательская приёмка r2 и решение о выпуске получены 13-10-2026; следующий шаг указан в блоке выпуска выше.
+
+Новые ignored доказательства: `.local/qa/candidate-032-fixes-13-10-2026/`. Они не заменяют исходный отчёт и не распространяют старые PASS на новые bytes.
+
+Сценарии и фактические ограничения 0.3.2 - в [V032_VERIFICATION.md](V032_VERIFICATION.md). Исторический local-only рубеж снят прямым решением от 13-10-2026; актуальные разрешения и gates указаны в блоке выпуска выше.
 
 - Текущий результат: подписанная 0.3.1 и пакеты обоих движков для ручной установки через GitHub Release. Срез 0.3.1 добавляет неблокирующее окно, timed TXT и исправления отмены/progress/processor lifecycle; [проверки](V031_VERIFICATION.md) и [поставка](SIGNING_VERIFICATION_031.md) завершены. Фазы 1-3 сохраняют основу выбора места сохранения, очереди и ZIP; [PHASE3_VERIFICATION.md](PHASE3_VERIFICATION.md) и [PHASE2_CHECKPOINT.md](PHASE2_CHECKPOINT.md) остаются историческими evidence.
 - Выполнено: собственное оформление и общий код двух сборок; отключён upstream updater. Все пути используют общий Save As, включая Page-Blob. Подготовленные ZIP-входы сохраняются для ручного восстановления; sender, вкладка, документ, job и текущий индекс проверяются. Старые durable keys и recovery directory сохранены. Проверенная совместимость находится в [SITE_MATRIX.md](SITE_MATRIX.md).

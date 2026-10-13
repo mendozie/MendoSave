@@ -82,8 +82,13 @@
     return rungs.find((height) => height <= target) ?? rungs[rungs.length - 1];
   }
 
-  async function load() {
-    const stored = await chrome.storage.local.get(KEY).catch(() => ({}));
+  async function load({ strict = false } = {}) {
+    // Pages can use defaults when storage is unavailable. The popup must
+    // distinguish that failure from preferences the user has never chosen.
+    const stored = await chrome.storage.local.get(KEY).catch((error) => {
+      if (strict) throw error;
+      return {};
+    });
     return normalize(stored?.[KEY]);
   }
 

@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const { parseHTML, DOMParser } = require('linkedom');
+const { parseHTML, DOMParser, UserEvent } = require('./user-dom.cjs');
 const { producerPorts } = require('./producer-port-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
 
@@ -55,12 +55,13 @@ function adapter(script, html, href, network, send) {
     },
     async saveBlob(blob, filename) { blobs.push(blob); downloads.push(filename); return filename; },
   };
+  vm.runInContext(fs.readFileSync('extension/menu.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync(`extension/${script}`, 'utf8'), context, { filename: script });
   return {
     document, messages, requests, downloads, blobs, context, producers,
-    click(element) { element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true })); },
+    click(element) { element.dispatchEvent(new UserEvent('click', { bubbles: true, cancelable: true })); },
     press(element, key, repeat = false) {
-      const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+      const event = new UserEvent('keydown', { bubbles: true, cancelable: true });
       event.key = key;
       event.repeat = repeat;
       element.dispatchEvent(event);

@@ -112,20 +112,38 @@ test('Twitch clip package resolves a collected file without querying a download 
   assert.equal(app.messages.some((message) => message.t === 'mendosave-download-state'), false);
 });
 
+test('Twitch VOD package groups the declared audio_only rendition separately from video', async () => {
+  const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,VIDEO="720p30"\n720.m3u8\n'
+    + '#EXT-X-STREAM-INF:BANDWIDTH=160000,CODECS="mp4a.40.2",VIDEO="audio_only"\naudio.m3u8\n';
+  const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
+    'https://www.twitch.tv/videos/551972874', async url => url.includes('gql.twitch.tv')
+      ? { ok: true, json: async () => ({ data: { videoPlaybackAccessToken: { signature: 'fixture', value: 'fixture' } } }) }
+      : { ok: true, text: async () => master });
+  app.context.MendoPackageUI.add = (_menu, picker) => { app.picker = picker; };
+  app.click(app.document.querySelector('#mendosave-twitch-record')); await app.settle();
+  assert.equal(app.picker.options.find(entry => entry.label === '720p').group, 'Видео');
+  assert.equal(app.picker.options.find(entry => entry.label === 'audio_only').group, 'Аудио');
+  assert.equal(app.messages.some(message => /mendosave-(?:save|begin|live-begin)$/.test(message.t)), false);
+});
+
 test('VK format package includes video and audio and does not poll archive-collected video', async () => {
   const payload = require('node:fs').readFileSync('tests/fixtures/vk-player.html', 'utf8');
+  const bytes = Uint8Array.of(0, 0, 0, 4);
   const app = adapter('vk.js', '<div class="VideoPlayer__player"><video></video></div>',
-    'https://vkvideo.ru/video-1_2', async () => ({ ok: true,
+    'https://vkvideo.ru/video-1_2', async (url, options) => url.includes('video_ext.php') ? { ok: true,
       headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
       arrayBuffer: async () => new TextEncoder().encode(payload).buffer,
-    }), () => ({ ok: true, collected: true, filename: 'vk-collected.mp4' }));
+    } : options.method === 'HEAD' ? new Response(null, { headers: { 'content-length': '4' } })
+      : new Response(bytes, { status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' } }),
+    () => ({ ok: true, collected: true, filename: 'vk-collected.mp4' }));
   app.context.MendoPackageUI.add = (_menu, picker) => { app.picker = picker; };
   app.click(app.document.querySelector('.mendosave-vk-btn'));
   await app.settle();
-  assert.ok(app.picker.options.some((entry) => entry.label.includes('M4A')));
-  assert.ok(app.picker.options.some((entry) => entry.label.includes('MP3')));
+  const choices = app.picker.options();
+  assert.ok(choices.some((entry) => entry.label.includes('M4A')));
+  assert.ok(choices.some((entry) => entry.label.includes('MP3')));
   app.context.MendoPackageUI.running = true;
-  assert.equal(await app.picker.options.find((entry) => entry.label.includes('Видео')).run(), 'vk-collected.mp4');
+  assert.equal(await choices.find((entry) => entry.label.includes('Видео')).run(), 'vk-collected.mp4');
   assert.equal(app.messages.some((message) => message.t === 'mendosave-download-state'), false);
 });
 
