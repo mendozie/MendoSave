@@ -1,20 +1,20 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { parseHTML } = require('linkedom');
+const { parseHTML, UserEvent } = require('./user-dom.cjs');
 
 test('menu controls support keyboard selection, navigation and Escape', () => {
   const { bind } = require('../extension/menu.js');
-  const { document, window } = parseHTML('<div id="menu"><div class="mendosave-menu-item">Video</div><div class="mendosave-menu-item disabled">Unavailable</div><div class="mendosave-menu-radio sel">Original</div></div>');
+  const { document } = parseHTML('<div id="menu"><div class="mendosave-menu-item">Video</div><div class="mendosave-menu-item disabled">Unavailable</div><div class="mendosave-menu-radio sel">Original</div></div>');
   const menu = document.getElementById('menu');
   let focused, selected = 0, closed = 0;
   for (const control of menu.children) control.focus = () => { focused = control; };
-  menu.firstElementChild.addEventListener('click', () => selected++);
+  require('../extension/menu.js').onActivate(menu.firstElementChild, () => selected++);
   bind(menu, () => closed++);
   assert.equal(focused, menu.firstElementChild);
   assert.equal(menu.children[1].getAttribute('aria-disabled'), 'true');
   assert.equal(menu.children[1].tabIndex, -1);
   function press(target, key) {
-    const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+    const event = new UserEvent('keydown', { bubbles: true, cancelable: true });
     event.key = key; target.dispatchEvent(event);
     assert.equal(event.defaultPrevented, true);
   }
@@ -37,15 +37,15 @@ test('menu placement keeps a narrow viewport within its visible bounds', () => {
 
 test('the package opener participates in keyboard navigation and activation without selecting disabled rows', () => {
   const { bind } = require('../extension/menu.js');
-  const { document, window } = parseHTML('<div id="menu"><div class="mendosave-menu-item">Video</div><div class="mendosave-menu-item disabled">Unavailable</div><div class="mendosave-menu-radio">Original</div><button class="mendo-package-open">Select multiple</button></div>');
+  const { document } = parseHTML('<div id="menu"><div class="mendosave-menu-item">Video</div><div class="mendosave-menu-item disabled">Unavailable</div><div class="mendosave-menu-radio">Original</div><button class="mendo-package-open">Select multiple</button></div>');
   const menu = document.getElementById('menu'), opener = menu.lastElementChild;
   let focused, packages = 0, unavailable = 0, closed = 0;
   for (const control of menu.children) control.focus = () => { focused = control; };
-  opener.addEventListener('click', () => packages++);
+  require('../extension/menu.js').onActivate(opener, () => packages++);
   menu.children[1].addEventListener('click', () => unavailable++);
   bind(menu, () => closed++);
   const press = (target, key) => {
-    const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+    const event = new UserEvent('keydown', { bubbles: true, cancelable: true });
     event.key = key; target.dispatchEvent(event); assert.equal(event.defaultPrevented, true);
   };
   press(focused, 'End'); assert.ok(focused === opener, 'End reaches the package opener');
@@ -63,12 +63,12 @@ test('the package opener participates in keyboard navigation and activation with
 
 test('shared menu navigation respects activation already handled by an adapter control', () => {
   const { bind } = require('../extension/menu.js');
-  const { document, window } = parseHTML('<div><button class="adapter-option mendosave-menu-item">Video</button><button class="mendo-package-open">Select multiple</button></div>');
+  const { document } = parseHTML('<div><button class="adapter-option mendosave-menu-item">Video</button><button class="mendo-package-open">Select multiple</button></div>');
   const menu = document.firstElementChild, video = menu.firstElementChild;
   let clicks = 0;
-  video.addEventListener('click', () => clicks++);
-  video.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); video.click(); } });
+  require('../extension/menu.js').onActivate(video, () => clicks++);
+  video.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); require('../extension/menu.js').activate(video, event); } });
   bind(menu, () => {}, 'button');
-  const event = new window.Event('keydown', { bubbles: true, cancelable: true }); event.key = 'Enter'; video.dispatchEvent(event);
+  const event = new UserEvent('keydown', { bubbles: true, cancelable: true }); event.key = 'Enter'; video.dispatchEvent(event);
   assert.equal(clicks, 1, 'the adapter and shared menu cannot activate a control twice');
 });

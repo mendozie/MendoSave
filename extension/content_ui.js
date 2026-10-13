@@ -69,7 +69,7 @@
     clearTimeout(pending.timeout);
     if (data.ok === false) {
       const error = new Error(data.error || 'page hook failed');
-      error.details = data.details;
+      error.details = MendoDiagnostics.project(data.details);
       pending.reject(error);
     } else pending.resolve(data);
   });
@@ -137,7 +137,8 @@
   async function reportError(context, error, details) {
     const text = [error?.message || String(error), error?.stack].filter(Boolean).join('\n');
     console.error('[MendoSave]', error);
-    return sendWorkerMessage({ t: 'mendosave-error', context, error: text, details }, 30_000).catch(() => null);
+    return sendWorkerMessage({ t: 'mendosave-error', context, error: MendoDiagnostics.text(text),
+      details: MendoDiagnostics.project(details) }, 30_000).catch(() => null);
   }
 
   function sendRuntimeMessage(message, timeoutMs, producer) {
@@ -232,7 +233,7 @@
     } else {
       button.append(createCircleIcon());
     }
-    button.addEventListener('click', openMenu);
+    MendoMenu.onActivate(button, openMenu);
     return button;
   }
 
@@ -404,7 +405,7 @@
           run: (transcode) => startDownload({ format: 'mp4', height }, info, { transcode }) });
         const item = createElement('div', 'mendosave-menu-item');
         setItemLabel(item, `${height}p`, 'MP4 video');
-        item.addEventListener('click', () => {
+        MendoMenu.onActivate(item, () => {
           closeMenu();
           startDownload({ format: 'mp4', height }, info);
         });
@@ -418,7 +419,7 @@
         run: () => startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, audio.title, audio.note);
-      item.addEventListener('click', () => {
+      MendoMenu.onActivate(item, () => {
         closeMenu();
         startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info);
       });
@@ -435,7 +436,7 @@
     for (const option of options) {
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, option.title, option.note);
-      item.addEventListener('click', () => {
+      MendoMenu.onActivate(item, () => {
         closeMenu();
         void startLiveRecording(info, option.from);
       });
@@ -447,7 +448,7 @@
     menu.append(createHeading('Плейлист'));
     const item = createElement('div', 'mendosave-menu-item');
     setItemLabel(item, 'Скачать плейлист…', `${items.length} видео, выбор в списке`);
-    item.addEventListener('click', () => {
+    MendoMenu.onActivate(item, () => {
       closeMenu();
       openPlaylistPicker(info, items);
     });
@@ -477,7 +478,7 @@
         run: () => downloadSubtitles(info, format, subtitleSource) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, label);
-      item.addEventListener('click', () => {
+      MendoMenu.onActivate(item, () => {
         closeMenu();
         void downloadSubtitles(info, format, subtitleSource);
       });
@@ -493,7 +494,7 @@
       const text = createElement('span', 'mendosave-radio-txt');
       text.append(createElement('b', null, option.title), createElement('i', null, option.note));
       row.append(createElement('span', 'mendosave-dot'), text);
-      row.addEventListener('click', (event) => {
+      MendoMenu.onActivate(row, (event) => {
         event.stopPropagation();
         selected = option.value;
         if (storageKey === 'transcode') packageTranscode = Boolean(selected);
@@ -613,7 +614,7 @@
       const cancelButton = createElement('button', 'mendosave-toast-cancel', 'Отменить загрузку');
       cancelButton.type = 'button';
       cancelButton.hidden = true;
-      cancelButton.addEventListener('click', () => box.__mendosaveCancel?.());
+      MendoMenu.onActivate(cancelButton, () => box.__mendosaveCancel?.());
       box.append(createElement('span', 'mendosave-toast-txt'), bar, createElement('div', 'mendosave-toast-stages'), cancelButton);
       document.body.append(box);
     }
@@ -1881,7 +1882,7 @@
       const head = createElement('div', 'mendosave-live-head');
       head.append(createElement('span', 'mendosave-live-dot'), createElement('span', 'mendosave-live-txt'));
       const stopButton = createElement('button', 'mendosave-btn mendosave-live-stop', 'Остановить и сохранить');
-      stopButton.addEventListener('click', () => {
+      MendoMenu.onActivate(stopButton, () => {
         stopButton.disabled = true;
         stopButton.textContent = 'Останавливаю…';
         void callHook('live-stop').catch(() => {});
@@ -2169,7 +2170,7 @@
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) closePlaylistPicker();
     });
-    startButton.addEventListener('click', async () => {
+    MendoMenu.onActivate(startButton, async () => {
       const chosen = items.filter((_, index) => checks[index].checked);
       if (!chosen.length) return;
       const [format, sub] = String(select.value).split(':');
@@ -2205,7 +2206,7 @@
       box.id = 'mendosave-queue';
       const body = createElement('div', 'mendosave-queue-body');
       const cancelButton = createElement('button', 'mendosave-btn mendosave-queue-cancel', 'Отменить очередь');
-      cancelButton.addEventListener('click', async () => {
+      MendoMenu.onActivate(cancelButton, async () => {
         await clearQueue();
         try { sessionStorage.removeItem('mendosave_queue_token'); } catch (error) {}
         if (IS_MUSIC) void callHook('music-mute', { mute: false }).catch(() => {});

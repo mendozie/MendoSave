@@ -81,6 +81,7 @@
 
   let menu;
   let menuRequest;
+  let cancelMenuFit;
   let busy = false;
   let toastBox;
 
@@ -737,11 +738,32 @@
   // ---- menu ------------------------------------------------------------------
 
   function closeMenu() {
+    cancelMenuFit?.(); cancelMenuFit = undefined;
     menuRequest?.controller.abort();
     menuRequest = undefined;
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
+    window.removeEventListener('scroll', followMenu, true);
+    window.removeEventListener('resize', followMenu);
+  }
+
+  function followMenu() {
+    if (!menuRequest || cancelMenuFit) return;
+    const fit = () => {
+      cancelMenuFit = undefined;
+      if (!menuRequest || menuRequest.source !== location.href) return;
+      const anchor = playerShadowRoot()?.querySelector(`.${BUTTON_CLASS}`)
+        || document.querySelector(`.${BUTTON_CLASS}`) || menuRequest.button;
+      if (anchor?.isConnected) positionMenu(anchor);
+    };
+    if (typeof window.requestAnimationFrame === 'function') {
+      const id = window.requestAnimationFrame(fit);
+      cancelMenuFit = () => window.cancelAnimationFrame(id);
+    } else {
+      const id = setTimeout(fit, 0);
+      cancelMenuFit = () => clearTimeout(id);
+    }
   }
 
   // `event.target` is retargeted to the shadow host for anything inside the
@@ -864,8 +886,10 @@
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
 
-    const request = { menu, source: location.href, controller: new AbortController() };
+    const request = { menu, button, source: location.href, controller: new AbortController() };
     menuRequest = request;
+    window.addEventListener('scroll', followMenu, true);
+    window.addEventListener('resize', followMenu);
     const ownsMenu = () => menuRequest === request && menu === request.menu
       && location.href === request.source;
 
@@ -882,11 +906,11 @@
         item.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
-          item.click();
+          MendoMenu.activate(item, event);
         });
         item.append(createElement('span', 'mendosave-vk-text', choice.text));
         if (choice.hint) item.append(createElement('span', 'mendosave-vk-hint', choice.hint));
-        item.addEventListener('click', () => {
+        MendoMenu.onActivate(item, () => {
           if (!ownsMenu()) { closeMenu(); return; }
           closeMenu(); void runChoice(info, choice);
         });
@@ -922,7 +946,7 @@
       const retry = createElement('button', 'mendosave-vk-item', 'Повторить');
       retry.type = 'button';
       retry.setAttribute('role', 'button');
-      retry.addEventListener('click', event => {
+      MendoMenu.onActivate(retry, event => {
         event.preventDefault(); event.stopPropagation();
         if (ownsMenu()) void showMenu(button);
       });
@@ -946,6 +970,7 @@
     const margin = 8;
     const clamp = (value, limit) => Math.max(margin, Math.min(value, limit));
     menu.style.maxHeight = `${Math.max(1, window.innerHeight - 2 * margin)}px`;
+    menu.style.maxWidth = `${Math.max(1, window.innerWidth - 2 * margin)}px`;
     const box = button.getBoundingClientRect();
     const width = menu.getBoundingClientRect().width || 280;
     let height = menu.getBoundingClientRect().height || 200;
@@ -968,7 +993,7 @@
       height = menu.getBoundingClientRect().height || 200;
       top = above >= below ? box.top - height - margin : box.bottom + margin;
     }
-    menu.style.left = `${left}px`;
+    menu.style.left = `${clamp(left, window.innerWidth - width - margin)}px`;
     menu.style.top = `${clamp(top, window.innerHeight - height - margin)}px`;
   }
 
@@ -1047,7 +1072,7 @@
     button.title = 'Скачать видео (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
-    button.addEventListener('click', (event) => { void openMenu(button, event); });
+    MendoMenu.onActivate(button, (event) => { void openMenu(button, event); });
     return button;
   }
 
@@ -1098,6 +1123,7 @@
     try {
       if (menuRequest && menuRequest.source !== location.href) closeMenu();
       ensureButton();
+      if (menuRequest) followMenu();
     } catch (error) {}
   }
   setInterval(schedule, 1000);

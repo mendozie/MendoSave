@@ -57,6 +57,68 @@ async function inspect(lib, bytes) {
   try { return await input.computeDuration(); } finally { input.dispose(); }
 }
 
+test('actual MP4 input bounds physical metadata entries across valid widths and repeated tables', async () => {
+  const lib = await mediabunny, original = await fixture(lib);
+  for (const width of [4, 8, 16]) {
+    const hostile = rewriteBoxes(original, type => {
+      if (type !== 'stsz') return;
+      const table = Buffer.alloc(12 + Math.ceil(64 * width / 8));
+      table[7] = width; table.writeUInt32BE(64, 8);
+      return box('stz2', table);
+    });
+    await assert.rejects(inspect(lib, hostile), /MP4 (?:sample|table) metadata limit/);
+  }
+  for (const type of ['stts', 'stsc', 'stco']) {
+    const hostile = rewriteBoxes(original, (name, payload) => name === type
+      ? Buffer.concat(Array.from({ length: 16 }, () => box(name, payload))) : undefined);
+    await assert.rejects(inspect(lib, hostile), /MP4 (?:sample|table) metadata limit/);
+  }
+  const entryBytes = { stts: 8, ctts: 8, stss: 4, stsc: 12, stco: 4, co64: 8 };
+  for (const [kind, bytes] of Object.entries(entryBytes)) {
+    const table = Buffer.alloc(8 + 64 * bytes); table.writeUInt32BE(64, 4);
+    const hostile = rewriteBoxes(original, (name, payload) => name === 'stbl'
+      ? box(name, Buffer.concat([payload, box(kind, table)])) : undefined);
+    await assert.rejects(inspect(lib, hostile), /MP4 table metadata limit/);
+  }
+  const variableSizes = rewriteBoxes(original, name => {
+    if (name !== 'stsz') return;
+    const table = Buffer.alloc(12 + 64 * 4); table.writeUInt32BE(64, 8);
+    return box(name, table);
+  });
+  await assert.rejects(inspect(lib, variableSizes), /MP4 table metadata limit/);
+  for (const tracks of [2, 3]) {
+    const combined = rewriteBoxes(original, (name, payload) => name === 'trak'
+      ? Buffer.concat(Array.from({ length: tracks }, (_, index) => box(name,
+        rewriteBoxes(payload, (type, data) => {
+          if (type !== 'tkhd') return;
+          const header = Buffer.from(data); header.writeUInt32BE(index + 1, 12); return box(type, header);
+        })))) : undefined);
+    if (tracks === 2) assert.equal(await inspect(lib, combined), 0.04);
+    else await assert.rejects(inspect(lib, combined), /MP4 table metadata limit/);
+  }
+});
+
+function fragmentIndex(bytes, count, copies = 1) {
+  let moofOffset = 0;
+  for (let at = 0; at < bytes.length; at += bytes.readUInt32BE(at)) {
+    if (bytes.toString('ascii', at + 4, at + 8) === 'moof') { moofOffset = at; break; }
+  }
+  assert.ok(moofOffset);
+  const entries = Buffer.alloc(16 + count * 11); entries.writeUInt32BE(1, 4); entries.writeUInt32BE(count, 12);
+  for (let i = 0; i < count; i++) { entries.writeUInt32BE(moofOffset, 16 + i * 11 + 4); entries.fill(1, 16 + i * 11 + 8, 16 + i * 11 + 11); }
+  const footer = Buffer.alloc(8), tfra = box('tfra', entries);
+  footer.writeUInt32BE(8 + tfra.length * copies + 16, 4);
+  return Buffer.concat([bytes, box('mfra', Buffer.concat([...Array(copies).fill(tfra), box('mfro', footer)]))]);
+}
+
+test('actual sized MP4 input accepts repeated index timestamps and bounds aggregate index entries', async () => {
+  const lib = await mediabunny, original = await fixture(lib, true);
+  assert.equal(await inspect(lib, fragmentIndex(original, 3)), 0.04);
+  await assert.rejects(inspect(lib, fragmentIndex(original, 64)), /MP4 (?:sample|table) metadata limit/);
+  assert.equal(await inspect(lib, fragmentIndex(original, 4, 2)), 0.04);
+  await assert.rejects(inspect(lib, fragmentIndex(original, 4, 3)), /MP4 table metadata limit/);
+});
+
 test('actual MP4 input rejects invalid compact sample widths before expanding sample counts', async () => {
   const lib = await mediabunny;
   const original = await fixture(lib);

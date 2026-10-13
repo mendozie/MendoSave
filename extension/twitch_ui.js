@@ -462,7 +462,7 @@
       item.type = 'button';
       item.className = 'mendosave-twitch-menu-item';
       item.textContent = quality.label;
-      item.addEventListener('click', () => {
+      MendoMenu.onActivate(item, () => {
         closeMenu();
         void runDownload(info, quality);
       });
@@ -861,7 +861,7 @@
     const badge = document.createElement('span');
     badge.className = 'mendosave-rec-time';
     button.append(badge);
-    button.addEventListener('click', () => { void onButtonClick(button); });
+    MendoMenu.onActivate(button, () => { void onButtonClick(button); });
     return button;
   }
 

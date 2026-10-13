@@ -16,7 +16,7 @@ module.exports = [
   },
   {
     files: ['extension/**/*.js', 'browser-hosts/**/*.js'],
-    languageOptions: { sourceType: 'script', globals: { ...globals.browser, chrome: 'readonly', browser: 'readonly', MendoDiagnostics: 'readonly' } },
+    languageOptions: { sourceType: 'script', globals: { ...globals.browser, chrome: 'readonly', browser: 'readonly', MendoDiagnostics: 'readonly', MendoMenu: 'readonly' } },
   },
   { files: ['extension/background.js', 'extension/mux_worker.js'], languageOptions: { globals: globals.worker } },
   { files: ['extension/offscreen.js'], languageOptions: { globals: { FFmpegWASM: 'readonly', MendoMediaPlan: 'readonly', reportError: 'off' } } },

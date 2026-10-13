@@ -42,6 +42,44 @@ const edits = {
       '\tconst frameLength = bitstream.readBits(13);\n\tif (frameLength < (protectionAbsence === 1 ? 7 : 9)) throw new Error("Invalid ADTS frame length");\n'],
   ],
 };
+// Charge retained physical tables and revisits before allocation/iteration.
+// One demuxer budget spans boxes and tracks; compact constant-size tables
+// charge one entry regardless of their logical sample count.
+edits.bundle.push(
+  ['const MENDO_MAX_EXPANDED_MP4_SAMPLES=1000000;\n',
+    'const MENDO_MAX_EXPANDED_MP4_SAMPLES=1000000;\nfunction mendoClaimMp4Table(demuxer,count){const used=demuxer.mendoMetadataEntries||0;if(!Number.isSafeInteger(count)||count<0||count>MENDO_MAX_EXPANDED_MP4_SAMPLES*4-used)throw new Error("MP4 table metadata limit");demuxer.mendoMetadataEntries=used+count;}\n'],
+  ['const o=F(e);let c=0,l=0;for(let u=0;u<o;u++){', 'const o=F(e);mendoClaimMp4Table(this,o);let c=0,l=0;for(let u=0;u<o;u++){'],
+  ['const o=F(e);let c=0;for(let l=0;l<o;l++){', 'const o=F(e);mendoClaimMp4Table(this,o);let c=0;for(let l=0;l<o;l++){'],
+  ['const o=F(e),c=F(e);if(o===0)for(let l=0;l<c;l++){', 'const o=F(e),c=F(e);mendoClaimMp4Table(this,o===0?c:1);if(o===0)for(let l=0;l<c;l++){'],
+  ['throw new Error("Invalid MP4 compact sample width");const l=N(e,Math.ceil(c*o/8))', 'throw new Error("Invalid MP4 compact sample width");mendoClaimMp4Table(this,c);const l=N(e,Math.ceil(c*o/8))'],
+  ['a.sampleTable.keySampleIndices=[];const o=F(e);', 'a.sampleTable.keySampleIndices=[];const o=F(e);mendoClaimMp4Table(this,o+1);'],
+  ['const o=F(e);for(let l=0;l<o;l++){const u=F(e)-1,d=F(e),f=F(e);', 'const o=F(e);mendoClaimMp4Table(this,o+a.sampleTable.sampleToChunk.length);for(let l=0;l<o;l++){const u=F(e)-1,d=F(e),f=F(e);'],
+  ['const o=F(e);for(let c=0;c<o;c++){const l=F(e);a.sampleTable.chunkOffsets.push(l)}', 'const o=F(e);mendoClaimMp4Table(this,o);for(let c=0;c<o;c++){const l=F(e);a.sampleTable.chunkOffsets.push(l)}'],
+  ['const o=F(e);for(let c=0;c<o;c++){const l=Ue(e);a.sampleTable.chunkOffsets.push(l)}', 'const o=F(e);mendoClaimMp4Table(this,o);for(let c=0;c<o;c++){const l=Ue(e);a.sampleTable.chunkOffsets.push(l)}'],
+  ['g=h[u],m=h[d],w=h[f],y=F(e);for(let k=0;k<y;k++){', 'g=h[u],m=h[d],w=h[f],y=F(e);mendoClaimMp4Table(this,y+c.fragmentLookupTable.length);for(let k=0;k<y;k++){'],
+  ['for(let k=0;k<c.fragmentLookupTable.length-1;k++){const b=c.fragmentLookupTable[k],T=c.fragmentLookupTable[k+1];b.timestamp===T.timestamp&&(c.fragmentLookupTable.splice(k+1,1),k--)}',
+    'let mendoWrite=0;for(const mendoEntry of c.fragmentLookupTable)if(mendoWrite===0||c.fragmentLookupTable[mendoWrite-1].timestamp!==mendoEntry.timestamp)c.fragmentLookupTable[mendoWrite++]=mendoEntry;c.fragmentLookupTable.length=mendoWrite;'],
+);
+edits.mp4.push(
+  ['const MENDO_MAX_EXPANDED_MP4_SAMPLES = 1_000_000;\n',
+    'const MENDO_MAX_EXPANDED_MP4_SAMPLES = 1_000_000;\n\nfunction mendoClaimMp4Table(demuxer: IsobmffDemuxer, count: number) {\n\tif (!Number.isSafeInteger(count) || count < 0\n\t\t|| count > MENDO_MAX_EXPANDED_MP4_SAMPLES * 4 - demuxer.mendoMetadataEntries) {\n\t\tthrow new Error("MP4 table metadata limit");\n\t}\n\tdemuxer.mendoMetadataEntries += count;\n}\n'],
+  ['export class IsobmffDemuxer extends Demuxer {\n', 'export class IsobmffDemuxer extends Demuxer {\n\tmendoMetadataEntries = 0;\n'],
+  ['\t\t\t\tconst sampleCount = readU32Be(slice);\n\n\t\t\t\tif (sampleSize === 0)', '\t\t\t\tconst sampleCount = readU32Be(slice);\n\t\t\t\tmendoClaimMp4Table(this, sampleSize === 0 ? sampleCount : 1);\n\n\t\t\t\tif (sampleSize === 0)'],
+  ['\t\t\t\tconst bytes = readBytes(slice, Math.ceil(sampleCount * fieldSize / 8));', '\t\t\t\tmendoClaimMp4Table(this, sampleCount);\n\t\t\t\tconst bytes = readBytes(slice, Math.ceil(sampleCount * fieldSize / 8));'],
+  ['\t\t\t\tconst numberOfEntries = readU32Be(slice);\n', '\t\t\t\tconst numberOfEntries = readU32Be(slice);\n\t\t\t\tmendoClaimMp4Table(this, numberOfEntries + track.fragmentLookupTable.length);\n'],
+  ['\t\t\t\tfor (let i = 0; i < track.fragmentLookupTable.length - 1; i++) {\n\t\t\t\t\tconst entry1 = track.fragmentLookupTable[i]!;\n\t\t\t\t\tconst entry2 = track.fragmentLookupTable[i + 1]!;\n\n\t\t\t\t\tif (entry1.timestamp === entry2.timestamp) {\n\t\t\t\t\t\ttrack.fragmentLookupTable.splice(i + 1, 1);\n\t\t\t\t\t\ti--;\n\t\t\t\t\t}\n\t\t\t\t}',
+    '\t\t\t\tlet write = 0;\n\t\t\t\tfor (const entry of track.fragmentLookupTable) {\n\t\t\t\t\tif (write === 0 || track.fragmentLookupTable[write - 1]!.timestamp !== entry.timestamp) {\n\t\t\t\t\t\ttrack.fragmentLookupTable[write++] = entry;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\ttrack.fragmentLookupTable.length = write;'],
+);
+for (const [kind, charge] of Object.entries({ stts: 'entryCount', ctts: 'entryCount', stss: 'entryCount + 1',
+  stsc: 'entryCount + track.sampleTable.sampleToChunk.length', stco: 'entryCount', co64: 'entryCount' })) {
+  // Include the case prefix to keep each original anchor unambiguous.
+  const prefix = `\t\t\tcase '${kind}': {\n\t\t\t\tconst track = this.currentTrack;\n\t\t\t\tif (!track) {\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\n\t\t\t\tif (!track.sampleTable) {\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\n`;
+  const skip = kind === 'ctts' ? '\t\t\t\tslice.skip(1 + 3); // Version + flags\n\n'
+    : kind === 'stsc' ? '\t\t\t\tslice.skip(4);\n\n' : '\t\t\t\tslice.skip(4); // Version + flags\n\n';
+  const extra = kind === 'stss' ? '\t\t\t\ttrack.sampleTable.keySampleIndices = [];\n\n' : '';
+  const anchor = `${prefix}${skip}${extra}\t\t\t\tconst entryCount = readU32Be(slice);`;
+  edits.mp4.push([anchor, `${anchor}\n\t\t\t\tmendoClaimMp4Table(this, ${charge});`]);
+}
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 function transform(kind, bytes, reverse = false) {
   let text = bytes.toString('utf8');

@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const espree = require('espree');
-const { parseHTML } = require('linkedom');
+const { parseHTML } = require('./user-dom.cjs');
 const { producerPorts } = require('./producer-port-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
 
@@ -44,6 +44,8 @@ function live() {
     callHook(command) { hooks.push(command); return command === 'live-start' ? capture.promise : Promise.resolve({}); },
     sendWorkerMessage: dispatch,
   });
+  context.MendoMenu = require('../extension/menu.js');
+  context.MendoDiagnostics = require('../extension/diagnostics.js');
   vm.runInContext(`let downloadInProgress = false, liveJob = null, toastHideTimer; ${flow}`, context);
   const settle = async () => { for (let n = 0; n < 6; n++) await new Promise(setImmediate); };
   return { context, producers, capture, finalize, abort, chunk, messages, hooks, runtimeListeners, settle,

@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const espree = require('espree');
-const { parseHTML } = require('linkedom');
+const { parseHTML, UserEvent } = require('./user-dom.cjs');
 const { producerPorts } = require('./producer-port-harness.cjs');
 const { fixture: packageIO } = require('./package-io-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
@@ -39,7 +39,8 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
     IS_MUSIC: false, IS_SHORTS: () => false, BUTTON_ID: 'download-button',
     console: { warn() {}, error() {} }, setTimeout() {},
     MendoMediaPlan: require('../extension/media_plan.js'),
-    MendoMenu: { bind() {}, place() {} },
+    MendoMenu: { ...require('../extension/menu.js'), bind() {}, place() {} },
+    MendoDiagnostics: require('../extension/diagnostics.js'),
     MendoPackageUI: { running: false, signal: null, acquireProcessor: options => producerUI.acquireProcessor(options), add(_menu, value) { picker = value; } },
     chrome: { storage: { local: {
       async get() { return { ...settings }; }, async set(value) { Object.assign(settings, value); },
@@ -103,7 +104,7 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
     captureSaves: () => captureSaves,
     picker: () => picker,
     async openMenu() { await context.openMenu({ stopPropagation() {} }); assert.ok(picker); },
-    click(element) { element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true })); },
+    click(element) { element.dispatchEvent(new UserEvent('click', { bubbles: true, cancelable: true })); },
     snapshot() { return typeof picker.options === 'function' ? picker.options() : picker.options; },
   };
 }

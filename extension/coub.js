@@ -646,11 +646,11 @@
         item.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
-          if (!event.repeat) item.click();
+          if (!event.repeat) MendoMenu.activate(item, event);
         });
         item.append(createElement('span', 'mendosave-coub-text', choice.text));
         if (choice.hint) item.append(createElement('span', 'mendosave-coub-hint', choice.hint));
-        item.addEventListener('click', () => {
+        MendoMenu.onActivate(item, () => {
           if (!current()) return;
           closeMenu();
           void runChoice(info, choice);
@@ -719,7 +719,7 @@
       button.title = 'Скачать коуб (MendoSave)';
       button.setAttribute('aria-label', button.title);
       button.append(createIcon());
-      button.addEventListener('click', (event) => { void openMenu(button, event); });
+      MendoMenu.onActivate(button, (event) => { void openMenu(button, event); });
       if (getComputedStyle(viewer).position === 'static') viewer.style.position = 'relative';
       viewer.appendChild(button);
     }

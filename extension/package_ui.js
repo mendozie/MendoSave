@@ -1,5 +1,6 @@
 (() => {
-  function create({ runtime, document, fetch: fetcher = globalThis.fetch, queue = globalThis.MendoPackageQueue }) {
+  function create({ runtime, document, fetch: fetcher = globalThis.fetch, queue = globalThis.MendoPackageQueue,
+    activation = globalThis.MendoMenu }) {
     let current = null;
     let picker = null;
     let rememberedSelection = null;
@@ -166,7 +167,7 @@
         if (!document || (typeof options !== 'function' && (!Array.isArray(options) || options.length < 2))) return null;
         const opener = document.createElement('button');
         opener.type = 'button'; opener.className = 'mendo-package-open'; opener.textContent = 'Выбрать несколько…';
-        opener.addEventListener('click', (event) => {
+        activation.onActivate(opener, (event) => {
           event.preventDefault(); event.stopPropagation();
           if (picker && current) { close?.(); picker.show(); return; }
           const choices = typeof options === 'function' ? options() : options;
@@ -357,7 +358,7 @@
               ...[...running.downloads].map(id => raw({ t: 'mendosave-download-cancel', id })),
             ]);
           };
-          cancel.addEventListener('click', () => { if (current) void abort(); });
+          activation.onActivate(cancel, () => { if (current) void abort(); });
           dialog.addEventListener('cancel', (e) => { e.preventDefault(); conceal(); });
           dialog.addEventListener('keydown', (event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); conceal(); } });
           const start = async mode => {
@@ -429,7 +430,7 @@
             }
             updateResume();
           };
-          files.addEventListener('click', () => { void start('files'); }); zip.addEventListener('click', () => { void start('zip'); });
+          activation.onActivate(files, () => { void start('files'); }); activation.onActivate(zip, () => { void start('zip'); });
           const choiceGroup = document.createElement('div'); choiceGroup.className = 'mendo-package-choices'; choiceGroup.append(list, status, progress);
           actions.append(files, zip, hide, cancel); dialog.append(header, choiceGroup, actions); document.body.append(dialog, resume);
           show();

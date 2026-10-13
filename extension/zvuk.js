@@ -436,11 +436,11 @@
     item.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
-      if (!event.repeat) item.click();
+      if (!event.repeat) MendoMenu.activate(item, event);
     });
     item.append(createElement('span', 'mendosave-zvuk-text', text));
     if (hint) item.append(createElement('span', 'mendosave-zvuk-hint', hint));
-    item.addEventListener('click', () => { closeMenu(); onClick(); });
+    MendoMenu.onActivate(item, () => { closeMenu(); onClick(); });
     menu.append(item);
     return item;
   }
@@ -535,7 +535,7 @@
     button.title = 'Скачать трек (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
-    button.addEventListener('click', (event) => { void openMenu(button, trackId, event); });
+    MendoMenu.onActivate(button, (event) => { void openMenu(button, trackId, event); });
     return button;
   }
 

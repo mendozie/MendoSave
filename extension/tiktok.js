@@ -654,11 +654,11 @@
     item.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
-      if (!event.repeat) item.click();
+      if (!event.repeat) MendoMenu.activate(item, event);
     });
     item.append(createElement('span', 'mendosave-tiktok-text', text));
     if (hint) item.append(createElement('span', 'mendosave-tiktok-hint', hint));
-    item.addEventListener('click', () => { closeMenu(); onClick(); });
+    MendoMenu.onActivate(item, () => { closeMenu(); onClick(); });
     menu.append(item);
     return item;
   }
@@ -829,7 +829,7 @@
     button.title = 'Скачать видео (MendoSave)';
     button.setAttribute('aria-label', button.title);
     button.append(createIcon());
-    button.addEventListener('click', (event) => {
+    MendoMenu.onActivate(button, (event) => {
       const currentEntry = entryForRail(button.closest(RAIL_SELECTOR));
       if (currentEntry) void openMenu(button, currentEntry, event);
     });

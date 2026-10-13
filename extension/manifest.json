@@ -64,10 +64,11 @@
         "https://music.youtube.com/*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
         "settings.js",
-        "menu.js",
+        "diagnostics.js",
         "media_plan.js",
         "content_ui.js"
       ],
@@ -85,9 +86,9 @@
         "https://rutube.sport/*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
-        "menu.js",
         "rutube.js"
       ],
       "css": [
@@ -104,10 +105,10 @@
         "https://clips.twitch.tv/*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
         "settings.js",
-        "menu.js",
         "twitch_ui.js"
       ],
       "css": [
@@ -123,9 +124,9 @@
         "https://coub.com/*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
-        "menu.js",
         "coub.js"
       ],
       "css": [
@@ -142,7 +143,10 @@
         "https://*.vkvideo.ru/video_ext.php*",
         "https://vk.com/video_ext.php*"
       ],
-      "js": ["vk_source.js", "vk_bridge.js"],
+      "js": [
+        "vk_source.js",
+        "vk_bridge.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
@@ -155,9 +159,9 @@
         "https://vk.com/clip*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
-        "menu.js",
         "vk_source.js",
         "vk.js"
       ],
@@ -173,9 +177,9 @@
         "https://zvuk.com/*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
-        "menu.js",
         "zvuk.js"
       ],
       "css": [
@@ -191,9 +195,9 @@
         "https://www.tiktok.com/*"
       ],
       "js": [
+        "menu.js",
         "package_queue.js",
         "package_ui.js",
-        "menu.js",
         "tiktok.js"
       ],
       "css": [

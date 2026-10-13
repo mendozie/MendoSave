@@ -414,12 +414,12 @@
         item.addEventListener('keydown', (event) => {
           if (event.key !== 'Enter' && event.key !== ' ') return;
           event.preventDefault();
-          item.click();
+          MendoMenu.activate(item, event);
         });
         const size = variant.bandwidth && options.durationSeconds
           ? ` · ~${Math.round((variant.bandwidth / 8) * options.durationSeconds / 1e6)} МБ` : '';
         item.textContent = `${variant.height}p MP4${size}`;
-        item.addEventListener('click', () => {
+        MendoMenu.onActivate(item, () => {
           if (!current()) return;
           closeMenu();
           void startDownload(variant, options);
@@ -596,7 +596,7 @@
     button.type = 'button';
     button.title = 'MendoSave - скачать';
     button.setAttribute('aria-label', button.title);
-    button.addEventListener('click', openMenu);
+    MendoMenu.onActivate(button, openMenu);
 
     if (isShorts()) {
       const column = shortsActionColumn();

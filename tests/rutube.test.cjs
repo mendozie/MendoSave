@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { producerPorts } = require('./producer-port-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
-const { parseHTML } = require('linkedom');
+const { parseHTML, UserEvent } = require('./user-dom.cjs');
 
 const page = 'https://rutube.ru/video/5295f2a858cdace0855c40f8a48f4676/';
 const master = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=293000,RESOLUTION=256x144,CODECS="avc1.42c014,mp4a.40.2"\nhttps://media.example/144.m3u8\n';
@@ -61,15 +61,16 @@ function adapter(media = fixture, overrides = {}) {
   });
   context.chrome.runtime.connect = producerPorts().connect;
   context.MendoPackageUI = createPackageUI({ runtime: context.chrome.runtime, fetch: (...args) => context.fetch(...args) });
+  vm.runInContext(fs.readFileSync('extension/menu.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/rutube.js', 'utf8'), context);
-  const click = (element) => element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+  const click = (element) => element.dispatchEvent(new UserEvent('click', { bubbles: true, cancelable: true }));
   const settle = async () => { for (let n = 0; n < 12; n++) await new Promise(setImmediate); };
   return { document, messages, requests, errors, click, settle, window };
 }
 
 test('Rutube public VOD streams ordered bytes and keeps the API duration in seconds', async () => {
   const a = adapter(); a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="button"]')); await a.settle();
+  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.find((m) => m.t === 'mendosave-begin').duration, 54.312);
   assert.equal(a.messages.filter((m) => m.t === 'mendosave-chunk').map((m) => m.b64).join(','), 'RwEC,RwEC');
   assert.equal(a.messages.filter((m) => m.t === 'mendosave-finalize').length, 1);
@@ -78,7 +79,7 @@ test('Rutube public VOD streams ordered bytes and keeps the API duration in seco
 test('Rutube refuses a rolling playlist instead of saving its current window as a complete VOD', async () => {
   const a = adapter(fixture.replace('#EXT-X-ENDLIST', ''));
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="button"]')); await a.settle();
+  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-begin'), false);
   assert.match(a.document.querySelector('.mendosave-rt-toast').textContent, /завершён|трансляц/);
 });
@@ -86,7 +87,7 @@ test('Rutube refuses a rolling playlist instead of saving its current window as 
 test('Rutube refuses encrypted HLS before a processor job or media request starts', async () => {
   const a = adapter(fixture.replace('#EXTINF:4.000,', '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:4.000,'));
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="button"]')); await a.settle();
+  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-begin'), false);
   assert.equal(a.requests.some((url) => url.endsWith('.ts') || url.endsWith('key.bin')), false);
   assert.match(a.document.querySelector('.mendosave-rt-toast').textContent, /зашифрован/);
@@ -102,15 +103,15 @@ test('Rutube menu can be dismissed while playback options are still loading', as
 
 test('Rutube quality choices can be activated with Enter', async () => {
   const a = adapter(); a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  const event = new a.window.Event('keydown', { bubbles: true, cancelable: true }); event.key = 'Enter';
-  a.document.querySelector('[role="button"]').dispatchEvent(event); await a.settle();
+  const event = new UserEvent('keydown', { bubbles: true, cancelable: true }); event.key = 'Enter';
+  a.document.querySelector('[role="menuitem"]').dispatchEvent(event); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-finalize'), true);
 });
 
 test('Rutube aborts its job when finalization fails so prepared chunks are released', async () => {
   const a = adapter(fixture, { finalizeError: true });
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="button"]')); await a.settle();
+  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-abort'), true);
   assert.match(a.document.querySelector('.mendosave-rt-toast').textContent, /mux failed/);
 });
@@ -122,7 +123,7 @@ test('Rutube transfers exact bytes from network views whose foreign constructor 
   segment[segment.length - 1] = 0xee;
   const a = adapter(fixture, { foreignViews: true, segmentBytes: segment });
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="button"]')); await a.settle();
+  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
   assert.equal(a.errors.length, 0, a.errors[0]?.message);
   const chunks = a.messages.filter((m) => m.t === 'mendosave-chunk');
   assert.equal(chunks.length, 4, 'each of two segments crosses the 4 MiB transfer boundary');

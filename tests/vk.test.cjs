@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { producerPorts } = require('./producer-port-harness.cjs');
 const { create: createPackageUI } = require('../extension/package_ui.js');
-const { parseHTML, DOMParser } = require('linkedom');
+const { parseHTML, DOMParser, UserEvent } = require('./user-dom.cjs');
 
 const payload = fs.readFileSync('tests/fixtures/vk-player.html', 'utf8');
 const dash = fs.readFileSync('tests/fixtures/vk-audio.mpd', 'utf8');
@@ -127,7 +127,7 @@ function adapter(overrides = {}) {
   vm.runInContext(fs.readFileSync('extension/vk_source.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/menu.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('extension/vk.js', 'utf8'), context);
-  const click = (element) => element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+  const click = (element) => element.dispatchEvent(new UserEvent('click', { bubbles: true, cancelable: true }));
   const settle = async () => { for (let n = 0; n < 12; n++) await new Promise(setImmediate); };
   return { document, messages, requests, sourceTimers, bridgeMessages, bridgeRequests, frames,
     click, settle, window, shadow, location: context.location, producers };
@@ -142,6 +142,42 @@ async function saveAudio(a) {
   assert.ok(control, a.document.querySelector('.mendosave-vk-menu').textContent);
   a.click(control); await a.settle();
 }
+
+function movingPlayer() {
+  const app = adapter();
+  app.window.scrollY = 0;
+  app.window.Element.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('mendosave-vk-menu')) {
+      const left = parseFloat(this.style.left) || 0, top = parseFloat(this.style.top) || 0;
+      const width = Math.min(280, app.window.innerWidth - 16), height = Math.min(300, parseFloat(this.style.maxHeight) || 300);
+      return { width, height, left, right: left + width, top, bottom: top + height };
+    }
+    const offset = app.window.scrollY || 0;
+    if (this.tagName === 'BUTTON') {
+      const left = Math.min(610, app.window.innerWidth - 50), top = Math.min(424 - offset, app.window.innerHeight - 60);
+      return { width: 36, height: 36, top, bottom: top + 36, left, right: left + 36 };
+    }
+    return { width: 640, height: 360, top: 100 - offset, bottom: 460 - offset, left: 10, right: 650 };
+  };
+  return app;
+}
+
+test('same-source scrolling follows the live player without covering the VK trigger', async () => {
+  const app = movingPlayer(); await open(app);
+  const menu = app.document.querySelector('.mendosave-vk-menu');
+  app.window.scrollY = 150; app.window.dispatchEvent(new app.window.Event('scroll')); await app.settle();
+  const rect = menu.getBoundingClientRect(), anchor = app.document.querySelector('.mendosave-vk-btn').getBoundingClientRect();
+  assert.equal(menu.isConnected, true);
+  assert.equal(rect.left < anchor.right && rect.right > anchor.left && rect.top < anchor.bottom && rect.bottom > anchor.top, false);
+  assert.equal(app.messages.some(message => message.t === 'mendosave-save'), false);
+});
+
+test('an open VK menu remains inside a resized narrow viewport', async () => {
+  const app = movingPlayer(); await open(app);
+  app.window.innerWidth = 360; app.window.innerHeight = 240; app.window.dispatchEvent(new app.window.Event('resize')); await app.settle();
+  const rect = app.document.querySelector('.mendosave-vk-menu').getBoundingClientRect();
+  assert.ok(rect.left >= 0 && rect.right <= 360 && rect.top >= 0 && rect.bottom <= 240);
+});
 
 test('VK menu remains open while the page scrolls up or down', async () => {
   const a = adapter(); await open(a);
@@ -302,7 +338,7 @@ test('VK chooses AAC for an M4A save even when a higher bitrate Opus representat
 
 test('VK video choices can be activated with Space', async () => {
   const a = adapter(); await open(a);
-  const event = new a.window.Event('keydown', { bubbles: true, cancelable: true }); event.key = ' ';
+  const event = new UserEvent('keydown', { bubbles: true, cancelable: true }); event.key = ' ';
   choiceControls(a)[0].dispatchEvent(event); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-save'), true);
 });

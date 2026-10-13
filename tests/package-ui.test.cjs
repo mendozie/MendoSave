@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseHTML } = require('linkedom');
+const { parseHTML, UserEvent } = require('./user-dom.cjs');
 const { create: createUI } = require('../extension/package_ui.js');
 const { producerPorts } = require('./producer-port-harness.cjs');
 function create(options) {
@@ -551,7 +551,7 @@ test('Hide and Escape keep one nonmodal package running and expose its hidden co
   assert.equal(document.querySelectorAll('.mendo-package-dialog').length, 1);
   assert.equal(dialog.hasAttribute('open'), true);
   assert.equal(ui.signal, originalSignal);
-  const escape = new document.defaultView.Event('keydown', { bubbles: true, cancelable: true });
+  const escape = new UserEvent('keydown', { bubbles: true, cancelable: true });
   Object.defineProperty(escape, 'key', { value: 'Escape' });
   dialog.dispatchEvent(escape);
   assert.equal(dialog.hasAttribute('open'), false);
