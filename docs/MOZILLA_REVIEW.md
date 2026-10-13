@@ -1,6 +1,6 @@
 # Mozilla reviewer build instructions
 
-Submission: MendoSave 0.3.2, add-on ID `mendosave@mendozie`, self-distributed (unlisted). This updates the existing 0.3.1 add-on. The owner authorized public GitHub distribution after a release privacy audit. No public AMO listing or update server is part of this submission.
+Submission: MendoSave 0.3.3, add-on ID `mendosave@mendozie`, self-distributed (unlisted). This updates the published 0.3.1 add-on and supersedes the intermediate 0.3.2 submission after PR review. The owner authorized public GitHub distribution after a release privacy audit. No public AMO listing or update server is part of this submission.
 
 ## Build the submitted Firefox package
 
@@ -25,7 +25,7 @@ On Windows PowerShell, use `npm.cmd` instead of `npm` if the script execution po
 The build uses the supplied local vendor files, without downloading runtime code. Full notices, exact versions, source URLs, hashes and modifications are in [DEPENDENCIES.md](DEPENDENCIES.md), [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) and the vendor `PROVENANCE.json` files.
 
 - FFmpeg wrapper 0.12.10 and core 0.12.6: the wrapper's worker has a documented inherited change making its default core URL local. The existing official core is included unchanged. This submission does not claim a fresh native-code compilation.
-- Mediabunny 1.51.0: the supplied bundle contains local MP4/AAC resource guards, cumulative physical metadata/index limits and linear fragment-index duplicate compaction. Complete modified MPL source files, original source identifiers and deterministic bundle/source transformations are included. See [PATCH.md](../extension/vendor/mediabunny/PATCH.md). A fresh bit-for-bit TypeScript compilation is not claimed.
+- Mediabunny 1.51.0: the supplied bundle contains local MP4/AAC resource guards, cumulative physical metadata/index limits including constant/variable auxiliary `saiz`, PSSH, repeated `senc` and inline/lazy subsample counts, and linear fragment-index duplicate compaction. Complete modified MPL source files, original source identifiers and deterministic bundle/source transformations are included. See [PATCH.md](../extension/vendor/mediabunny/PATCH.md). A fresh bit-for-bit TypeScript compilation is not claimed.
 - zip.js 2.20.0: the native bundle is unchanged from the pinned npm archive. Runtime ZIP writing uses STORE and disables web workers.
 
 The three known lint warnings and their local-only execution boundaries are documented in [DEPENDENCIES.md](DEPENDENCIES.md). Content security policy permits only bundled scripts, workers and WebAssembly; it does not enable string evaluation or remote scripts.

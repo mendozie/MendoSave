@@ -9,12 +9,14 @@
 
 Срез `0.3.2-r2` принят пользователем 13-10-2026. Выпуск 0.3.2, PR/review/merge в main и Mozilla unlisted signing прямо разрешены; прежний local-only запрет снят для этого результата. Новое поручение разрешает обновить README, описание и скриншоты и сделать существующий GitHub-репозиторий публичным после проверки файлов, истории и внешних материалов на секреты и приватные данные. Публикация выполняется после release checks и устранения подтверждённых blockers. Исходные кандидаты и evidence сохраняются. Последняя опубликованная подписанная версия пока 0.3.1.
 
-### Выпуск 0.3.2 и открытие репозитория
+### Выпуск 0.3.3 и открытие репозитория
+
+0.3.2 уже отправлена в Mozilla, но не распространяется через GitHub Release. Последующие PR corrections входят в новый patch version 0.3.3; [проверки](RELEASE_VERIFICATION_033.md).
 
 - [x] Пользовательская приёмка r2 и прямое разрешение на merge, подписание, Release обоих движков и публичную видимость после проверок.
 - [x] Совокупный code review и Standard security scan завершены. Четыре security findings и live-anchor VK correction исправлены, independently reviewed и проверены 862 tests/native Zen; [область и ограничения](SECURITY_REVIEW_032.md). Git history, GitHub materials, 22 Actions logs, 44 Actions archives/132 nested archives и опубликованные пакеты проверены без обнаруженных приватных данных. Финальный outgoing/source readback остаётся gate публикации.
-- [~] README, Mozilla reviewer description, privacy и реальные скриншоты 0.3.2 обновлены; public GitHub description и финальная инструкция подписанного выпуска ожидают readback. Provenance и условия библиотек сохранены.
-- [ ] Завершить финальные checks, PR managed review и CI Windows/Linux/reproducibility; merge только проверенного head.
+- [~] README, Mozilla reviewer description, privacy и реальные скриншоты итоговой 0.3.3 обновлены; public GitHub description и финальная инструкция подписанного выпуска ожидают readback. Provenance и условия библиотек сохранены.
+- [~] Managed review промежуточного head завершён; три замечания воспроизведены и исправлены. Полная suite 0.3.3: 867 PASS, native diagnostic export и новые фотографии проверены. Итоговый независимый correction review недоступен после cybersecurity flag; собственная проверка закрыла дополнительные PSSH/senc/lazy-subsample gaps. CI нового head выполняется; merge только проверенного head.
 - [ ] Получить unlisted signed XPI, сравнить application bytes/source, проверить постоянное обновление и restart отдельного Zen, готовый файл.
 - [ ] После privacy gate открыть репозиторий, опубликовать Release с обоими пакетами/source/manifest/hashes, прочитать saved state и убрать merged task branch.
 

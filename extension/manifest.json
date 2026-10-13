@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "MendoSave",
-  "version": "0.3.2",
-  "description": "Локальное сохранение видео, аудио и субтитров. Тестовый кандидат для ручной проверки.",
+  "version": "0.3.3",
+  "description": "Локальное сохранение видео, аудио и субтитров. Выбор форматов, пакеты и ZIP.",
   "permissions": [
     "downloads",
     "offscreen",

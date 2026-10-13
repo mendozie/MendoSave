@@ -1,5 +1,7 @@
 # MendoSave - проверенная совместимость
 
+Дополнительная проверка 0.3.3 от 13-10-2026: отдельный Zen 1.23.2b / Gecko 157.0.1 завершил bounded diagnostic TXT через actual worker/native download, сохранив последние записи, State и Details и скрыв dummy secret. Popup Save As/персистентность, реальный package component, native keyboard и full-close проверены на viewports 1246×883/326×843 и 1246×983/326×843. Новые MP4 auxiliary guards проверены actual parser regression; прежние site/media scenarios указаны ниже с их собственными revisions. [Финальная релизная проверка](RELEASE_VERIFICATION_033.md).
+
 Проверки версии 0.2.0: 09-10-2026 и 10-10-2026. Основная матрица - Zen 1.23.1b / Gecko 157.0.1 на Windows; lifecycle-проверки Twitch после исправлений - Zen 1.23.2b / Gecko 157.0.1. Дополнительная сборка - Chromium 148.0.7778.96. В 0.3.0 отдельно проверены Coub package/ZIP, YouTube video/audio/SRT, доступный TikTok, live и указанные ниже lifecycle-сценарии в отдельных профилях Zen 1.23.2b и Chromium. Воспроизведение заглушено, аудиодорожки файлов сохранены. Найденный дефект Chromium SRT исправлен; новая содержательная проверка прошла в обоих браузерах.
 
 Фаза 2 технически проверена 10-10-2026, включая итоговый WebM remux. Предыдущая остановка сохранена в [историческом checkpoint](PHASE2_CHECKPOINT.md).

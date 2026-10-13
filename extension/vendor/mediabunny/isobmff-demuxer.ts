@@ -751,6 +751,7 @@ export class IsobmffDemuxer extends Demuxer {
 					this.reader,
 					track.encryptionInfo,
 					trackData.encryptionAuxInfo,
+					this,
 				);
 
 				for (let i = 0; i < Math.min(trackData.samples.length, entries.length); i++) {
@@ -2167,7 +2168,11 @@ export class IsobmffDemuxer extends Demuxer {
 					break;
 				}
 
-				const psshBox = parsePsshBoxContents(readBytes(slice, boxInfo.contentSize));
+				const contents = readBytes(slice, boxInfo.contentSize);
+				const keyCount = contents[0]! > 0 && contents.length >= 24
+					? toDataView(contents).getUint32(20) : 0;
+				mendoClaimMp4Table(this, keyCount + 1);
+				const psshBox = parsePsshBoxContents(contents);
 
 				if (this.currentFragment) {
 					this.currentFragment.psshBoxes.push(psshBox);
@@ -2383,6 +2388,7 @@ export class IsobmffDemuxer extends Demuxer {
 
 				const defaultSampleInfoSize = readU8(slice);
 				const sampleCount = readU32Be(slice);
+				mendoClaimMp4Table(this, sampleCount);
 
 				let sampleSizes: Uint8Array | null = null;
 				if (defaultSampleInfoSize === 0 && sampleCount > 0) {
@@ -2454,6 +2460,7 @@ export class IsobmffDemuxer extends Demuxer {
 				const ivSize = track.encryptionInfo.defaultPerSampleIvSize;
 				assert(ivSize !== null);
 
+				mendoClaimMp4Table(this, Math.min(sampleCount, trackData.samples.length));
 				for (let i = 0; i < Math.min(sampleCount, trackData.samples.length); i++) {
 					// Normalize the IV to 16 bytes so downstream code can assume a full-length buffer. For CTR with
 					// an 8-byte per-sample IV the lower 8 bytes are zero (that's the CENC spec's block counter start);
@@ -2468,6 +2475,7 @@ export class IsobmffDemuxer extends Demuxer {
 					let subsamples: SampleEncryptionInfo['subsamples'] = null;
 					if (useSubsamples) {
 						const subsampleCount = readU16Be(slice);
+						mendoClaimMp4Table(this, subsampleCount);
 						subsamples = [];
 						for (let j = 0; j < subsampleCount; j++) {
 							const clearLen = readU16Be(slice);
@@ -3132,6 +3140,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
 					this.internalTrack.demuxer.reader,
 					this.internalTrack.encryptionInfo,
 					this.internalTrack.encryptionAuxInfo,
+					this.internalTrack.demuxer,
 				);
 
 				if (sampleIndex < entries.length) {
@@ -3675,6 +3684,7 @@ const resolveEncryptionAuxInfo = async (
 	reader: Reader,
 	encryptionInfo: TrackEncryptionInfo,
 	aux: SampleEncryptionAuxInfo,
+	demuxer: IsobmffDemuxer,
 ) => {
 	if (aux.resolved) {
 		return aux.resolved;
@@ -3722,6 +3732,7 @@ const resolveEncryptionAuxInfo = async (
 		let subsamples: { clearLen: number; protectedLen: number }[] | null = null;
 		if (entrySize > ivSize) {
 			const subsampleCount = readU16Be(slice);
+			mendoClaimMp4Table(demuxer, subsampleCount);
 			subsamples = [];
 			for (let j = 0; j < subsampleCount; j++) {
 				const clearLen = readU16Be(slice);

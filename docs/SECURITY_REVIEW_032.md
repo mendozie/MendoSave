@@ -19,4 +19,8 @@ Standard scan завершён с частичным покрытием. Нез�
 
 Исходный scan сохраняет четыре finding исходного revision; исправления не переписывают его в результат «0 findings». Финальные source/archive/signature/CI readbacks записываются в релизной проверке и roadmap. [Исторический scan 0.3.0](SECURITY_REVIEW.md) не заменяет этот проход.
 
+Managed PR review `52c209d88f15bb6e4b126eb9fcb376438ef3585f` дополнительно выявил обход aggregate budget через `saiz`. В версии 0.3.3 count расходует тот же бюджет до retention/lazy resolution, независимо от constant/variable размера и повторных boxes. Малый actual parser regression сначала воспроизвёл отказ ограничения, затем прошёл вместе с 864 tests и forward/reverse parity. Это последующая correction verification, а не переписанный полный scan. Diagnostic export также сохраняет последние записи при переполнении; [проверка окончательного выпуска](RELEASE_VERIFICATION_033.md).
+
 Дополнительный Native Edge 155.0.4283.45: trusted pointer/Enter/Space и отказ synthetic events, два файла и ZIP, полное закрытие; viewports 1280×900 / 360×800. Оба файла совпали по SHA-256 с полностью декодированными Zen controls, ZIP CRC и извлечённые bytes совпали. CDP Enter включает native keypress; прежний неполный тестовый ввод не считался дефектом расширения.
+
+Последующая проверка 0.3.3 дополнительно воспроизвела и закрыла PSSH и senc/lazy-subsample обходы aggregate budget; полный набор - 867 PASS. Итоговый независимый correction report недоступен после cybersecurity flag сервиса; выполнены собственный source/caller review и малые public Input/packet regressions. Финальный snapshot не называется повторным полным scan.

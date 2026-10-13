@@ -8,7 +8,6 @@ const LOG_ENTRY_LIMIT = 4_000;
 const LOG_TAG_LIMIT = 128;
 const LOG_RAW_TEXT_LIMIT = 65_536;
 const LOG_PENDING_LIMIT = 32;
-const ERROR_DETAIL_LIMIT = 50_000;
 const ERROR_LOG_FILENAME = 'MendoSave-debug.txt';
 const RELOAD_DOWNLOAD_PREFIX = 'nova_reload_download:';
 const RELOAD_GUARD_PREFIX = 'nova_reload_guard:';
@@ -260,6 +259,15 @@ async function downloadErrorLog(message, sender) {
     recovered: stored[RECOVERY_KEY] || null,
     session: sessionState,
   };
+  // Keep the failure-adjacent end of the journal. Bound sections before
+  // joining them so the generic text limit cannot discard State or new logs.
+  const logLines = formatLogLines(logs);
+  let firstLog = logLines.length, logCharacters = 0;
+  while (firstLog > 0 && logCharacters + logLines[firstLog - 1].length + 1 <= 15_000) {
+    firstLog -= 1;
+    logCharacters += logLines[firstLog].length + 1;
+  }
+  const recentLogs = (firstLog > 0 ? '[older logs omitted]\n' : '') + logLines.slice(firstLog).join('\n');
   const report = [
     'MendoSave error report',
     `Time: ${formatTimestamp(Date.now())}`,
@@ -267,14 +275,15 @@ async function downloadErrorLog(message, sender) {
     `Context: ${message.context || 'unknown'}`,
     `Page: ${sender?.tab?.url || 'extension'}`,
     `Browser: ${navigator.userAgent}`,
+  ].map(line => truncate(line, 512)).concat([
     '',
-    truncate(message.error || 'Unknown error', ERROR_DETAIL_LIMIT),
-    message.details ? `\nDetails:\n${truncate(message.details, ERROR_DETAIL_LIMIT)}` : '',
-    `\nState:\n${truncate(state, ERROR_DETAIL_LIMIT)}`,
-    logs.length ? `\nRecent logs:\n${formatLogLines(logs).join('\n')}` : '',
-  ].filter(Boolean).join('\n');
+    truncate(message.error || 'Unknown error', 8_000),
+    message.details ? `\nDetails:\n${truncate(message.details, 8_000)}` : '',
+    `\nState:\n${truncate(state, 8_000)}`,
+    logs.length ? `\nRecent logs:\n${MendoDiagnostics.text(recentLogs)}` : '',
+  ]).filter(Boolean).join('\n');
 
-  const url = `data:text/plain;charset=utf-8,${encodeURIComponent(`\uFEFF${MendoDiagnostics.text(report)}\n`)}`;
+  const url = `data:text/plain;charset=utf-8,${encodeURIComponent(`\uFEFF${report}\n`)}`;
   const id = await saveDownload(url, ERROR_LOG_FILENAME);
   return { ok: true, id, filename: ERROR_LOG_FILENAME };
 }

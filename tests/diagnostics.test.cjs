@@ -123,6 +123,28 @@ test('diagnostic storage removes secrets before writing a log entry', async () =
   assert.equal(browser.data.nova_logs[0].text.includes('/secret/path'), false);
 });
 
+test('a bounded error export preserves state and the newest journal entries', async () => {
+  const browser = browserContext();
+  let report;
+  browser.chrome.storage.local.get = async keys => Object.fromEntries(
+    (Array.isArray(keys) ? keys : [keys]).map(key => [key, browser.data[key]]));
+  browser.chrome.tabs.create = async () => ({ id: 19 });
+  browser.chrome.runtime.sendMessage = async message => {
+    if (message.t === 'mendosave-host-probe') return { ok: true, instanceId: message.instanceId };
+    assert.equal(message.t, 'mendosave-save-text'); report = message.text; return { ok: true, id: 42 };
+  };
+  browser.data.nvs_playlist_queue = { state: 'current queue sentinel' };
+  browser.data.nova_logs = Array.from({ length: 400 }, (_, i) => ({ ts: i + 1,
+    tag: 'network', text: i === 399 ? 'newest failure sentinel' : `old-${i} ${'x'.repeat(300)}` }));
+  assert.equal((await browser.message({ t: 'mendosave-error', context: 'controlled',
+    error: 'failure ' + 'x'.repeat(40_000), details: { message: 'current detail sentinel' } })).ok, true);
+  assert.ok(report.includes('newest failure sentinel'));
+  assert.ok(report.includes('current queue sentinel'));
+  assert.ok(report.includes('current detail sentinel'));
+  assert.ok(report.length < 50_000);
+  assert.equal(report.includes('old-0 '), false, 'the oldest journal data yields to the failure context');
+});
+
 test('diagnostics hide complete quoted and unquoted private paths with spaces', async () => {
   const { sanitize } = require('../extension/diagnostics.js');
   const paths = [

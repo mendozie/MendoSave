@@ -12,7 +12,7 @@ const mediabunny = smallBudgetLibrary();
 
 test('shipped bundle and modified MPL sources round-trip to pinned originals', () => {
   const { originals, transform, hash } = require('../scripts/patch-mediabunny.cjs');
-  for (const [kind, file] of Object.entries({ bundle: 'mediabunny.min.mjs', mp4: 'isobmff-demuxer.ts', adts: 'adts-reader.ts' })) {
+  for (const [kind, file] of Object.entries({ bundle: 'mediabunny.min.mjs', mp4: 'isobmff-demuxer.ts', adts: 'adts-reader.ts', misc: 'isobmff-misc.ts' })) {
     const shipped = require('node:fs').readFileSync(require('node:path').join(__dirname, '../extension/vendor/mediabunny', file));
     const original = transform(kind, shipped, true);
     assert.equal(hash(original), originals[kind]);
@@ -110,6 +110,87 @@ function fragmentIndex(bytes, count, copies = 1) {
   footer.writeUInt32BE(8 + tfra.length * copies + 16, 4);
   return Buffer.concat([bytes, box('mfra', Buffer.concat([...Array(copies).fill(tfra), box('mfro', footer)]))]);
 }
+
+test('actual MP4 input budgets encrypted auxiliary sample counts before retaining them', async () => {
+  const lib = await mediabunny, original = await fixture(lib);
+  const encrypted = (count, defaultSize, copies = 1) => rewriteBoxes(original, (name, payload) => {
+    if (name !== 'stbl') return;
+    const scheme = Buffer.alloc(12); scheme.write('cenc', 4);
+    const encryption = Buffer.alloc(41); encryption[6] = 1; encryption[24] = 16;
+    const sizes = Buffer.alloc(9 + (defaultSize === 0 ? count : 0));
+    sizes[4] = defaultSize; sizes.writeUInt32BE(count, 5);
+    return box(name, Buffer.concat([payload, box('schm', scheme), box('tenc', encryption),
+      ...Array.from({ length: copies }, () => box('saiz', sizes))]));
+  });
+  for (const defaultSize of [0, 16]) {
+    assert.equal(await inspect(lib, encrypted(2, defaultSize)), 0.04);
+    await assert.rejects(inspect(lib, encrypted(64, defaultSize)), /MP4 table metadata limit/);
+    await assert.rejects(inspect(lib, encrypted(2, defaultSize, 8)), /MP4 table metadata limit/);
+  }
+});
+
+test('actual MP4 input bounds PSSH key IDs by the payload and aggregate metadata budget', async () => {
+  const lib = await mediabunny, original = await fixture(lib);
+  const metadata = (count, stored = count, copies = 1) => {
+    const pssh = Buffer.alloc(28 + stored * 16); pssh[0] = 1; pssh.writeUInt32BE(count, 20);
+    return rewriteBoxes(original, (name, payload) => name === 'moov'
+      ? box(name, Buffer.concat([payload, ...Array.from({ length: copies }, () => box('pssh', pssh))])) : undefined);
+  };
+  assert.equal(await inspect(lib, metadata(2)), 0.04);
+  for (const bytes of [metadata(64), metadata(2, 0), metadata(0, 0, 16)]) {
+    await assert.rejects(inspect(lib, bytes), /MP4 table metadata limit|Invalid MP4 encryption metadata/);
+  }
+});
+
+test('actual fragmented MP4 input budgets repeated encryption rows and subsamples', async () => {
+  const lib = await mediabunny, original = await fixture(lib, true);
+  const encrypted = (copies, subsamples = 0) => rewriteBoxes(original, (name, payload) => {
+    if (name === 'stbl') {
+      const scheme = Buffer.alloc(12); scheme.write('cenc', 4);
+      const encryption = Buffer.alloc(41); encryption[6] = 1; encryption[24] = 16;
+      return box(name, Buffer.concat([payload, box('schm', scheme), box('tenc', encryption)]));
+    }
+    if (name !== 'traf') return;
+    const rows = Buffer.alloc(8 + (subsamples ? 2 * (2 + 6 * subsamples) : 0));
+    rows.writeUInt32BE(subsamples ? 2 : 0); rows.writeUInt32BE(2, 4);
+    if (subsamples) for (let i = 0; i < 2; i++) rows.writeUInt16BE(subsamples, 8 + i * (2 + 6 * subsamples));
+    return box(name, Buffer.concat([payload, ...Array.from({ length: copies }, () => box('senc', rows))]));
+  });
+  assert.equal(await inspect(lib, encrypted(1)), 0.04);
+  assert.equal(await inspect(lib, encrypted(1, 1)), 0.04);
+  await assert.rejects(inspect(lib, encrypted(8)), /MP4 table metadata limit/);
+  await assert.rejects(inspect(lib, encrypted(1, 64)), /MP4 table metadata limit/);
+});
+
+test('lazy MP4 auxiliary subsamples share the demuxer metadata budget before key resolution', async () => {
+  const lib = await mediabunny, original = await fixture(lib);
+  const encrypted = (subsamples) => {
+    const entrySize = 2 + subsamples * 6, auxiliary = Buffer.alloc(2 * entrySize);
+    auxiliary.writeUInt16BE(subsamples); auxiliary.writeUInt16BE(subsamples, entrySize);
+    let bytes = rewriteBoxes(original, (name, payload) => {
+      if (name !== 'stbl') return;
+      const scheme = Buffer.alloc(12); scheme.write('cenc', 4);
+      const encryption = Buffer.alloc(41); encryption[6] = 1; encryption[24] = 16;
+      const sizes = Buffer.alloc(9); sizes[4] = entrySize; sizes.writeUInt32BE(2, 5);
+      const offsets = Buffer.alloc(12); offsets.writeUInt32BE(1, 4);
+      return box(name, Buffer.concat([payload, box('schm', scheme), box('tenc', encryption),
+        box('saiz', sizes), box('saio', offsets)]));
+    });
+    const position = bytes.length + 8;
+    bytes = rewriteBoxes(bytes, (name, payload) => {
+      if (name !== 'saio') return;
+      const offsets = Buffer.from(payload); offsets.writeUInt32BE(position, 8); return box(name, offsets);
+    });
+    return Buffer.concat([bytes, box('free', auxiliary)]);
+  };
+  async function packet(bytes) {
+    const input = new lib.Input({ formats: lib.ALL_FORMATS, source: new lib.BufferSource(bytes) });
+    try { return await new lib.EncodedPacketSink(await input.getPrimaryAudioTrack()).getFirstPacket(); }
+    finally { input.dispose(); }
+  }
+  await assert.rejects(packet(encrypted(1)), /Encrypted media samples encountered/);
+  await assert.rejects(packet(encrypted(32)), /MP4 table metadata limit/);
+});
 
 test('actual sized MP4 input accepts repeated index timestamps and bounds aggregate index entries', async () => {
   const lib = await mediabunny, original = await fixture(lib, true);
