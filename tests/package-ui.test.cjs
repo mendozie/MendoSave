@@ -331,6 +331,8 @@ test('cancellation during host startup, the next item and final ZIP saving unloc
     assert.equal(ui.running, true);
     assert.equal(inputs.every(input => input.disabled), true);
     assert.equal(dialog.querySelector('[data-action="back"]').disabled, true, 'pending cleanup cannot return to a new single job');
+    assert.equal(dialog.querySelector('[data-action="close"]').disabled, true);
+    assert.equal(document.querySelector('.mendo-package-resume [data-action="close"]').disabled, true);
     dialog.querySelector('[data-action="back"]').click();
     assert.ok(dialog.isConnected);
     dialog.querySelector('[data-mode="files"]').click();
@@ -340,6 +342,8 @@ test('cancellation during host startup, the next item and final ZIP saving unloc
     assert.match(dialog.querySelector('[role="status"]').textContent, /Пакет отменён/);
     assert.equal(inputs.every(input => input.checked && !input.disabled), true);
     assert.equal(dialog.querySelector('[data-action="back"]').disabled, false);
+    assert.equal(dialog.querySelector('[data-action="close"]').disabled, false);
+    assert.equal(document.querySelector('.mendo-package-resume [data-action="close"]').disabled, false);
     assert.equal(dialog.querySelector('[data-mode="zip"]').disabled, false);
     dialog.querySelector('[data-mode="files"]').click();
     while (ui.running) await new Promise(resolve => setImmediate(resolve));
@@ -740,4 +744,248 @@ test('format group headings retain choice order and run only checked formats in 
   assert.deepEqual(ran, ['video-720', 'sub-srt']);
   assert.equal(inputs[1].checked, false);
   assert.equal(list.querySelectorAll('.mendo-package-group').length, 3);
+});
+
+function floatingPicker({ run, send } = {}) {
+  const { document, window } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  window.innerWidth = 1000; window.innerHeight = 800;
+  const packets = [], ran = [];
+  let returned = 0;
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+    async sendMessage(message) { packets.push(message); return send ? send(message) : { ok: true }; },
+  } });
+  const opener = ui.add(document.getElementById('menu'), { title: 'Clip', source: 'clip', back() { returned++; return opener; }, options: ['video', 'audio'].map(id => ({
+    id, label: id, async run() { ran.push(id); return run ? run(id, ui) : `${id}.file`; },
+  })) });
+  opener.click();
+  const dialog = document.querySelector('dialog');
+  // Layout is a browser boundary. Model the existing CSS max-width/max-height
+  // and read the delivered inline placement; do not call a private drag helper.
+  dialog.getBoundingClientRect = () => {
+    const width = Math.min(480, window.innerWidth - 24), height = Math.min(400, window.innerHeight - 24);
+    const left = Number.isFinite(parseFloat(dialog.style.left)) ? parseFloat(dialog.style.left) : (window.innerWidth - width) / 2;
+    const top = Number.isFinite(parseFloat(dialog.style.top)) ? parseFloat(dialog.style.top) : (window.innerHeight - height) / 2;
+    return { left, top, right: left + width, bottom: top + height, width, height };
+  };
+  const pointer = (target, type, properties = {}) => {
+    const event = new window.Event(type, { bubbles: true, cancelable: true });
+    Object.assign(event, { pointerId: 7, button: 0, buttons: type === 'pointerup' ? 0 : 1,
+      isPrimary: true, pointerType: 'mouse', clientX: 300, clientY: 220, ...properties });
+    target.dispatchEvent(event); return event;
+  };
+  return { document, window, ui, opener, dialog, packets, ran, pointer, returned: () => returned,
+    point: () => [parseFloat(dialog.style.left), parseFloat(dialog.style.top)] };
+}
+
+test('the package window follows a primary mouse drag without starting or cancelling work', () => {
+  const h = floatingPicker();
+  const handle = h.dialog.querySelector('.mendo-package-drag-handle');
+  assert.ok(handle, 'a separate empty header area lets the user move the window');
+  const captures = new Set();
+  handle.setPointerCapture = id => captures.add(id);
+  handle.releasePointerCapture = id => captures.delete(id);
+  h.pointer(handle, 'pointerdown');
+  assert.equal(captures.has(7), true);
+  h.pointer(h.document, 'pointermove', { clientX: 500, clientY: 320 });
+  assert.deepEqual(h.point(), [460, 300]);
+  h.pointer(h.document, 'pointerup');
+  assert.equal(captures.size, 0);
+  h.pointer(h.document, 'pointermove', { clientX: 700, clientY: 600 });
+  assert.deepEqual(h.point(), [460, 300], 'release stops movement');
+  assert.equal(h.ui.running, false);
+  assert.deepEqual(h.packets, []); assert.deepEqual(h.ran, []);
+});
+
+test('a dragged package stays within every viewport edge after narrow resize and hide/reopen', () => {
+  const h = floatingPicker(), handle = h.dialog.querySelector('.mendo-package-drag-handle');
+  h.pointer(handle, 'pointerdown');
+  h.pointer(h.document, 'pointermove', { clientX: 3000, clientY: 3000 });
+  assert.deepEqual(h.point(), [508, 388]);
+  assert.equal(h.dialog.getBoundingClientRect().right, 988);
+  assert.equal(h.dialog.getBoundingClientRect().bottom, 788);
+  h.pointer(h.document, 'pointermove', { clientX: -3000, clientY: -3000 });
+  assert.deepEqual(h.point(), [12, 12]);
+  h.pointer(h.document, 'pointerup');
+  h.pointer(handle, 'pointerdown', { clientX: 100, clientY: 40 });
+  h.pointer(h.document, 'pointermove', { clientX: 500, clientY: 340 });
+  assert.deepEqual(h.point(), [412, 312]);
+  h.dialog.querySelector('[data-action="hide"]').click();
+  const resume = h.document.querySelector('.mendo-package-resume');
+  assert.equal(resume.hidden, false);
+  h.pointer(h.document, 'pointermove', { clientX: -3000, clientY: -3000 });
+  assert.deepEqual(h.point(), [412, 312], 'hide releases the active drag');
+  h.window.innerWidth = 360; h.window.innerHeight = 300;
+  h.window.dispatchEvent(new h.window.Event('resize'));
+  resume.click();
+  assert.deepEqual(h.point(), [12, 12]);
+  assert.equal(h.dialog.getBoundingClientRect().right, 348);
+  assert.equal(h.dialog.getBoundingClientRect().bottom, 288);
+  assert.equal(h.dialog.hasAttribute('open'), true);
+  h.window.innerWidth = 640; h.window.innerHeight = 480;
+  h.window.dispatchEvent(new h.window.Event('resize'));
+  assert.deepEqual(h.point(), [12, 12], 'expanding the viewport keeps the current user placement');
+  assert.deepEqual(h.packets, []);
+});
+
+test('package drag ignores buttons, secondary mouse presses and unrelated pointers, and stops on cancellation', () => {
+  const h = floatingPicker(), handle = h.dialog.querySelector('.mendo-package-drag-handle');
+  const child = h.document.createElement('button'); handle.append(child);
+  for (const [target, properties] of [[handle, { button: 2, buttons: 2 }], [handle, { isPrimary: false }],
+    [child, {}], [h.dialog.querySelector('[data-action="back"]'), {}], [h.dialog.querySelector('[data-action="close"]'), {}], [h.dialog.querySelector('input'), {}]]) {
+    h.pointer(target, 'pointerdown', properties);
+    h.pointer(h.document, 'pointermove', { clientX: 2000, clientY: 2000 });
+    const box = h.dialog.getBoundingClientRect();
+    assert.deepEqual([box.left, box.top], [260, 200]);
+  }
+  h.pointer(handle, 'pointerdown');
+  h.pointer(h.document, 'pointermove', { pointerId: 8, clientX: 2000, clientY: 2000 });
+  h.pointer(h.document, 'pointerup', { pointerId: 8 });
+  assert.deepEqual(h.point(), [260, 200]);
+  h.pointer(h.document, 'pointermove', { clientX: 400, clientY: 280 });
+  assert.deepEqual(h.point(), [360, 260]);
+  h.pointer(h.document, 'pointercancel');
+  h.pointer(h.document, 'pointermove', { clientX: 2000, clientY: 2000 });
+  assert.deepEqual(h.point(), [360, 260]);
+  assert.equal(h.dialog.classList.contains('mendo-package-dragging'), false);
+  h.pointer(handle, 'pointerdown'); h.pointer(handle, 'lostpointercapture');
+  h.pointer(h.document, 'pointermove', { clientX: 2000, clientY: 2000 });
+  assert.deepEqual(h.point(), [360, 260]);
+  assert.deepEqual(h.packets, []); assert.deepEqual(h.ran, []);
+});
+
+test('losing window focus during a package drag releases capture and ignores subsequent movement', () => {
+  const h = floatingPicker(), handle = h.dialog.querySelector('.mendo-package-drag-handle');
+  const captures = new Set();
+  handle.setPointerCapture = id => captures.add(id);
+  handle.releasePointerCapture = id => captures.delete(id);
+  h.pointer(handle, 'pointerdown');
+  h.window.dispatchEvent(new h.window.Event('blur'));
+  assert.equal(captures.size, 0, 'switching windows must not leave the gesture captured');
+  h.pointer(h.document, 'pointermove', { clientX: 2000, clientY: 2000 });
+  assert.deepEqual(h.point(), [260, 200]);
+});
+
+test('idle package close disposes the entire UI and allows a fresh picker without reopening the source menu', () => {
+  const h = floatingPicker(), close = h.dialog.querySelector('[data-action="close"]');
+  assert.ok(close, 'the window has a distinct × close button');
+  assert.equal(Boolean(close.disabled), false);
+  assert.match(close.getAttribute('aria-label'), /Закрыть/);
+  const input = h.dialog.querySelector('input');
+  input.checked = true; input.dispatchEvent(new h.window.Event('change'));
+  const handle = h.dialog.querySelector('.mendo-package-drag-handle'), captures = new Set();
+  handle.setPointerCapture = id => captures.add(id); handle.releasePointerCapture = id => captures.delete(id);
+  h.pointer(handle, 'pointerdown'); h.pointer(h.document, 'pointermove', { clientX: 500, clientY: 320 });
+  const previousPlacement = h.point();
+  close.click();
+  assert.equal(h.document.querySelectorAll('dialog,.mendo-package-resume').length, 0);
+  assert.equal(captures.size, 0, 'closing releases the pointer gesture');
+  assert.equal(h.ui.running, false); assert.equal(h.returned(), 0);
+  assert.deepEqual(h.packets, []); assert.deepEqual(h.ran, []);
+  h.opener.click();
+  const next = h.document.querySelector('dialog');
+  assert.notEqual(next, h.dialog, 'full close drops the old picker');
+  assert.equal(next.hasAttribute('open'), true);
+  assert.equal(Boolean(next.querySelector('input').checked), true, 'compatible choices remain remembered');
+  assert.ok(!next.style.left, 'a fresh picker starts centered');
+  close.click();
+  h.pointer(handle, 'pointerdown'); h.pointer(h.document, 'pointermove', { clientX: -2000, clientY: -2000 });
+  h.window.innerWidth = 360; h.window.innerHeight = 300; h.window.dispatchEvent(new h.window.Event('resize'));
+  assert.equal(next.isConnected, true, 'events from a disposed picker cannot close the new UI');
+  assert.deepEqual(h.point(), previousPlacement, 'disposed resize and pointer listeners are released');
+});
+
+test('both package close buttons remain disabled through running and cancellation cleanup while Hide and Cancel work', async () => {
+  let entered, releaseCleanup;
+  const started = new Promise(resolve => { entered = resolve; });
+  const cleanup = new Promise(resolve => { releaseCleanup = resolve; });
+  const h = floatingPicker({
+    run(_id, ui) { return new Promise((_, reject) => {
+      ui.signal.addEventListener('abort', () => { const error = new Error('cancelled'); error.name = 'AbortError'; reject(error); }, { once: true });
+      entered();
+    }); },
+    async send(message) { if (message.t === 'mendosave-package-cancel') await cleanup; return { ok: true }; },
+  });
+  try {
+    const input = h.dialog.querySelector('input'); input.checked = true; input.dispatchEvent(new h.window.Event('change'));
+    h.dialog.querySelector('[data-mode="files"]').click(); await started;
+    const close = h.dialog.querySelector('[data-action="close"]');
+    assert.equal(close.disabled, true);
+    assert.match(close.title, /недоступно.*завершения/);
+    assert.match(close.getAttribute('aria-label'), /недоступно.*завершения/);
+    const signal = h.ui.signal;
+    const handle = h.dialog.querySelector('.mendo-package-drag-handle');
+    h.pointer(handle, 'pointerdown'); h.pointer(h.document, 'pointermove', { clientX: 500, clientY: 320 }); h.pointer(h.document, 'pointerup');
+    assert.equal(h.ui.signal, signal); assert.equal(signal.aborted, false, 'drag never cancels the job');
+    assert.equal(h.packets.filter(message => message.t === 'mendosave-package-begin').length, 1);
+    close.click();
+    assert.equal(h.dialog.isConnected, true);
+    h.dialog.querySelector('[data-action="hide"]').click();
+    const chip = h.document.querySelector('.mendo-package-resume'), chipClose = chip.querySelector('[data-action="close"]');
+    assert.ok(chipClose, 'the resume chip provides its own ×');
+    assert.equal(chipClose.disabled, true);
+    assert.match(chipClose.title, /недоступно.*завершения/);
+    assert.equal(chip.hidden, false);
+    chipClose.click();
+    assert.equal(h.dialog.hasAttribute('open'), false, 'disabled × cannot reopen or dismiss the active UI');
+    assert.equal(chip.isConnected && h.ui.running, true);
+    assert.equal(h.packets.some(message => /cancel|abort/.test(message.t)), false);
+    const reopen = chip.querySelector('[data-action="resume"]'); assert.ok(reopen); reopen.click();
+    const cancel = h.dialog.querySelector('[data-action="cancel"]');
+    assert.equal(cancel.hidden, false); assert.equal(cancel.disabled, false);
+    cancel.click(); await new Promise(setImmediate);
+    assert.equal(signal.aborted, true); assert.equal(h.ui.running, true);
+    assert.equal(close.disabled && chipClose.disabled, true, 'pending cancellation cleanup still owns both controls');
+    close.click(); h.dialog.querySelector('[data-action="hide"]').click(); chipClose.click();
+    assert.equal(h.dialog.isConnected && chip.isConnected, true);
+    releaseCleanup(); while (h.ui.running) await new Promise(setImmediate);
+    assert.equal(close.disabled || chipClose.disabled, false);
+    assert.match(chip.textContent, /Пакет отменён/);
+    chipClose.click();
+    assert.equal(h.document.querySelectorAll('dialog,.mendo-package-resume').length, 0);
+    assert.equal(h.returned(), 0);
+  } finally {
+    if (h.ui.running) void h.ui.cancel();
+    releaseCleanup(); while (h.ui.running) await new Promise(setImmediate);
+  }
+});
+
+test('a visible dragged package refits on resize and ends the active gesture', () => {
+  const h = floatingPicker(), handle = h.dialog.querySelector('.mendo-package-drag-handle'), captures = new Set();
+  handle.setPointerCapture = id => captures.add(id); handle.releasePointerCapture = id => captures.delete(id);
+  h.pointer(handle, 'pointerdown'); h.pointer(h.document, 'pointermove', { clientX: 500, clientY: 320 });
+  assert.deepEqual(h.point(), [460, 300]);
+  h.window.innerWidth = 360; h.window.innerHeight = 300; h.window.dispatchEvent(new h.window.Event('resize'));
+  assert.equal(captures.size, 0);
+  assert.deepEqual(h.point(), [12, 12]);
+  h.pointer(h.document, 'pointermove', { clientX: -2000, clientY: -2000 });
+  assert.deepEqual(h.point(), [12, 12]);
+  assert.deepEqual(h.packets, []);
+});
+
+test('idle, completed and failed hidden packages close completely from the chip and reopen a fresh plan', async t => {
+  for (const phase of ['idle', 'complete', 'failed']) await t.test(phase, async () => {
+    const h = floatingPicker({ run() { if (phase === 'failed') throw new Error('fixture failure'); return 'video.file'; } });
+    if (phase !== 'idle') {
+      const input = h.dialog.querySelector('input'); input.checked = true; input.dispatchEvent(new h.window.Event('change'));
+      h.dialog.querySelector('[data-mode="files"]').click(); while (h.ui.running) await new Promise(setImmediate);
+      assert.match(h.dialog.querySelector('[role="status"]').textContent, phase === 'complete' ? /Готово/ : /Ошибка/);
+    }
+    h.dialog.querySelector('[data-action="hide"]').click();
+    const chip = h.document.querySelector('.mendo-package-resume'), close = chip.querySelector('[data-action="close"]');
+    assert.equal(chip.getAttribute('role'), 'group');
+    assert.equal(chip.querySelectorAll('button').length, 2);
+    assert.equal(chip.querySelector('button button'), null, 'native reopen and close controls are siblings');
+    assert.equal(close.disabled, false);
+    const packetCount = h.packets.length, runCount = h.ran.length;
+    close.click();
+    assert.equal(h.document.querySelectorAll('dialog,.mendo-package-resume').length, 0);
+    assert.equal(h.returned(), 0); assert.equal(h.packets.length, packetCount); assert.equal(h.ran.length, runCount);
+    h.opener.click();
+    const next = h.document.querySelector('dialog');
+    assert.notEqual(next, h.dialog); assert.equal(h.document.querySelectorAll('dialog').length, 1);
+    assert.match(next.querySelector('[role="status"]').textContent, /Выберите файлы/);
+    chip.click(); close.click();
+    assert.equal(next.isConnected, true, 'disposed chip events cannot reopen or close a newer picker');
+    assert.equal(h.document.querySelectorAll('.mendo-package-resume').length, 1);
+  });
 });

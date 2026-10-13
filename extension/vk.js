@@ -8,8 +8,9 @@
 // and `dash_sep`, with video and audio in separate AdaptationSets.
 //
 // Two consequences shape everything below:
-//   * a progressive file needs no assembly, so it goes straight to
-//     chrome.downloads — no fetch, no CORS, no copy in the page;
+//   * a single progressive file goes straight to chrome.downloads. A package
+//     reads bounded ranges from the VK origin: its CDN refuses extension-
+//     origin fetch, so bytes use the existing owned Blob transfer to OPFS;
 //   * the DASH audio track uses SegmentBase addressing, which means each
 //     representation is ONE whole MP4 addressed by byte ranges. Audio-only is
 //     therefore a plain ranged download and needs no segment stitching — and it
@@ -74,6 +75,7 @@
 
   const BUTTON_CLASS = 'mendosave-vk-btn';
   const SLICE_BYTES = 8 * 1024 * 1024;
+  const PACKAGE_SLICE_BYTES = 1024 * 1024;
   const TRANSFER_CHUNK_SIZE = 4 * 1024 * 1024;
   const VIDEO_ID_RE = /\/(?:video|clip)(-?\d+)_(\d+)/;
 
@@ -401,36 +403,63 @@
     const response = await mendoFetch(url, {
       credentials: 'omit',
       cache: 'no-store',
+      redirect: 'error',
       headers: { Range: `bytes=${from}-${to}` },
     });
-    if (response.status !== 206 && response.status !== 200) {
-      throw new Error(`сервер отказал на диапазоне (HTTP ${response.status})`);
-    }
-    // A server may ignore Range or return a short body. Appending that body
-    // and advancing by its length can repeat the beginning or silently truncate
-    // the audio. Only accept the exact requested bytes before handing them on.
-    if (response.status === 200 && from !== 0) throw new Error('сервер проигнорировал диапазон аудиодорожки');
-    const range = response.headers.get('content-range');
-    if (range) {
-      // An exposed complete length must agree with the size used to end the
-      // download; exact start/end alone can still accept a truncated track.
-      const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(range);
-      const start = match ? Number(match[1]) : NaN;
-      const end = match ? Number(match[2]) : NaN;
-      const completeLength = match?.[3] === '*' ? null : Number(match?.[3]);
-      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
-          || start !== from || end !== to
-          || (completeLength !== null && (!Number.isSafeInteger(completeLength)
-              || completeLength !== total || completeLength <= end))) {
-        throw new Error('сервер вернул другой диапазон аудиодорожки');
+    const expected = to - from + 1;
+    let reader;
+    try {
+      if (response.status !== 206 && response.status !== 200) {
+        throw new Error(`сервер отказал на диапазоне (HTTP ${response.status})`);
       }
+      // A server may ignore Range or return a short body. Appending that body
+      // and advancing by its length can repeat the beginning or silently truncate
+      // the audio. Only accept the exact requested bytes before handing them on.
+      if (response.status === 200 && from !== 0) throw new Error('сервер проигнорировал диапазон аудиодорожки');
+      const length = response.headers.get('content-length');
+      if (length !== null && (!/^\d+$/.test(length) || Number(length) !== expected)) {
+        throw new Error('сервер вернул неполный или неверный диапазон медиа');
+      }
+      const range = response.headers.get('content-range');
+      if (range) {
+        // An exposed complete length must agree with the size used to end the
+        // download; exact start/end alone can still accept a truncated track.
+        const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(range);
+        const start = match ? Number(match[1]) : NaN;
+        const end = match ? Number(match[2]) : NaN;
+        const completeLength = match?.[3] === '*' ? null : Number(match?.[3]);
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+            || start !== from || end !== to
+            || (completeLength !== null && (!Number.isSafeInteger(completeLength)
+                || completeLength !== total || completeLength <= end))) {
+          throw new Error('сервер вернул другой диапазон аудиодорожки');
+        }
+      }
+      // Bound the body independently of headers: an ignored Range must never
+      // materialize a two-hour progressive file in page memory.
+      reader = response.body?.getReader();
+      if (!reader) throw new Error('сервер не предоставил поток диапазона медиа');
+      const bytes = new Uint8Array(expected);
+      let at = 0;
+      for (;;) {
+        mendoCheck();
+        const { done, value } = await reader.read();
+        mendoCheck();
+        if (done) break;
+        if (!Number.isSafeInteger(value?.byteLength) || value.byteLength > expected - at) {
+          throw new Error('сервер вернул неполный или неверный диапазон медиа');
+        }
+        // Own the network view before species-based subarray/base64 operations.
+        const incoming = new Uint8Array(value);
+        if (incoming.length !== value.byteLength) throw new Error('сервер вернул неверные данные диапазона');
+        bytes.set(incoming, at); at += incoming.length;
+      }
+      if (at !== expected) throw new Error('сервер вернул неполный или неверный диапазон медиа');
+      return bytes;
+    } finally {
+      await (reader || response.body)?.cancel().catch(() => {});
+      reader?.releaseLock();
     }
-    // Own the backing buffer before species-based subarray/base64 operations:
-    // Gecko's view over a DOM-returned ArrayBuffer can retain its foreign realm.
-    const fetchedBytes = new Uint8Array(await response.arrayBuffer());
-    const bytes = new Uint8Array(fetchedBytes);
-    if (bytes.length !== to - from + 1) throw new Error('сервер вернул неполный или неверный диапазон аудиодорожки');
-    return bytes;
   }
 
   // `Content-Range` is not a CORS-safelisted response header, so its value is
@@ -441,7 +470,7 @@
   async function probeSize(url) {
     for (const method of ['HEAD', 'GET']) {
       try {
-        const response = await mendoFetch(url, { method, credentials: 'omit', cache: 'no-store' });
+        const response = await mendoFetch(url, { method, credentials: 'omit', cache: 'no-store', redirect: 'error' });
         const length = response.headers.get('content-length');
         const total = /^\d+$/.test(length || '') ? Number(length) : 0;
         if (method === 'GET') await response.body?.cancel().catch(() => {});
@@ -507,6 +536,49 @@
         state.paused
           ? 'Пауза в браузере'
           : (total ? `Загрузка · ${formatBytes(received)} из ${formatBytes(total)}` : 'Загрузка файла'));
+    }
+  }
+
+  async function downloadPackageVideo(url, filename, notification, producer) {
+    notification.stage('file', null, 'active', 'Читаю размер видео');
+    const total = await probeSize(url);
+    if (!total) throw new Error('сервер не сообщил размер видео');
+    if (total > 1024 ** 3) throw new Error('Размер видео превышает лимит временного хранилища');
+    const transferId = crypto.randomUUID();
+    let opened = false, finished = false, port;
+    const requireOk = response => {
+      if (!response?.ok) throw new Error(response?.error || 'передача видео прервалась');
+      return response;
+    };
+    try {
+      requireOk(await mendoSend({ t: 'mendosave-ensure' }, producer));
+      mendoCheck(); opened = true;
+      requireOk(await mendoSend({ t: 'mendosave-blob-open', transferId, filename,
+        mime: 'video/mp4', size: total }, producer));
+      port = chrome.runtime.connect({ name: `mendosave-transfer:${transferId}` });
+      let sequence = 0;
+      for (let at = 0; at < total;) {
+        // Feed the existing 60s transfer deadline after each 1 MiB range,
+        // rather than waiting for a complete 8 MiB audio-sized read.
+        const end = Math.min(total - 1, at + PACKAGE_SLICE_BYTES - 1);
+        const bytes = await fetchRange(url, at, end, total);
+        for (let offset = 0; offset < bytes.length; offset += 1024 ** 2) {
+          mendoCheck();
+          requireOk(await mendoSend({ t: 'mendosave-blob-chunk', transferId, sequence: sequence++,
+            data: encodeBase64(bytes.subarray(offset, Math.min(offset + 1024 ** 2, bytes.length))) }, producer));
+        }
+        at += bytes.length;
+        notification.stage('file', at / total, 'active', 'Получение видео');
+      }
+      mendoCheck();
+      notification.stage('file', 1, 'active', 'Сохранение видео');
+      const result = requireOk(await mendoSend({ t: 'mendosave-blob-finish', transferId }, producer));
+      mendoCheck(); finished = true;
+      notification.stage('file', 1, 'done', 'Загрузка файла');
+      return result.filename || filename;
+    } finally {
+      if (opened && !finished) await mendoSend({ t: 'mendosave-blob-abort', transferId }, producer).catch(() => {});
+      try { port?.disconnect(); } catch {}
     }
   }
 
@@ -710,19 +782,23 @@
     const notification = getToast();
     let producer;
     try {
-      if (choice.kind !== 'video') producer = await reserveProcessor();
+      if (choice.kind !== 'video' || bundled) producer = await reserveProcessor();
       let filename;
       if (choice.kind === 'video') {
         filename = `VK - ${safeName(info.title)} [${choice.rung.height}p].mp4`;
         notification.begin(`Скачиваю ${choice.rung.height}p…`, [{ id: 'file', label: 'Загрузка файла' }]);
-        notification.stage('file', null, 'active', 'Передача браузеру');
-        const downloadId = await saveDirect(choice.rung.url, filename);
-        log('video', `handed to downloads; height=${choice.rung.height} id=${downloadId}`);
-        // The browser only ACCEPTED it here; the bytes keep arriving for a
-        // while, so the panel follows the real transfer instead of claiming
-        // "готово" against a downloads list that says otherwise.
-        await followBrowserDownload(downloadId, notification);
-        filename = downloadId?.filename || filename;
+        if (bundled) {
+          filename = await downloadPackageVideo(choice.rung.url, filename, notification, producer);
+        } else {
+          notification.stage('file', null, 'active', 'Передача браузеру');
+          const downloadId = await saveDirect(choice.rung.url, filename);
+          log('video', `handed to downloads; height=${choice.rung.height} id=${downloadId}`);
+          // The browser only ACCEPTED it here; the bytes keep arriving for a
+          // while, so the panel follows the real transfer instead of claiming
+          // "готово" against a downloads list that says otherwise.
+          await followBrowserDownload(downloadId, notification);
+          filename = downloadId?.filename || filename;
+        }
         notification.set(`Готово: ${filename}`, 1);
       } else {
         notification.begin(`Скачиваю звук · ${choice.audioFormat === 'mp3' ? 'MP3' : 'M4A'}…`, [
@@ -867,13 +943,33 @@
 
   function positionMenu(button) {
     if (!menu || !button) return;
+    const margin = 8;
+    const clamp = (value, limit) => Math.max(margin, Math.min(value, limit));
+    menu.style.maxHeight = `${Math.max(1, window.innerHeight - 2 * margin)}px`;
     const box = button.getBoundingClientRect();
     const width = menu.getBoundingClientRect().width || 280;
-    const height = menu.getBoundingClientRect().height || 200;
-    menu.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, box.right - width))}px`;
-    menu.style.top = box.top > height + 16
-      ? `${box.top - height - 8}px`
-      : `${Math.min(window.innerHeight - height - 8, box.bottom + 8)}px`;
+    let height = menu.getBoundingClientRect().height || 200;
+    const above = box.top - 2 * margin;
+    const below = window.innerHeight - box.bottom - 2 * margin;
+    let left = clamp(box.right - width, window.innerWidth - width - margin);
+    let top;
+    if (above >= height) top = box.top - height - margin;
+    else if (below >= height) top = box.bottom + margin;
+    else if (box.left >= width + 2 * margin) {
+      left = box.left - width - margin;
+      top = clamp(box.top, window.innerHeight - height - margin);
+    } else if (window.innerWidth - box.right >= width + 2 * margin) {
+      left = box.right + margin;
+      top = clamp(box.top, window.innerHeight - height - margin);
+    } else {
+      // A narrow viewport cannot fit the list beside the icon. Scroll the
+      // list above or below it so a repeat click still targets the icon.
+      menu.style.maxHeight = `${Math.max(1, Math.max(above, below))}px`;
+      height = menu.getBoundingClientRect().height || 200;
+      top = above >= below ? box.top - height - margin : box.bottom + margin;
+    }
+    menu.style.left = `${left}px`;
+    menu.style.top = `${clamp(top, window.innerHeight - height - margin)}px`;
   }
 
   // ---- mounting ----------------------------------------------------------------
@@ -1006,6 +1102,5 @@
   }
   setInterval(schedule, 1000);
   document.addEventListener('visibilitychange', schedule);
-  window.addEventListener('scroll', () => { if (menu) closeMenu(); }, { passive: true });
   schedule();
 })();

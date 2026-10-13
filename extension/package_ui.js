@@ -187,9 +187,15 @@
           const heading = document.createElement('h2'); heading.textContent = 'Пакет форматов';
           const caption = document.createElement('p'); caption.textContent = title;
           const header = document.createElement('div'); header.className = 'mendo-package-header';
+          const windowBar = document.createElement('div'); windowBar.className = 'mendo-package-windowbar';
+          const dragHandle = document.createElement('div'); dragHandle.className = 'mendo-package-drag-handle';
+          dragHandle.title = 'Перетащить окно'; dragHandle.setAttribute('aria-hidden', 'true');
+          const closeDialog = document.createElement('button'); closeDialog.type = 'button'; closeDialog.dataset.action = 'close';
+          closeDialog.className = 'mendo-package-close'; closeDialog.textContent = '×';
+          windowBar.append(dragHandle, closeDialog);
           const goBack = document.createElement('button'); goBack.type = 'button'; goBack.dataset.action = 'back'; goBack.textContent = '← Назад';
           const headingGroup = document.createElement('div'); headingGroup.append(heading, caption);
-          header.append(goBack, headingGroup);
+          header.append(windowBar, goBack, headingGroup);
           const list = document.createElement('div'); list.className = 'mendo-package-list';
           const status = document.createElement('p'); status.setAttribute('role', 'status');
           status.setAttribute('aria-live', 'polite'); status.textContent = 'Выберите файлы. Они будут обработаны по очереди.';
@@ -219,19 +225,86 @@
           const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Отменить пакет'; cancel.hidden = true;
           cancel.dataset.action = 'cancel';
           const hide = document.createElement('button'); hide.type = 'button'; hide.textContent = 'Скрыть'; hide.dataset.action = 'hide';
-          const resume = document.createElement('button'); resume.type = 'button'; resume.className = 'mendo-package-resume';
-          resume.hidden = true; resume.setAttribute('aria-live', 'polite');
-          const updateResume = () => { resume.textContent = `Пакет · ${status.textContent.slice(0, 180)}`; };
+          const resume = document.createElement('div'); resume.className = 'mendo-package-resume';
+          resume.hidden = true; resume.setAttribute('role', 'group'); resume.setAttribute('aria-label', 'Скрытый пакет'); resume.setAttribute('aria-live', 'polite');
+          const resumeOpen = document.createElement('button'); resumeOpen.type = 'button'; resumeOpen.dataset.action = 'resume';
+          const closeResume = document.createElement('button'); closeResume.type = 'button'; closeResume.dataset.action = 'close';
+          closeResume.className = 'mendo-package-close'; closeResume.textContent = '×';
+          resume.append(resumeOpen, closeResume);
+          const view = document.defaultView;
+          let position = null, drag = null;
+          const place = (left, top) => {
+            if (!dialog.hasAttribute('open')) return false;
+            const box = dialog.getBoundingClientRect?.();
+            const width = view?.innerWidth, height = view?.innerHeight;
+            if (!box || ![left, top, box.width, box.height, width, height].every(Number.isFinite)
+              || box.width <= 0 || box.height <= 0 || width <= 0 || height <= 0) return false;
+            const spaceX = Math.max(0, width - box.width), spaceY = Math.max(0, height - box.height);
+            const marginX = Math.min(12, spaceX / 2), marginY = Math.min(12, spaceY / 2);
+            position = { left: Math.max(marginX, Math.min(left, spaceX - marginX)),
+              top: Math.max(marginY, Math.min(top, spaceY - marginY)) };
+            dialog.style.margin = '0'; dialog.style.right = 'auto'; dialog.style.bottom = 'auto';
+            dialog.style.left = `${position.left}px`; dialog.style.top = `${position.top}px`;
+            return true;
+          };
+          const fit = () => { if (position) place(position.left, position.top); };
+          const stopDrag = () => {
+            const previous = drag; drag = null;
+            document.removeEventListener('pointermove', moveDrag);
+            document.removeEventListener('pointerup', endDrag);
+            document.removeEventListener('pointercancel', endDrag);
+            dialog.classList.remove('mendo-package-dragging');
+            if (previous) { try { dragHandle.releasePointerCapture?.(previous.id); } catch (error) {} }
+          };
+          const moveDrag = event => {
+            if (!drag || event.pointerId !== drag.id) return;
+            if (!(event.buttons & 1)) { stopDrag(); return; }
+            if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+            event.preventDefault();
+            place(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y);
+          };
+          const endDrag = event => { if (drag && event.pointerId === drag.id) stopDrag(); };
+          dragHandle.addEventListener('pointerdown', event => {
+            if (picker !== panel || drag || event.button !== 0 || event.isPrimary === false
+              || !Number.isInteger(event.pointerId) || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)
+              || event.target.closest?.('button,input,select,textarea,a,[role="button"],[contenteditable]')) return;
+            const box = dialog.getBoundingClientRect?.();
+            if (!box || !place(box.left, box.top)) return;
+            event.preventDefault();
+            drag = { id: event.pointerId, x: event.clientX, y: event.clientY, ...position };
+            dialog.classList.add('mendo-package-dragging');
+            document.addEventListener('pointermove', moveDrag);
+            document.addEventListener('pointerup', endDrag);
+            document.addEventListener('pointercancel', endDrag);
+            try { dragHandle.setPointerCapture?.(drag.id); } catch (error) {}
+          });
+          dragHandle.addEventListener('lostpointercapture', endDrag);
+          const resize = () => { stopDrag(); fit(); };
+          view?.addEventListener('resize', resize);
+          view?.addEventListener('blur', stopDrag);
+          const updateClose = () => {
+            const label = current ? 'Закрытие недоступно до завершения пакета или отмены' : 'Закрыть окно пакета полностью';
+            for (const button of [closeDialog, closeResume]) {
+              button.disabled = Boolean(current); button.title = label; button.setAttribute('aria-label', label);
+            }
+          };
+          const updateResume = () => {
+            resumeOpen.textContent = `Пакет · ${status.textContent.slice(0, 180)}`;
+            resumeOpen.setAttribute('aria-label', `Открыть окно пакета: ${status.textContent.slice(0, 180)}`);
+            updateClose(); fit();
+          };
           const show = () => {
             if (picker !== panel) return;
             resume.hidden = true;
             if (!dialog.hasAttribute('open')) { if (dialog.show) dialog.show(); else dialog.setAttribute('open', ''); }
+            updateClose(); fit();
             (current ? hide : rows.find(row => row.input.checked)?.input || rows[0]?.input)?.focus();
           };
           const conceal = () => {
             if (picker !== panel) return;
+            stopDrag();
             dialog.close?.(); dialog.removeAttribute('open');
-            updateResume(); resume.hidden = false; resume.focus();
+            updateResume(); resume.hidden = false; resumeOpen.focus();
           };
           hide.addEventListener('click', conceal);
           resume.addEventListener('click', show);
@@ -243,8 +316,17 @@
           bindRows();
           const dispose = () => {
             if (picker !== panel || current) return;
+            stopDrag(); view?.removeEventListener('resize', resize); view?.removeEventListener('blur', stopDrag);
             remember(); dialog.close?.(); dialog.remove(); resume.remove(); picker = null;
           };
+          const closePicker = event => {
+            event.preventDefault(); event.stopPropagation();
+            if (current || picker !== panel) return;
+            dispose();
+            if (opener.isConnected) opener.focus();
+          };
+          closeDialog.addEventListener('click', closePicker);
+          closeResume.addEventListener('click', closePicker);
           const refresh = (items, nextTitle, nextBack) => {
             if (current || picker !== panel) return;
             remember(); list.replaceChildren(); rows = makeRows(items); bindRows();

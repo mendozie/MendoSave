@@ -128,11 +128,14 @@ test('Twitch VOD package groups the declared audio_only rendition separately fro
 
 test('VK format package includes video and audio and does not poll archive-collected video', async () => {
   const payload = require('node:fs').readFileSync('tests/fixtures/vk-player.html', 'utf8');
+  const bytes = Uint8Array.of(0, 0, 0, 4);
   const app = adapter('vk.js', '<div class="VideoPlayer__player"><video></video></div>',
-    'https://vkvideo.ru/video-1_2', async () => ({ ok: true,
+    'https://vkvideo.ru/video-1_2', async (url, options) => url.includes('video_ext.php') ? { ok: true,
       headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
       arrayBuffer: async () => new TextEncoder().encode(payload).buffer,
-    }), () => ({ ok: true, collected: true, filename: 'vk-collected.mp4' }));
+    } : options.method === 'HEAD' ? new Response(null, { headers: { 'content-length': '4' } })
+      : new Response(bytes, { status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' } }),
+    () => ({ ok: true, collected: true, filename: 'vk-collected.mp4' }));
   app.context.MendoPackageUI.add = (_menu, picker) => { app.picker = picker; };
   app.click(app.document.querySelector('.mendosave-vk-btn'));
   await app.settle();

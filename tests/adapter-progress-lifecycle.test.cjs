@@ -36,13 +36,15 @@ async function fixture(site, save, mode = 'video') {
     const payload = fs.readFileSync('tests/fixtures/vk-player.html', 'utf8');
     app = adapter('vk.js', '<div class="VideoPlayer__player"><video></video></div>',
       'https://vkvideo.ru/video-1_2', async (url, options) => {
-        if (mode !== 'audio' || url.includes('video_ext.php')) return { ok: true,
+        if (url.includes('video_ext.php')) return { ok: true,
           headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
           arrayBuffer: async () => new TextEncoder().encode(payload).buffer };
         if (url.endsWith('.mpd')) return { ok: true, text: async () => fs.readFileSync('tests/fixtures/vk-audio.mpd', 'utf8') };
-        if (options.method === 'HEAD') return { ok: true, headers: new Headers({ 'content-length': '4' }) };
-        return { ok: true, status: 206, headers: new Headers({ 'content-range': 'bytes 0-3/4' }), arrayBuffer: async () => Uint8Array.of(1, 2, 3, 4).buffer };
-      }, send);
+        if (options.method === 'HEAD') return new Response(null, { headers: { 'content-length': '4' } });
+        return new Response(Uint8Array.of(1, 2, 3, 4), {
+          status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' },
+        });
+      }, message => mode === 'video' && message.t === 'mendosave-blob-finish' ? save(message) : send(message));
     button = '.mendosave-vk-btn'; toast = '.mendosave-vk-toast'; select = (item) => item.label.includes(mode === 'audio' ? 'MP3' : 'Видео');
   } else if (site === 'rutube') {
     app = adapter('rutube.js', '<div class="player"><video></video></div>',

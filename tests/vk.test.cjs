@@ -55,6 +55,7 @@ function adapter(overrides = {}) {
       async sendMessage(message) {
         if (/^mendosave-(?:begin|chunk|abort|finalize)$/.test(message.t)) assert.equal(message.instanceId, 'processor-fixture');
         messages.push(message);
+        if (overrides.sendResponder) return overrides.sendResponder(message);
         if (message.t === 'mendosave-register-job') return { ok: true, tabId: 7 };
         if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
         return { ok: true, id: 42 };
@@ -68,6 +69,7 @@ function adapter(overrides = {}) {
         async arrayBuffer() { return overrides.payloadBytes
           ? overrides.payloadBytes.slice().buffer : new TextEncoder().encode(overrides.payload || payload).buffer; },
       };
+      if (overrides.mediaResponder) return overrides.mediaResponder(url, options);
       if (String(url).endsWith('.mpd')) return { ok: true, async text() { return overrides.dash || dash; } };
       if (options.method === 'HEAD' || options.method === 'GET') return {
         ok: true,
@@ -76,14 +78,15 @@ function adapter(overrides = {}) {
         body: { async cancel() {} },
       };
       return { status: overrides.status || 206, headers: new Headers(overrides.rangeHeaders || {}),
-        async arrayBuffer() {
+        body: new ReadableStream({ start(controller) {
           const buffer = (overrides.bytes || Uint8Array.of(1, 2, 3, 4)).slice().buffer;
           if (overrides.foreignViews) responseBuffers.add(buffer);
-          return buffer;
-        } };
+          controller.enqueue(new ContentUint8Array(buffer)); controller.close();
+        } }) };
     },
   });
-  context.chrome.runtime.connect = producerPorts().connect;
+  const producers = producerPorts();
+  context.chrome.runtime.connect = overrides.connectResponder || producers.connect;
   context.MendoPackageUI = createPackageUI({ runtime: context.chrome.runtime, fetch: (...args) => context.fetch(...args),
     document: overrides.withPackage ? document : undefined, queue: require('../extension/package_queue.js') });
   if (overrides.modernFrame) {
@@ -127,7 +130,7 @@ function adapter(overrides = {}) {
   const click = (element) => element.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
   const settle = async () => { for (let n = 0; n < 12; n++) await new Promise(setImmediate); };
   return { document, messages, requests, sourceTimers, bridgeMessages, bridgeRequests, frames,
-    click, settle, window, shadow, location: context.location };
+    click, settle, window, shadow, location: context.location, producers };
 }
 
 async function open(a) { a.click(a.document.querySelector('.mendosave-vk-btn')); await a.settle(); }
@@ -139,6 +142,78 @@ async function saveAudio(a) {
   assert.ok(control, a.document.querySelector('.mendosave-vk-menu').textContent);
   a.click(control); await a.settle();
 }
+
+test('VK menu remains open while the page scrolls up or down', async () => {
+  const a = adapter(); await open(a);
+  const menu = a.document.querySelector('.mendosave-vk-menu');
+  assert.ok(menu);
+  for (const scrollY of [450, 0, 900, 200]) {
+    a.window.scrollY = scrollY;
+    a.window.dispatchEvent(new a.window.Event('scroll'));
+    await a.settle();
+    assert.equal(a.document.querySelector('.mendosave-vk-menu') === menu, true);
+  }
+  assert.equal(a.messages.some(message => message.t === 'mendosave-save'), false);
+});
+
+test('VK menu keeps inside clicks and still closes on a repeat trigger or an outside click after scrolling', async () => {
+  const a = adapter(); await open(a);
+  const menu = a.document.querySelector('.mendosave-vk-menu');
+  a.window.dispatchEvent(new a.window.Event('scroll'));
+  a.click(menu); await a.settle();
+  assert.equal(a.document.querySelector('.mendosave-vk-menu') === menu, true);
+  a.click(a.document.querySelector('.mendosave-vk-btn')); await a.settle();
+  assert.equal(Boolean(a.document.querySelector('.mendosave-vk-menu')), false);
+  await open(a);
+  a.window.dispatchEvent(new a.window.Event('scroll'));
+  a.click(a.document.body); await a.settle();
+  assert.equal(Boolean(a.document.querySelector('.mendosave-vk-menu')), false);
+  assert.equal(a.messages.some(message => message.t === 'mendosave-save'), false);
+});
+
+test('a tall VK menu leaves its trigger exposed for a repeat click', async () => {
+  const a = adapter();
+  a.window.innerWidth = 1246; a.window.innerHeight = 883;
+  const baseLayout = a.window.Element.prototype.getBoundingClientRect;
+  a.window.Element.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('mendosave-vk-btn')) return { left: 799, right: 825, top: 463, bottom: 503, width: 26, height: 40 };
+    if (this.classList.contains('mendosave-vk-menu')) {
+      const width = Math.min(272, parseFloat(this.style.maxWidth) || Infinity);
+      const height = Math.min(601.2, parseFloat(this.style.maxHeight) || Infinity);
+      const left = parseFloat(this.style.left) || 0, top = parseFloat(this.style.top) || 0;
+      return { left, top, right: left + width, bottom: top + height, width, height };
+    }
+    return baseLayout.call(this);
+  };
+  await open(a);
+  const menu = a.document.querySelector('.mendosave-vk-menu').getBoundingClientRect();
+  const trigger = a.document.querySelector('.mendosave-vk-btn').getBoundingClientRect();
+  const overlaps = menu.left < trigger.right && menu.right > trigger.left && menu.top < trigger.bottom && menu.bottom > trigger.top;
+  assert.equal(overlaps, false, 'a native click at the extension icon must not hit a quality row');
+  assert.equal(menu.left >= 0 && menu.top >= 0 && menu.right <= 1246 && menu.bottom <= 883, true);
+});
+
+test('a tall VK menu scrolls within a narrow viewport while leaving its trigger exposed', async () => {
+  const a = adapter();
+  a.window.innerWidth = 326; a.window.innerHeight = 843;
+  const baseLayout = a.window.Element.prototype.getBoundingClientRect;
+  a.window.Element.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('mendosave-vk-btn')) return { left: 280, right: 306, top: 380, bottom: 420, width: 26, height: 40 };
+    if (this.classList.contains('mendosave-vk-menu')) {
+      const width = 272, height = Math.min(601.2, parseFloat(this.style.maxHeight) || Infinity);
+      const left = parseFloat(this.style.left) || 0, top = parseFloat(this.style.top) || 0;
+      return { left, top, right: left + width, bottom: top + height, width, height };
+    }
+    return baseLayout.call(this);
+  };
+  await open(a);
+  const menu = a.document.querySelector('.mendosave-vk-menu').getBoundingClientRect();
+  const trigger = a.document.querySelector('.mendosave-vk-btn').getBoundingClientRect();
+  const overlaps = menu.left < trigger.right && menu.right > trigger.left && menu.top < trigger.bottom && menu.bottom > trigger.top;
+  assert.equal(overlaps, false);
+  assert.equal(menu.left >= 0 && menu.top >= 0 && menu.right <= 326 && menu.bottom <= 843, true);
+  assert.equal(menu.height < 601.2, true, 'the list must scroll when no side has enough room');
+});
 
 test('VK offers progressive video and streams its complete SegmentBase AAC as M4A', async () => {
   const a = adapter(); await saveAudio(a);
@@ -576,4 +651,207 @@ test('VK enforces projection bytes for multibyte media metadata', async () => {
   await open(a);
   assert.match(a.document.querySelector('.mendosave-vk-menu').textContent, /допустимый размер/);
   assert.equal(choiceControls(a).length, 0);
+});
+
+test('VK single progressive 480p completes through browser download without a CORS body read', async () => {
+  const a = adapter({ payload: `<script>var player=${JSON.stringify({ md_title: 'Single fixture',
+    files: { mp4_480: 'https://vkvd526.okcdn.ru/?fixture=480' } })};</script>`,
+  mediaResponder() { throw new TypeError('CDN body is not readable by extension fetch'); } });
+  await open(a);
+  a.click(choiceControls(a).find(node => /480p/.test(node.textContent))); await a.settle();
+  assert.match(a.document.querySelector('.mendosave-vk-toast').textContent, /Готово: VK - Single fixture \[480p\]\.mp4/);
+  assert.equal(a.requests.length, 1);
+  assert.equal(a.messages.find(message => message.t === 'mendosave-save').filename, 'VK - Single fixture [480p].mp4');
+  assert.equal(a.messages.some(message => message.t === 'mendosave-download-state'), true);
+  assert.equal(a.messages.some(message => message.t === 'mendosave-begin' || message.t === 'mendosave-blob-open'), false);
+});
+
+test('VK package saves the selected progressive MP4 when its CDN is readable from VK but not the extension origin', async () => {
+  const { fixture } = require('./package-io-harness.cjs');
+  const bytes = Uint8Array.of(0, 0, 0, 24, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0,
+    105, 115, 111, 109, 97, 118, 99, 49);
+  const pageSender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'vk-document' };
+  const { io, saved, files } = fixture({ fetch: async () => {
+    throw new TypeError('NetworkError when attempting to fetch resource.');
+  } });
+  const a = adapter({ withPackage: true, payload: `<script>var player=${JSON.stringify({
+    md_title: 'CDN boundary fixture', duration: 19, files: {
+      mp4_480: 'https://vkvd526.okcdn.ru/?fixture=480', mp4_720: 'https://vkvd526.okcdn.ru/?fixture=720',
+    },
+  })};</script>`,
+  mediaResponder: (_url, options) => options.method === 'HEAD' || options.method === 'GET'
+    ? { ok: true, status: 200, headers: new Headers({ 'content-length': String(bytes.length), 'content-type': 'video/mp4' }),
+      body: { async cancel() {} } }
+    : new Response(bytes, { status: 206,
+      headers: { 'content-range': `bytes 0-${bytes.length - 1}/${bytes.length}`, 'content-length': String(bytes.length) } }),
+  async sendResponder(message) {
+    if (message.t === 'mendosave-save') return io.handle({ ...message, t: 'mendosave-save-source',
+      sourceOwner: { tabId: 7, frameId: 0, documentId: 'vk-document' } },
+    { id: 'mendo@test', url: 'moz-extension://test/_generated_background_page.html' });
+    if (/^mendosave-(?:package-|blob-)/.test(message.t)) return io.handle(message, pageSender);
+    return { ok: true, id: 42, tabId: 7, state: 'complete' };
+  } });
+  await open(a);
+  a.click(a.document.querySelector('.mendo-package-open')); await a.settle();
+  const row = [...a.document.querySelectorAll('.mendo-package-dialog label')].find(node => /480p/.test(node.textContent));
+  const input = row.querySelector('input'); input.checked = true;
+  input.dispatchEvent(new a.window.Event('change', { bubbles: true }));
+  a.click(a.document.querySelector('.mendo-package-dialog [data-mode=files]')); await a.settle();
+  assert.match(a.document.querySelector('.mendo-package-dialog [role=status]').textContent, /Готово: 1/);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].filename, 'VK - CDN boundary fixture [480p].mp4');
+  assert.deepEqual(new Uint8Array(await saved[0].blob.arrayBuffer()), bytes);
+  assert.equal(files.size, 0);
+  assert.equal(io.host.active, null);
+});
+
+function progressivePackage({ total = 4, range, ...effects } = {}) {
+  const { fixture } = require('./package-io-harness.cjs');
+  const pageSender = { id: 'mendo@test', tab: { id: 7 }, frameId: 0, documentId: 'vk-ranges' };
+  const state = fixture({ fetch: async () => { throw new TypeError('extension origin cannot read CDN'); }, ...effects });
+  const transport = producerPorts();
+  const a = adapter({ withPackage: true, payload: `<script>var player=${JSON.stringify({
+    md_title: 'Ranges fixture', files: { mp4_480: 'https://vkvd526.okcdn.ru/?fixture=480',
+      mp4_720: 'https://vkvd526.okcdn.ru/?fixture=720' },
+  })};</script>`,
+  connectResponder(options) {
+    const port = transport.connect(options); port.sender = pageSender; state.io.connect(port); return port;
+  },
+  mediaResponder(url, options) {
+    if (options.method === 'HEAD' || options.method === 'GET') return new Response(null, {
+      headers: { 'content-length': String(total), 'content-type': 'video/mp4' },
+    });
+    return range ? range(String(url), options) : new Response(Uint8Array.of(1, 2, 3, 4), {
+      status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' },
+    });
+  },
+  async sendResponder(message) {
+    if (/^mendosave-(?:package-|blob-)/.test(message.t)) return state.io.handle(message, pageSender);
+    if (message.t === 'mendosave-save') throw new Error('direct remote body fetch is not readable');
+    return { ok: true, id: 42, tabId: 7, state: 'complete' };
+  } });
+  return { ...a, ...state, transport,
+    async start(heights = [480], mode = 'files') {
+      await open(a); a.click(a.document.querySelector('.mendo-package-open')); await a.settle();
+      for (const row of a.document.querySelectorAll('.mendo-package-dialog label')) {
+        const input = row.querySelector('input');
+        input.checked = heights.some(height => row.textContent.includes(`${height}p`));
+        input.dispatchEvent(new a.window.Event('change', { bubbles: true }));
+      }
+      a.click(a.document.querySelector(`.mendo-package-dialog [data-mode=${mode}]`)); await a.settle();
+    },
+    status: () => a.document.querySelector('.mendo-package-dialog [role=status]').textContent,
+  };
+}
+
+test('VK package bounds multiple ranges and transfers exact video bytes across the 8 MiB boundary', async () => {
+  const bytes = new Uint8Array(8 * 1024 ** 2 + 17);
+  bytes[0] = 0x47; bytes[1024 ** 2 - 1] = 0xaa; bytes[1024 ** 2] = 0xbb;
+  bytes[8 * 1024 ** 2 - 1] = 0xcc; bytes[8 * 1024 ** 2] = 0xdd; bytes[bytes.length - 1] = 0xee;
+  const a = progressivePackage({ total: bytes.length, range: (_url, options) => {
+    const [, from, to] = /^bytes=(\d+)-(\d+)$/.exec(options.headers.Range).map(Number);
+    return new Response(bytes.slice(from, to + 1), { status: 206,
+      headers: { 'content-range': `bytes ${from}-${to}/${bytes.length}`, 'content-length': String(to - from + 1) } });
+  } });
+  await a.start();
+  assert.match(a.status(), /Готово: 1/);
+  assert.deepEqual(a.requests.filter(r => r.options.headers?.Range).map(r => r.options.headers.Range),
+    ['bytes=0-1048575', 'bytes=1048576-2097151', 'bytes=2097152-3145727', 'bytes=3145728-4194303',
+      'bytes=4194304-5242879', 'bytes=5242880-6291455', 'bytes=6291456-7340031',
+      'bytes=7340032-8388607', 'bytes=8388608-8388624']);
+  assert.deepEqual(new Uint8Array(await a.saved[0].blob.arrayBuffer()), bytes);
+  assert.equal(a.messages.filter(m => m.t === 'mendosave-blob-chunk').every(m => Buffer.from(m.data, 'base64').length <= 1024 ** 2), true);
+  assert.equal(a.files.size, 0);
+});
+
+test('VK package media reads preserve credential omission and refuse CDN redirects', async () => {
+  const a = progressivePackage(); await a.start();
+  assert.match(a.status(), /Готово: 1/);
+  const media = a.requests.filter(r => !r.url.includes('video_ext.php'));
+  assert.equal(media.length, 2);
+  assert.equal(media.every(r => r.options.credentials === 'omit' && r.options.cache === 'no-store'
+    && r.options.redirect === 'error'), true);
+});
+
+test('VK package rejects a declared video above the existing 1 GiB transfer limit before reading its body', async () => {
+  const a = progressivePackage({ total: 1024 ** 3 + 1 }); await a.start();
+  assert.match(a.status(), /превышает лимит/);
+  assert.equal(a.requests.some(r => r.options.headers?.Range), false);
+  assert.equal(a.saved.length, 0); assert.equal(a.files.size, 0);
+});
+
+test('VK package cancels an ignored Range with hidden length before accumulating an oversized body', async () => {
+  let cancelled = false, reads = 0;
+  const a = progressivePackage({ total: 8 * 1024 ** 2 + 1, range: () => ({ ok: true, status: 200,
+    headers: new Headers(), body: new ReadableStream({ pull(controller) {
+      if (!reads++) controller.enqueue(new Uint8Array(8 * 1024 ** 2 + 1));
+    }, cancel() { cancelled = true; } }),
+    arrayBuffer() { throw new Error('whole body must never be accumulated'); },
+  }) });
+  await a.start();
+  assert.match(a.status(), /неполный или неверный диапазон/);
+  assert.equal(cancelled, true);
+  assert.equal(a.messages.some(m => m.t === 'mendosave-blob-finish'), false);
+  assert.equal(a.saved.length, 0); assert.equal(a.files.size, 0); assert.equal(a.io.host.active, null);
+});
+
+test('VK package cancellation drains its pending range before releasing producers and permits an exact retry', async () => {
+  let release, signal, rangeCount = 0;
+  const pending = new Promise(resolve => { release = resolve; });
+  const a = progressivePackage({ range: (_url, options) => {
+    if (++rangeCount > 1) return new Response(Uint8Array.of(1, 2, 3, 4), {
+      status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' },
+    });
+    signal = options.signal;
+    return new Response(new ReadableStream({ async pull(controller) {
+      await pending; controller.enqueue(Uint8Array.of(1, 2, 3, 4)); controller.close();
+    } }), { status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' } });
+  } });
+  await a.start();
+  a.click(a.document.querySelector('.mendo-package-dialog [data-action=cancel]')); await a.settle();
+  assert.equal(signal.aborted, true);
+  assert.equal(a.transport.ports.filter(p => p.name === 'mendosave-producer').every(p => p.disconnected), false);
+  assert.equal(a.document.querySelector('.mendo-package-dialog [data-mode=files]').disabled, true);
+  assert.equal(a.saved.length, 0);
+  release(); await a.settle();
+  assert.match(a.status(), /Пакет отменён/);
+  assert.equal(a.transport.ports.filter(p => p.name === 'mendosave-producer').every(p => p.disconnected), true);
+  assert.equal(a.files.size, 0);
+  a.click(a.document.querySelector('.mendo-package-dialog [data-mode=files]')); await a.settle();
+  assert.match(a.status(), /Готово: 1/);
+  assert.equal(a.saved.length, 1);
+  assert.deepEqual(new Uint8Array(await a.saved[0].blob.arrayBuffer()), Uint8Array.of(1, 2, 3, 4));
+});
+
+test('VK ZIP contains both selected progressive files with the exact prepared raw bytes', async () => {
+  const prepared = new Map();
+  const a = progressivePackage({
+    async prepare(blob, filename) {
+      prepared.set(filename, Buffer.from(await blob.arrayBuffer()));
+      return { blob, filename, id: `${filename}.bin`, size: blob.size };
+    },
+    range(url) { return new Response(url.includes('fixture=480') ? Uint8Array.of(1, 2, 3, 4) : Uint8Array.of(8, 7, 6, 5), {
+      status: 206, headers: { 'content-range': 'bytes 0-3/4', 'content-length': '4' },
+    }); },
+  });
+  await a.start([480, 720], 'zip');
+  assert.match(a.status(), /Готово: Ranges fixture\.zip/);
+  assert.equal(a.saved.length, 1); assert.match(a.saved[0].filename, /\.zip$/);
+  const zip = Buffer.from(await a.saved[0].blob.arrayBuffer());
+  assert.equal(zip.readUInt32LE(zip.length - 22), 0x06054b50);
+  assert.equal(zip.readUInt16LE(zip.length - 12), 2);
+  let cursor = zip.readUInt32LE(zip.length - 6);
+  const entries = [];
+  for (let index = 0; index < 2; index++) {
+    assert.equal(zip.readUInt32LE(cursor), 0x02014b50);
+    assert.equal(zip.readUInt16LE(cursor + 10), 0);
+    const length = zip.readUInt32LE(cursor + 24), nameLength = zip.readUInt16LE(cursor + 28);
+    const name = zip.toString('utf8', cursor + 46, cursor + 46 + nameLength);
+    const offset = zip.readUInt32LE(cursor + 42);
+    assert.equal(zip.readUInt32LE(offset), 0x04034b50);
+    const start = offset + 30 + zip.readUInt16LE(offset + 26) + zip.readUInt16LE(offset + 28);
+    entries.push(name); assert.deepEqual(zip.subarray(start, start + length), prepared.get(name));
+    cursor += 46 + nameLength + zip.readUInt16LE(cursor + 30) + zip.readUInt16LE(cursor + 32);
+  }
+  assert.deepEqual(entries.sort(), ['VK - Ranges fixture [480p].mp4', 'VK - Ranges fixture [720p].mp4']);
 });
