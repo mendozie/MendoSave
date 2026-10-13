@@ -42,7 +42,13 @@
 
 ## Поставка и ручная проверка
 
-Отдельная папка `artifacts/mendosave-0.3.2-r2/`: unsigned Firefox XPI, unsigned Chromium ZIP, matching source ZIP, `release-manifest.json` и `SHA256SUMS`. Архивы формируются из чистого локального commit; source entries сравниваются с Git bytes, извлечённые entries проверяются по CRC и bytes. Исходная папка `artifacts/mendosave-0.3.2/` сохраняется.
+Отдельная папка `artifacts/mendosave-0.3.2-r2/`: unsigned Firefox XPI, unsigned Chromium ZIP, matching source ZIP, `release-manifest.json` и `SHA256SUMS`. Архивы сохранены из чистого локального runtime commit `94a04d46fa090d26d0c6653ec377dbef97959fe4`. Независимый readback проверил CRC и точные bytes: по 60 entries в двух сборках, 167 source entries с совпадением Git bytes указанного revision. Последующий документальный commit записывает завершение поставки, не меняя runtime или frozen source. Исходные 124 защищённых файла, включая папки поставок 0.3.1/0.3.2, совпали с прежними размерами и SHA-256.
+
+| Архив | Bytes | SHA-256 |
+|---|---:|---|
+| `mendosave-0.3.2-r2-firefox-unsigned.xpi` | 34441566 | `2aa9c02982b6bf8f1126303d07ebe9e5db0846aa0a745a00f1f26a82a798c942` |
+| `mendosave-0.3.2-r2-chromium-unsigned.zip` | 34442549 | `43adefe7cd9d83b64da3c7cdd7037a44f67d5fa1ed1d5de5d5db5986e8b9627d` |
+| `mendosave-0.3.2-r2-source.zip` | 35863267 | `78a582edd2bb6554377a4da70a1872e859b0d3b7b8e1fb3b23f250fd894194b0` |
 
 В Zen открой `about:debugging#/runtime/this-firefox` и загрузи новый `mendosave-0.3.2-r2-firefox-unsigned.xpi` как временное дополнение. Обнови открытые VK/YouTube страницы. Внутренняя версия остаётся 0.3.2; новый файл и крестик/область перетаскивания отличают r2. Обычная постоянная установка unsigned XPI не используется; настройки подписей менять не нужно.
 

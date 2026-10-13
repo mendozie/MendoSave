@@ -18,7 +18,7 @@
 - [x] Исправлены Back/focus/keyboard, актуальность idle plan и подписи.
 - [x] Финальный runtime: 824/824 tests, lint 0 errors / 17 warnings, обе сборки по 60 файлов, build/dependency/outgoing checks и совокупный review прошли. Native media/subtitles/ZIP bytes, доступные UX controls и wide/narrow screenshots проверены. Непроверенные и отрицательные пути не объявлены успешными; подробности - в отчёте 0.3.2.
 - [x] Локальная поставка: unsigned XPI, Chromium ZIP, matching source, SHA-256/manifest и инструкция отдельного тестового профиля; точный revision фиксируется manifest из чистого локального commit.
-- [~] Пользователь проверил исходный кандидат и поручил исправления; повторная техническая проверка и поставка r2 выполняются локально.
+- [x] Пользователь проверил исходный кандидат и поручил исправления; повторная техническая проверка и поставка r2 завершены локально. Новая ручная приёмка отмечена ниже.
 
 ### Исправления после ручной проверки 0.3.2
 
@@ -29,7 +29,7 @@
 - [x] Добавить LMB drag верхней области, границы viewport, resize/hide/reopen, два guarded ×. Native Zen 1726×1183/326×843 и Edge 1440×1000/360×800, pointer/keyboard и disabled close/cancel/retry проверены. Дополнительно исправлено реальное перекрытие значка длинным VK-меню; итоговый repeat click не создаёт download.
 - [x] Проверить место и работу Save As, исправить доказанную startup race без изменения default или размещения controls; native popup/persistence в обеих средах прошли. Physical toolbar/chooser остаются ручной проверкой.
 - [x] Завершить совокупный review и обязательные checks: 851/851, lint 0 errors / 17 прежних warnings, оба build inventories по 60 файлов, dependencies и web-ext прошли. Полный 480p, отмена и новый ZIP, media/CRC/bytes проверены; [отчёт r2](V032_R2_VERIFICATION.md).
-- [~] Зафиксировать локальный commit и отдельные unsigned archives/matching source/manifest/hashes r2 из чистого состояния; исходные пакеты сохраняются.
+- [x] Локальный runtime commit `94a04d46fa090d26d0c6653ec377dbef97959fe4`; отдельные unsigned archives/matching source/manifest/hashes r2 сохранены из чистого состояния. Readback подтвердил CRC/bytes обоих inventories по 60 entries и 167 source entries с точными Git bytes. Исходные 124 защищённых файла и пакета не изменились. Этот последующий документальный commit фиксирует завершение поставки и не меняет runtime или её source revision.
 - [ ] Повторная пользовательская приёмка r2 и отдельное решение о внешнем следующем шаге.
 
 Новые ignored доказательства: `.local/qa/candidate-032-fixes-13-10-2026/`. Они не заменяют исходный отчёт и не распространяют старые PASS на новые bytes.
