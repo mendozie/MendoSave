@@ -7,18 +7,18 @@
 
 ## Текущее состояние
 
-Срез `0.3.2-r2` принят пользователем 13-10-2026. Выпуск 0.3.2, PR/review/merge в main и Mozilla unlisted signing прямо разрешены; прежний local-only запрет снят для этого результата. Новое поручение разрешает обновить README, описание и скриншоты и сделать существующий GitHub-репозиторий публичным после проверки файлов, истории и внешних материалов на секреты и приватные данные. Публикация выполняется после release checks и устранения подтверждённых blockers. Исходные кандидаты и evidence сохраняются. Последняя опубликованная подписанная версия пока 0.3.1.
+Срез `0.3.2-r2` принят пользователем 13-10-2026. После PR corrections итоговая версия **0.3.3 подписана и [выпущена](https://github.com/mendozie/MendoSave/releases/tag/v0.3.3)**. [PR #8](https://github.com/mendozie/MendoSave/pull/8) объединён в main, task branch удалена; GitHub-репозиторий публичный. README, описание и скриншоты обновлены. Исходные кандидаты и необходимые доказательства сохранены; ручные обновления и unlisted остаются выбранным способом поставки.
 
 ### Выпуск 0.3.3 и открытие репозитория
 
-0.3.2 уже отправлена в Mozilla, но не распространяется через GitHub Release. Последующие PR corrections входят в новый patch version 0.3.3; [проверки](RELEASE_VERIFICATION_033.md).
+0.3.2 была промежуточной отправкой в Mozilla и не распространяется через GitHub Release. Замороженный source/runtime commit - `aa9f3c65fab2164887763d630114889ecd9b051d`, на него указывает тег `v0.3.3`. Merge commit `f8e3f6d0dabcb9dbf165b23c11efb4418f9cdd80` сохранил этот commit в main без изменения файлов. Последующие изменения документации не меняют релизные пакеты; [проверки](RELEASE_VERIFICATION_033.md).
 
-- [x] Пользовательская приёмка r2 и прямое разрешение на merge, подписание, Release обоих движков и публичную видимость после проверок.
-- [x] Совокупный code review и Standard security scan завершены. Четыре security findings и live-anchor VK correction исправлены, independently reviewed и проверены 862 tests/native Zen; [область и ограничения](SECURITY_REVIEW_032.md). Git history, GitHub materials, 22 Actions logs, 44 Actions archives/132 nested archives и опубликованные пакеты проверены без обнаруженных приватных данных. Финальный outgoing/source readback остаётся gate публикации.
-- [~] README, Mozilla reviewer description, privacy и реальные скриншоты итоговой 0.3.3 обновлены; public GitHub description и финальная инструкция подписанного выпуска ожидают readback. Provenance и условия библиотек сохранены.
-- [~] Managed review промежуточного head завершён; три замечания воспроизведены и исправлены. Полная suite 0.3.3: 867 PASS, native diagnostic export и новые фотографии проверены. Итоговый независимый correction review недоступен после cybersecurity flag; собственная проверка закрыла дополнительные PSSH/senc/lazy-subsample gaps. CI нового head выполняется; merge только проверенного head.
-- [ ] Получить unlisted signed XPI, сравнить application bytes/source, проверить постоянное обновление и restart отдельного Zen, готовый файл.
-- [ ] После privacy gate открыть репозиторий, опубликовать Release с обоими пакетами/source/manifest/hashes, прочитать saved state и убрать merged task branch.
+- [x] Пользовательская приёмка r2 и разрешение на merge, подписание, Release обоих движков и публичную видимость после проверок.
+- [x] Совокупный code review и Standard security scan завершены. Четыре исходных security findings и live-anchor VK correction исправлены и independently reviewed; [область и ограничения](SECURITY_REVIEW_032.md). Перед открытием проверены 34 Git commits / 493 unique path-blobs, GitHub materials, 26 Actions logs и 52 archives / 156 inner archives. Подозрительные совпадения разобраны; приватные credentials не обнаружены. Source readback совпал с отправленным ZIP.
+- [x] README, GitHub description, Mozilla version/reviewer notes, privacy и реальные скриншоты 0.3.3 обновлены. Saved-state readback подтвердил описания и публичную видимость. Provenance и условия библиотек сохранены.
+- [x] Managed review commit `52c209d88f15bb6e4b126eb9fcb376438ef3585f` завершён; три замечания исправлены, threads resolved. Коррекции до окончательного `aa9f3c65fab2164887763d630114889ecd9b051d` проверены отдельно: 867 PASS, native diagnostic export, Windows/Linux CI/reproducibility. Итоговый независимый correction review недоступен после cybersecurity flag; собственная проверка закрыла дополнительные PSSH/senc/lazy-subsample gaps. Managed review окончательного SHA не заявляется. Выполнен guarded merge проверенного head; CI main также прошёл.
+- [x] Mozilla одобрила unlisted 0.3.3; application bytes/source сверены. Постоянное обновление 0.3.1 → 0.3.3 и полный restart отдельного Zen сохранили ID/UUID/настройки; конечный MP4 проверен, обработчик освобождён.
+- [x] Репозиторий открыт после privacy gate. Release содержит шесть assets; все скачаны обратно, размеры/SHA-256/CRC совпали. Последний выпуск, публичная видимость и удаление merged task branch подтверждены.
 
 ### Локальный срез 0.3.2
 
