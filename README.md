@@ -22,23 +22,21 @@ MendoSave сохраняет выбранное медиа и обрабатыв
 
 Варианты зависят от площадки и материала. DRM и недоступные пользователю форматы не обходятся. Пакет форматов не является загрузкой целого плейлиста.
 
-<table>
-  <tr>
-    <td valign="top"><img src="docs/images/settings-zen-033.png" alt="Настройки MendoSave 0.3.3 в Zen" width="306"></td>
-    <td valign="top"><img src="docs/images/package-zen-033.png" alt="Окно пакета MendoSave 0.3.3: группы форматов, перетаскивание и закрытие" width="400"></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/images/settings-zen-033.png" alt="Настройки MendoSave 0.3.3 в Zen" width="306">
+  <img src="docs/images/package-zen-033.png" alt="Окно пакета MendoSave 0.3.3: группы форматов, перетаскивание и закрытие" width="400">
+</p>
 
-Скриншоты 0.3.3 сняты в отдельном профиле Zen. Справа - реальный компонент окна пакета с нейтральными демонстрационными данными; это иллюстрация интерфейса, а не проверка конкретного сайта.
+Скриншоты 0.3.3 сняты в отдельном профиле Zen. Окно пакета показано с нейтральными демонстрационными данными; это иллюстрация интерфейса, а не проверка конкретного сайта.
 
 ## Установка
 
-Готовые файлы и контрольные суммы находятся в [Releases](https://github.com/mendozie/MendoSave/releases). Версия **0.3.3 готовится к выпуску**; подписание и публикация фиксируются в [roadmap](docs/ROADMAP.md). Последняя опубликованная версия - 0.3.1. Промежуточная отправка 0.3.2 заменена после PR review.
+Текущий выпуск - **[MendoSave 0.3.3](https://github.com/mendozie/MendoSave/releases/tag/v0.3.3)**. Mozilla подписала XPI; оба пакета, исходники и контрольные суммы опубликованы. [Релизная проверка](docs/RELEASE_VERIFICATION_033.md) описывает обновление Zen, полный перезапуск и конечный медиафайл. Промежуточная 0.3.2 заменена после PR review.
 
 | Браузер | Файл | Как установить |
 |---|---|---|
-| Zen / Firefox | `mendosave-<version>-firefox-signed.xpi` | `about:addons` → шестерёнка → «Установить дополнение из файла…» |
-| Chrome / Chromium / Edge | `mendosave-<version>-chromium-unsigned.zip` | Распаковать в постоянную папку; `chrome://extensions` / `edge://extensions` → режим разработчика → «Загрузить распакованное расширение» |
+| Zen / Firefox | [Подписанный XPI](https://github.com/mendozie/MendoSave/releases/download/v0.3.3/mendosave-0.3.3-firefox-signed.xpi) | `about:addons` → шестерёнка → «Установить дополнение из файла…» |
+| Chrome / Chromium / Edge | [Chromium ZIP](https://github.com/mendozie/MendoSave/releases/download/v0.3.3/mendosave-0.3.3-chromium-unsigned.zip) | Распаковать в постоянную папку; `chrome://extensions` / `edge://extensions` → режим разработчика → «Загрузить распакованное расширение» |
 
 Для Firefox-сборки нужен **Gecko 157.0+**. Подписанный unlisted XPI устанавливается постоянно; страницы в AMO и собственного сервера обновлений нет. Chromium ZIP предназначен для распакованной установки, публикация в Chrome Web Store не выполняется. Обновления устанавливаются вручную. Сверяй SHA-256 с `SIGNED_SHA256SUMS` того же выпуска.
 

@@ -6,7 +6,7 @@ Submission: MendoSave 0.3.3, add-on ID `mendosave@mendozie`, self-distributed (u
 
 The source archive contains the extension, browser-specific host, build scripts, lockfile, bundled libraries, licenses and provenance. Extract it into an empty directory and run commands from its root.
 
-Tested local environment: Windows with Node.js 22.18.0 / npm 10.9.3. The previous 0.3.0 packaging pipeline was also validated on Ubuntu 24.04; the 0.3.1 CI result is recorded separately in the release verification. Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
+Tested local environment: Windows with Node.js 22.18.0 / npm 10.9.3. The final 0.3.3 candidate passed Windows 2025 and Ubuntu 24.04 CI, including archive reproducibility; see [release verification](RELEASE_VERIFICATION_033.md). Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
 
 ```sh
 npm ci --ignore-scripts
