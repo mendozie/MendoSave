@@ -1,6 +1,6 @@
 # Instagram - кандидат 0.4.0
 
-Дата: 15-10-2026. Четыре замечания первого managed review [PR #10](https://github.com/mendozie/MendoSave/pull/10) исправлены; повторные автоматические и native проверки приведены ниже. Остаются focused managed review коррекций, CI и подготовка финальных пакетов. Исходный кандидат `8585160` сохранён как evidence и отозван после review. PR остаётся draft без merge. Опубликованный выпуск остаётся 0.3.3. Порядок дальнейшего выпуска определяет [AGENTS.md](../AGENTS.md).
+Дата: 15-10-2026. Исправленный unsigned кандидат готов к ручной проверке пользователя. Четыре замечания первого managed review [PR #10](https://github.com/mendozie/MendoSave/pull/10) исправлены, заключительный review коррекций завершён без новых findings; CI и финальные archives проверены. Исходный кандидат `8585160` сохранён как evidence и отозван после review. PR остаётся draft без merge. Опубликованный выпуск остаётся 0.3.3. Порядок дальнейшего выпуска определяет [AGENTS.md](../AGENTS.md).
 
 ## Объём
 
@@ -30,15 +30,16 @@ Recovery index вмещает 320 записей, то есть пять пол�
 |---|---|---|
 | Reel `DecDOjeM5K8`, auth и anonymous | DASH и progressive MP4, M4A и MP3 завершены | Те же четыре результата завершены |
 | Карусель `DTVqKjZDCf5`, auth и anonymous | Четыре элемента + TXT: files 5/5 и ZIP 5/5 | Те же files/ZIP 5/5 |
+| Отдельное фото `BsOGulcndj-` | Auth и anonymous: один фотоэлемент, 5 вариантов + TXT; JPEG 584×584 / 33734 bytes полностью декодирован, TXT 197 bytes UTF-8 | Anonymous: те же JPEG/TXT и hashes, один HTML 200 без API fallback; recovery 320 неизменён |
 | Конечные файлы | 10 новых outputs/profile: 6 полных media decode, 2 image decode, UTF-8 TXT и ZIP CRC; ZIP exact новым отдельным файлам | 10 outputs/profile, полный decode, CRC и exact ZIP bytes; исходные AAC packets совпали с дорожкой DASH |
 | Отмена и повтор | Native отмена во время «Проверка дорожек MP4», нет partial download, controls восстановлены, MP3 повтор завершён | Прежний native cancel сохранён; новые abort/parser/reservation cases покрыты regression tests |
 | Пакет 64 и recovery | Regression tests полного processor/background пути | Controlled fixture в реальном ISOLATED/OPFS: 2 отмены по 64, повторный ZIP с 64 exact entries, затем 320 сохранённых inputs; следующий пакет отклонён до prepare, прежние bytes/index неизменны, transfer/archive temporaries пусты |
 | UI/keyboard | Пакет 1246×983 / 306×883: скриншоты просмотрены, bounds/Space/Escape/Hide/resume/Back пройдены | 1440×1000 / 360×800, screenshots и keyboard; dialog scroll без горизонтального overflow |
 | SPA | Auth trusted переход из профиля сохранил `performance.timeOrigin`; Back убрал UI. Anonymous profile click получил login wall Instagram до перехода | Регрессионные tests; отдельный native SPA не заявляется |
 
-64-file fixture проверяет пакетный протокол, хранение и ZIP; это не выгрузка 64 настоящих Instagram videos. Частные публикации не проверены: пользователь разрешил пропуск при отсутствии контрольного материала. Отдельный permalink с одним фото также не проверен; реальные фото проверены внутри карусели, single-photo shape покрыт tests. Эти ограничения не скрываются за passing tests.
+64-file fixture проверяет пакетный протокол, хранение и ZIP; это не выгрузка 64 настоящих Instagram videos. Частные публикации не проверены: пользователь разрешил пропуск при отсутствии контрольного материала. Отдельное публичное фото дополнительно проверено в новом native проходе после заключительного review: Zen auth/anonymous и Edge anonymous дали одинаковые JPEG/TXT bytes. Изменений runtime для этой проверки не потребовалось.
 
-Локальные post-review доказательства: `zen-*/post-review-public.json`, `post-review-validated-files.json`, `post-review-controls-*.json`, `post-review-zen-installed-bytes.json`; `chromium-anon-post-review/` содержит public/ZIP/audio/recovery64 reports и screenshots. Подписанные URL и профили остаются в ignored области, в Git и source archive не включаются.
+Локальные post-review доказательства: `zen-*/post-review-public.json`, `post-review-validated-files.json`, `post-review-controls-*.json`, `single-photo-final.json`, `post-review-zen-installed-bytes.json`; `chromium-anon-post-review/` содержит public/ZIP/audio/recovery64 reports и screenshots, `chromium-anon-single-photo/` - новый standalone-photo проход. Подписанные URL и профили остаются в ignored области, в Git и source archive не включаются.
 
 ## Исходные проверки до коррекций review
 
@@ -61,13 +62,35 @@ Headful Edge потребовал CDP focus emulation из-за Windows occlusio
 
 Конечный Reel: H.264 720×1280, видео 11,133333 с, AAC stereo 44,1 kHz; MP4 11,258821 с. M4A 11,144127 с, MP3 11,284898 с. В Edge исходный M4A и MP4 имеют одинаковые AAC packets, что подтверждает отсутствие перекодирования. Фото карусели - JPEG 864×1100 и 1440×1833; silent H.264 MP4 720×918 - 8,6 и 9,833333 с. Полный decode, начальные/конечные кадры и ненулевые аудиосэмплы по краям проверены. TXT карусели 2454 bytes; Zen сравнил оба TXT с описанием в странице побайтно в UTF-8. ZIP извлечён и сравнен с отдельными файлами; авторизованные имена содержат подтверждённые размеры фото, anonymous имена их не выдумывают.
 
-Закрытая публикация **не проверена**, подходящий контрольный материал не выбран; пользователь разрешил этот пропуск. Отдельный single-photo permalink не проверен: реальные фото проверены в карусели, single-photo shape покрыт regression tests. В native проверены H.264/AAC и JPEG; другие поддержанные codecs/image formats имеют автоматические проверки, live-совместимость не заявляется. Предел 64/65 проверен автоматически; native пакет на 64 файла, заполнение квоты и новый проход верхней границы ZIP не выполнялись. Физический Save As chooser в этом срезе не повторялся; общий путь и его отказ/отмена покрыты существующими regression tests. CAPTCHA, login wall и rate limits не обходятся.
+В исходном проходе ещё не проверялись standalone-photo permalink и native пакет на 64 файла; эти проверки выполнены после коррекций, выше. Закрытая публикация **не проверена**, подходящий контрольный материал не выбран; пользователь разрешил этот пропуск. В native проверены H.264/AAC и JPEG; другие поддержанные codecs/image formats имеют автоматические проверки, live-совместимость не заявляется. Заполнение квоты и новый проход верхней границы ZIP не выполнялись. Физический Save As chooser в этом срезе не повторялся; общий путь и его отказ/отмена покрыты существующими regression tests. CAPTCHA, login wall и rate limits не обходятся.
 
 Локальные доказательства находятся в ignored `.local/qa/instagram-15-10-2026/`: `zen-*/validated-files.json`, `zip-validation.json`, `controls-*.json`, screenshots, итоговый TAP; `chromium-anon-summary.json` и auth/anonymous file/ZIP reports. Cookies, профили, подписанные медиассылки и пользовательские выгрузки не входят в Git или пакеты исходников.
 
+## PR review
+
+Первый managed review выполнил совокупную проверку `85851602719aeb7bd343a850d0c917c498dff074` против base `2a4284b943c1ed90f9eaea689da37c1ac829647f` и сообщил четыре замечания. Они исправлены вместе в `a8198b5dc07885c2c56dc3c0310a80634175334a`, ответы и resolved state всех четырёх threads прочитаны обратно из GitHub.
+
+Второй, заключительный managed pass обоснован изменением source authority, media validation и recovery concurrency; запрошен для range `8585160..a8198b5` с исходными требованиями. [Авторизованный bot result](https://github.com/mendozie/MendoSave/pull/10#issuecomment-6196690857) подтвердил reviewed commit `a8198b5dc0`; completion metadata того же bot подтверждает завершение 15-10-2026 в 19:12 МСК. Новых findings нет. Аббревиатура однозначно разрешается в полный runtime SHA выше; base остался прежним. Дополнительный managed pass не запрашивался.
+
+Последующее изменение отчёта, roadmap и PR description описывает проверенную поставку и не меняет runtime. Этот diff проверяется локально по требованиям, ссылкам и outgoing scan; отдельный managed review документации не заявляется. Ручная приёмка остаётся впереди; merge, signing и release не выполнялись.
+
+## Исправленные unsigned пакеты
+
+Путь: `artifacts/mendosave-0.4.0/`. Замороженный runtime/source commit: `a8198b5dc07885c2c56dc3c0310a80634175334a`. `release-manifest.json` содержит `dirty: false`, `signed: false` и этот revision. Все 66 entries каждой browser-сборки проверены по CRC и exact build bytes; все 188 entries source archive совпали с Git bytes указанного commit. Последующие изменения этого отчёта не меняют runtime поставки.
+
+| Файл | Bytes | SHA-256 |
+|---|---:|---|
+| `mendosave-0.4.0-firefox-unsigned.xpi` | 34529921 | `1c7d4f8807e26b2d067a399e8f717db2396bdb3711aca1b7b3e62aefc002ee4b` |
+| `mendosave-0.4.0-chromium-unsigned.zip` | 34530904 | `9ddc4951bccdbd418184182cf111f7239048a2dfeb3d55e6acbfc63860995cfe` |
+| `mendosave-0.4.0-source.zip` | 36274309 | `1014ce22348fdac5f64db6a9aa377f8322b9cdd8547406c7ff925ec5df070dde` |
+
+[CI Windows/Linux](https://github.com/mendozie/MendoSave/actions/runs/38766266764) и [PR CI](https://github.com/mendozie/MendoSave/actions/runs/38766277039) для этого commit прошли, включая reproducibility. Все пять локальных файлов, включая receipt и `SHA256SUMS`, совпали с Linux CI побайтно. Outgoing scan: 177 текущих и 555 исторических text blobs, 0 findings; рассмотренные fixtures и сохранённый upstream build path учитываются отдельно.
+
+Собственные тестовые browser/driver processes остановлены с проверкой PID identity и свободных портов. Профили, необходимые медиа, hashes, отчёты и screenshots сохранены. Четыре промежуточных диагностических XPI перемещены в корзину: отсутствие по исходным путям, восстановимые bytes и hashes сохраняемых пакетов проверены. Anonymous Edge recovery index намеренно содержит 320 контрольных inputs для evidence; это относится только к тестовому профилю.
+
 ## Исходные пакеты, отозванные после review
 
-Исходный runtime/source commit: `85851602719aeb7bd343a850d0c917c498dff074`. Эти пакеты сохранены как evidence и отозваны до исправления замечаний. Их `release-manifest.json` подтверждает чистый исходный checkout и `signed: false`; entries, CRC и исходные Git bytes сверены. Финальные пакеты будут пересобраны из проверенного исправленного commit.
+Исходный runtime/source commit: `85851602719aeb7bd343a850d0c917c498dff074`. Эти пакеты сохранены отдельно как evidence и заменены исправленными пакетами выше. Их `release-manifest.json` подтверждает чистый исходный checkout и `signed: false`; entries, CRC и исходные Git bytes сверены.
 
 | Файл | Bytes | SHA-256 |
 |---|---:|---|
@@ -79,7 +102,7 @@ Headful Edge потребовал CDP focus emulation из-за Windows occlusio
 
 ## Порядок ручной установки после передачи исправленного кандидата
 
-Используй отдельный профиль, сохрани существующую установленную 0.3.3. До завершения коррекций новый кандидат не передан.
+Используй отдельный профиль, сохрани существующую установленную 0.3.3. Кандидат предназначен для ручной проверки; он не подписан и не выпущен.
 
 1. Zen: в отдельном профиле открой `about:debugging#/runtime/this-firefox`, нажми «Загрузить временное дополнение» и выбери unsigned XPI кандидата. Проверка подписей не отключается; временная установка прекращается после перезапуска браузера.
 2. Chromium/Edge: распакуй ZIP в постоянную папку, открой страницу расширений, включи режим разработчика и выбери «Загрузить распакованное расширение».
