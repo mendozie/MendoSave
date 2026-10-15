@@ -102,7 +102,7 @@ function host({ writeBarrier, outputBarrier, outputSinkBarriers, downloadState, 
     onMessage: { addListener(fn) { messageListener = fn; } },
     onConnect: { addListener(fn) { connectListener = fn; } },
     async sendMessage(message) {
-      if (message.t === 'mendosave-recovery-read') return { ok: true, entries: recoveryEntries };
+      if (message.t === 'mendosave-recovery-read') return { ok: true, entries: recoveryEntries, maxEntries: 320 };
       if (message.t === 'mendosave-recovery-write') { recoveryEntries.splice(0, recoveryEntries.length, ...message.entries); return { ok: true }; }
       if (message.t === 'mendosave-save') {
         if (saveError) throw saveError;

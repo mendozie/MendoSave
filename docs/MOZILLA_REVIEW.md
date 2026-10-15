@@ -1,6 +1,6 @@
 # Mozilla reviewer build instructions
 
-This document records the 0.3.3 submission. The current branch contains an unsigned 0.4.0 Instagram candidate for manual acceptance; it has not been submitted to Mozilla. See [candidate verification](INSTAGRAM_VERIFICATION.md) for its added permissions, checks and installation steps.
+This document records the 0.3.3 submission. The current branch contains an unsigned 0.4.0 Instagram candidate for manual acceptance; it has not been submitted to Mozilla. The candidate reads bounded fresh same-origin HTTP responses in ISOLATED and imports one bundled Mediabunny module exposed through an Instagram-only WAR entry. Its MP4 demuxer projects immutable physical packet extents, checked by the adapter against `mdat`. See [candidate verification](INSTAGRAM_VERIFICATION.md) for its added permissions, checks and installation steps.
 
 Submission: MendoSave 0.3.3, add-on ID `mendosave@mendozie`, self-distributed (unlisted). This updates the published 0.3.1 add-on and supersedes the intermediate 0.3.2 submission after PR review. The owner authorized public GitHub distribution after a release privacy audit. No public AMO listing or update server is part of this submission.
 
@@ -30,7 +30,7 @@ The build uses the supplied local vendor files, without downloading runtime code
 - Mediabunny 1.51.0: the supplied bundle contains local MP4/AAC resource guards, cumulative physical metadata/index limits including constant/variable auxiliary `saiz`, PSSH, repeated `senc` and inline/lazy subsample counts, and linear fragment-index duplicate compaction. Complete modified MPL source files, original source identifiers and deterministic bundle/source transformations are included. See [PATCH.md](../extension/vendor/mediabunny/PATCH.md). A fresh bit-for-bit TypeScript compilation is not claimed.
 - zip.js 2.20.0: the native bundle is unchanged from the pinned npm archive. Runtime ZIP writing uses STORE and disables web workers.
 
-The three known lint warnings and their local-only execution boundaries are documented in [DEPENDENCIES.md](DEPENDENCIES.md). Content security policy permits only bundled scripts, workers and WebAssembly; it does not enable string evaluation or remote scripts.
+The submitted 0.3.3 had three known lint warnings. The 0.4.0 candidate adds one warning for its fixed local module import; exact locations, hashes and execution boundaries are documented in [DEPENDENCIES.md](DEPENDENCIES.md). Content security policy permits only bundled scripts, workers and WebAssembly; it does not enable string evaluation or remote scripts.
 
 ## Exercise the extension
 

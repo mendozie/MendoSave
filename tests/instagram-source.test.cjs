@@ -245,3 +245,17 @@ test('anonymous photo variants preserve unknown dimensions without borrowing chi
     assert.deepEqual(instagram.projection(result, expected), result);
   }
 });
+
+test('GraphQL sidecars reject explicitly declared missing or paginated children', () => {
+  const node = { id: '65', __typename: 'GraphImage', display_url: 'https://scontent.cdninstagram.com/photo.jpg' };
+  const root = { id: '64', shortcode: 'BA', __typename: 'GraphSidecar',
+    edge_sidecar_to_children: { edges: [{ node }] } };
+  for (const declarations of [{ count: 2 }, { count: '1' }, { page_info: { has_next_page: true } }]) {
+    assert.throws(() => instagram.normalize({ data: { shortcode_media: { ...root,
+      edge_sidecar_to_children: { ...root.edge_sidecar_to_children, ...declarations } } } }, expected),
+    { code: 'INVALID_RESPONSE' });
+  }
+  const complete = instagram.normalize({ data: { shortcode_media: { ...root,
+    edge_sidecar_to_children: { ...root.edge_sidecar_to_children, count: 1, page_info: { has_next_page: false } } } } }, expected);
+  assert.equal(complete.items.length, 1);
+});

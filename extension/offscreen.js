@@ -1571,11 +1571,13 @@ async function recoveryDirectory() {
   return root.getDirectoryHandle(RECOVERY_DIR, { create: true });
 }
 
-async function readRecoveryIndex() {
+async function readRecoveryState() {
   const response = await sendToWorker({ t: 'mendosave-recovery-read' }, { retries: 3 });
   if (!response?.ok) throw new Error(response?.error || 'Recovery index is unavailable');
-  return Array.isArray(response.entries) ? response.entries : [];
+  if (!Number.isSafeInteger(response.maxEntries) || response.maxEntries < 1) throw new Error('Recovery capacity is unavailable');
+  return { entries: Array.isArray(response.entries) ? response.entries : [], maxEntries: response.maxEntries };
 }
+async function readRecoveryIndex() { return (await readRecoveryState()).entries; }
 
 async function writeRecoveryIndex(entries) {
   const response = await sendToWorker({ t: 'mendosave-recovery-write', entries }, { retries: 3 });
@@ -1583,13 +1585,33 @@ async function writeRecoveryIndex(entries) {
 }
 
 let recoveryChanges = Promise.resolve();
-function changeRecovery(update) {
-  const result = holdWork(() => recoveryChanges.catch(() => {}).then(async () => {
-    const entries = await readRecoveryIndex();
-    await writeRecoveryIndex(await update(entries));
-  }));
+let recoveryReservation = null;
+const recoveryCapacityError = () => new Error('Не осталось места для новых подготовленных файлов. Сначала сохраните готовые файлы через значок MendoSave и повторите попытку позже.');
+function serializeRecovery(operation) {
+  const result = holdWork(() => recoveryChanges.catch(() => {}).then(operation));
   recoveryChanges = result;
   return result;
+}
+function changeRecovery(update) {
+  return serializeRecovery(async () => {
+    const { entries, maxEntries } = await readRecoveryState();
+    const next = await update(entries);
+    if (next.length + (recoveryReservation?.remaining || 0) > maxEntries) throw recoveryCapacityError();
+    await writeRecoveryIndex(next);
+  });
+}
+function reservePackageRecovery(p) {
+  if (p.mode !== 'zip') return undefined;
+  // Admission and writes share one queue: standalone recovery cannot consume
+  // positions already promised to an accepted ZIP plan.
+  return serializeRecovery(async () => {
+    const { entries, maxEntries } = await readRecoveryState();
+    p.controller.signal.throwIfAborted();
+    if (recoveryReservation || entries.length + p.items.length > maxEntries) throw recoveryCapacityError();
+    const reservation = { packageId: p.id, remaining: p.items.length };
+    recoveryReservation = reservation;
+    return () => serializeRecovery(() => { if (recoveryReservation === reservation) recoveryReservation = null; });
+  });
 }
 
 async function stashForRecovery(blob, filename, options = {}) {
@@ -1602,10 +1624,18 @@ async function stashForRecovery(blob, filename, options = {}) {
     await blob.stream().pipeTo(new WritableStream({
       write: bytes => writable.write(bytes), close: () => writable.close(), abort: () => writable.abort(),
     }), { signal: options.signal });
-    await changeRecovery(entries => [...entries, {
-      id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
-      ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
-    }]);
+    await serializeRecovery(async () => {
+      const { entries, maxEntries } = await readRecoveryState();
+      options.signal?.throwIfAborted();
+      const reservation = options.manualOnly && recoveryReservation?.packageId === options.packageId ? recoveryReservation : null;
+      const remaining = (recoveryReservation?.remaining || 0) - (reservation ? 1 : 0);
+      if ((reservation && reservation.remaining < 1) || entries.length + 1 + remaining > maxEntries) throw recoveryCapacityError();
+      await writeRecoveryIndex([...entries, {
+        id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
+        ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
+      }]);
+      if (reservation) reservation.remaining--;
+    });
   } catch (error) {
     await writable?.abort?.().catch(() => {});
     await dir.removeEntry(id).catch(() => {});
@@ -2909,6 +2939,7 @@ async function reportError(error) {
 const packageIO = globalThis.MendoPackageIO.create({
   runtimeId: chrome.runtime.id, getURL: path => chrome.runtime.getURL(path), storage: navigator.storage,
   archive: globalThis.MendoArchive, saveBlob,
+  reservePackage: reservePackageRecovery,
   onActivity: updateKeepAlive,
   positionBusy(p) { return (activeJob?.packageId === p.id && activeJob.packageIndex === p.index)
     || (staging?.packageId === p.id && staging.packageIndex === p.index); },

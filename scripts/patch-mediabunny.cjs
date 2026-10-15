@@ -122,6 +122,24 @@ for (const [kind, charge] of Object.entries({ stts: 'entryCount', ctts: 'entryCo
   const anchor = `${prefix}${skip}${extra}\t\t\t\tconst entryCount = readU32Be(slice);`;
   edits.mp4.push([anchor, `${anchor}\n\t\t\t\tmendoClaimMp4Table(this, ${charge});`]);
 }
+// Project the demuxer's existing physical sample extent without introducing a
+// second index or treating container metadata as validated media ownership.
+edits.bundle.push([
+  'return this.packetToSampleIndex.set(c,e),c',
+  'return Object.defineProperty(c,"mendoMp4Extent",{value:Object.freeze({offset:s.sampleOffset,byteLength:s.sampleSize})}),this.packetToSampleIndex.set(c,e),c',
+]);
+edits.mp4.push([
+  '\t\tthis.packetToSampleIndex.set(packet, sampleIndex);',
+  '\t\tObject.defineProperty(packet, "mendoMp4Extent", {\n\t\t\tvalue: Object.freeze({ offset: sampleInfo.sampleOffset, byteLength: sampleInfo.sampleSize }),\n\t\t});\n\n\t\tthis.packetToSampleIndex.set(packet, sampleIndex);',
+]);
+edits.bundle.push([
+  'return this.packetToFragmentLocation.set(l,{fragment:e,sampleIndex:t}),l',
+  'return Object.defineProperty(l,"mendoMp4Extent",{value:Object.freeze({offset:n.byteOffset,byteLength:n.byteSize})}),this.packetToFragmentLocation.set(l,{fragment:e,sampleIndex:t}),l',
+]);
+edits.mp4.push([
+  '\t\tthis.packetToFragmentLocation.set(packet, { fragment, sampleIndex });',
+  '\t\tObject.defineProperty(packet, "mendoMp4Extent", {\n\t\t\tvalue: Object.freeze({ offset: fragmentSample.byteOffset, byteLength: fragmentSample.byteSize }),\n\t\t});\n\n\t\tthis.packetToFragmentLocation.set(packet, { fragment, sampleIndex });',
+]);
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 function transform(kind, bytes, reverse = false) {
   let text = bytes.toString('utf8');

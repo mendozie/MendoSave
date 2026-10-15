@@ -13,10 +13,10 @@
 
 | Этап | Статус | Результат и проверка | Зависимости |
 |---|---|---|---|
-| IG-S1 | [x] | Источник публикации и целая карусель, bounded schema/URL/source validation, поздние ответы и отмена покрыты TDD; проверены реальные auth/anonymous shapes | - |
-| IG-S2 | [x] | Фото/видео/TXT/исходное аудио/MP3, файлы и ZIP, предел 64; итоговые 962 tests, обе сборки по 66 файлов | IG-S1 |
-| IG-S3 | [x] | Zen/Edge auth и anonymous, конечные файлы/ZIP, отмена/повтор, SPA, wide/narrow и keyboard проверены; [границы](INSTAGRAM_VERIFICATION.md) сохранены | IG-S2 |
-| IG-S4 | [~] | Совокупный внутренний code review и checks пройдены; unsigned пакеты, hashes и task PR подготавливаются без merge | IG-S3 |
+| IG-S1 | [x] | Bounded canonical HTTP reader в ISOLATED, без MAIN bus/DOM authority; schema, source/late/cancel и полный anonymous carousel с `Accept: text/html` проверены | - |
+| IG-S2 | [x] | Реальные размеры/packets/extents MP4 проверяются до сохранения; recovery 320 и admission полного ZIP-плана. Meaningful negative cases, 1000 tests и focused correction review прошли | IG-S1 |
+| IG-S3 | [x] | Исправленная сборка: Zen/Edge, auth/anonymous, оба Reel transport и аудиоварианта, carousel files/ZIP exact. Native controlled 64/retry/320 и UI/keyboard проверены; [ограничения](INSTAGRAM_VERIFICATION.md) | IG-S2 |
+| IG-S4 | [~] | Четыре замечания первого [PR #10](https://github.com/mendozie/MendoSave/pull/10) исправлены. Нужны focused managed review коррекций, CI и пересборка финальных unsigned archives с CRC/Git bytes/hashes. Draft, merge запрещён | IG-S3 |
 
 Закрытая публикация не проверена: контрольный материал не выбран; пользователь разрешил этот пропуск. Ручная приёмка пользователя не выполнена. Следующий шаг - IG-S4 и передача кандидата; нового решения для этой работы не требуется. Merge, подписание и выпуск остаются за ручной приёмкой и новым прямым поручением.
 

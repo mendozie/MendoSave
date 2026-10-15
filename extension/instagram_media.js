@@ -11,6 +11,14 @@
   const codecLabel = codec => /^avc[13]\./i.test(codec) ? 'H.264'
     : /^(?:hvc1|hev1)\./i.test(codec) ? 'H.265' : /^av01\./i.test(codec) ? 'AV1'
       : /^vp09\./i.test(codec) ? 'VP9' : /^mp4a\.40\./i.test(codec) ? 'AAC' : '';
+  function dashDuration(value) {
+    if (!value) return 0;
+    const match = /^P(?:(\d+(?:\.\d+)?)D)?T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(value);
+    if (!match || !match.slice(1).some(Boolean)) fail('неподдержанная длительность DASH');
+    const duration = Number(match[1] || 0) * 86400 + Number(match[2] || 0) * 3600 + Number(match[3] || 0) * 60 + Number(match[4] || 0);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 86400) fail('неподдержанная длительность DASH');
+    return duration;
+  }
   function dashTracks(xml, schema) {
     if (!xml) return { video: [], audio: [] };
     if (xml.length > 128 * 1024 || /<!DOCTYPE|<!ENTITY/i.test(xml)) fail('неподдержанный DASH manifest');
@@ -30,6 +38,7 @@
       }
     }
     const tracks = { video: [], audio: [] };
+    const duration = dashDuration(root.getAttribute('mediaPresentationDuration') || children(root, 'Period')[0].getAttribute('duration'));
     for (const representation of representations) {
       const adaptation = representation.parentElement;
       if (localName(adaptation) !== 'AdaptationSet'
@@ -47,7 +56,7 @@
       if ((kind === 'video' && (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)
         || width < 1 || height < 1 || width > 32768 || height > 32768))
         || !Number.isSafeInteger(bandwidth) || bandwidth < 0 || bandwidth > 1_000_000_000) fail('неверные параметры DASH');
-      tracks[kind].push({ url: bases[0].textContent.trim(), width, height, bandwidth, codec,
+      tracks[kind].push({ url: bases[0].textContent.trim(), width, height, bandwidth, codec, duration,
         mime: `${mime}; codecs="${codec}"`, codecLabel: label });
     }
     tracks.video.sort((a, b) => bySize(a, b) || b.bandwidth - a.bandwidth);
@@ -270,8 +279,9 @@
     const transport = choice.kind === 'video' && choice.transport === 'dash' ? ' - DASH' : '';
     return `Instagram - ${owner} - ${post.shortcode}${item}${size}${suffix}${transport}${variant}`;
   }
-  // Inspect only MP4 box headers and sample entries; never decode or scan mdat.
-  async function mp4Tracks(blob, check) {
+  // Check physical boxes, then consume every indexed packet with the bundled
+  // guarded demuxer. Metadata-only reads alone can silently accept EOF samples.
+  async function mp4Tracks(blob, check, lib, expected = {}, signal) {
     let visited = 0;
     async function boxes(start, end) {
       const result = [];
@@ -293,27 +303,103 @@
     const top = await boxes(0, blob.size);
     const moovs = top.filter(box => box.type === 'moov');
     if (moovs.length !== 1) fail('MP4 не содержит подтверждённые дорожки');
-    const tracks = [];
-    for (const trak of (await boxes(moovs[0].start, moovs[0].end)).filter(box => box.type === 'trak')) {
-      const mdia = (await boxes(trak.start, trak.end)).find(box => box.type === 'mdia');
-      if (!mdia) fail('неверная дорожка MP4');
-      const mediaBoxes = await boxes(mdia.start, mdia.end);
-      const hdlr = mediaBoxes.find(box => box.type === 'hdlr');
-      const minf = mediaBoxes.find(box => box.type === 'minf');
-      if (!hdlr || !minf || hdlr.end - hdlr.start < 12) fail('неверная дорожка MP4');
-      const handler = bytesText(ownedBytes(await blob.slice(hdlr.start + 8, hdlr.start + 12).arrayBuffer()));
-      if (!['soun', 'vide'].includes(handler)) continue;
-      const stbl = (await boxes(minf.start, minf.end)).find(box => box.type === 'stbl');
-      const stsd = stbl && (await boxes(stbl.start, stbl.end)).find(box => box.type === 'stsd');
-      if (!stsd || stsd.end - stsd.start < 16) fail('MP4 не содержит описание codec');
-      const entriesBytes = ownedBytes(await blob.slice(stsd.start, stsd.start + 8).arrayBuffer());
-      const entries = new DataView(entriesBytes.buffer).getUint32(4);
-      const samples = await boxes(stsd.start + 8, stsd.end);
-      if (entries < 1 || entries > 8 || samples.length !== entries
-        || samples.some(sample => /^(?:enca|encv)$/.test(sample.type))) fail('неподдержанная или защищённая дорожка MP4');
-      tracks.push({ type: handler === 'soun' ? 'audio' : 'video', codec: samples[0].type });
-    }
-    return tracks;
+    const mediaRanges = top.filter(box => box.type === 'mdat');
+    const payloadBytes = mediaRanges.reduce((sum, box) => sum + box.end - box.start, 0);
+    const sampleExtent = packet => {
+      const extent = packet.mendoMp4Extent;
+      if (!extent || !Number.isSafeInteger(extent.offset) || extent.offset < 0
+        || !Number.isSafeInteger(extent.byteLength) || extent.byteLength !== packet.byteLength || extent.byteLength < 1
+        || !Number.isSafeInteger(extent.offset + extent.byteLength)) fail('диапазон sample MP4 не подтверждён parser');
+      let low = 0, high = mediaRanges.length - 1, selected = -1;
+      while (low <= high) {
+        const middle = low + Math.floor((high - low) / 2);
+        if (mediaRanges[middle].start <= extent.offset) { selected = middle; low = middle + 1; }
+        else high = middle - 1;
+      }
+      if (selected < 0 || extent.offset + extent.byteLength > mediaRanges[selected].end) fail('sample MP4 выходит за payload mdat');
+      return extent;
+    };
+    const input = new lib.Input({ formats: [lib.MP4], source: new lib.CustomSource({
+      getSize: () => blob.size, maxCacheSize: 8 * 1024 ** 2,
+      read(start, end) {
+        check();
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > blob.size || end < start
+          || end - start > 16 * 1024 ** 2) fail('sample или метаданные MP4 превышают лимит проверки');
+        return Promise.resolve(blob.slice(start, end).arrayBuffer()).then(buffer => {
+          const bytes = ownedBytes(buffer);
+          check();
+          if (bytes.byteLength !== end - start) fail('MP4 передано не полностью');
+          return bytes;
+        });
+      },
+    }) });
+    let disposed = false, rejectAbort;
+    const dispose = () => { if (!disposed) { disposed = true; input.dispose(); } };
+    const aborted = signal && new Promise((resolve, reject) => { rejectAbort = reject; });
+    aborted?.catch(() => {});
+    const abort = () => {
+      dispose();
+      try { check(); } catch (error) { rejectAbort(error); }
+    };
+    const waiting = promise => aborted ? Promise.race([promise, aborted]) : promise;
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      check();
+      const sourceTracks = await waiting(input.getTracks());
+      check();
+      if (!sourceTracks.length || sourceTracks.length > 8) fail('неподдержанное число дорожек MP4');
+      const tracks = [];
+      let allBytes = 0, allPackets = 0;
+      for (const track of sourceTracks) {
+        check();
+        if (!['audio', 'video'].includes(track.type)) fail('неподдержанная дорожка MP4');
+        const codec = await waiting(track.getInternalCodecId());
+        const info = { type: track.type, codec };
+        if (track.type === 'video') {
+          info.width = await waiting(track.getDisplayWidth()); info.height = await waiting(track.getDisplayHeight());
+          info.codedWidth = await waiting(track.getCodedWidth()); info.codedHeight = await waiting(track.getCodedHeight());
+          info.rotation = await waiting(track.getRotation());
+          if (![info.width, info.height, info.codedWidth, info.codedHeight].every(value => Number.isInteger(value) && value > 0 && value <= 32768)) fail('неверные размеры видео MP4');
+          if (knownSize(expected) && (expected.width !== info.width || expected.height !== info.height)) fail('размер видео не совпадает с выбранным вариантом');
+        }
+        const sink = new lib.EncodedPacketSink(track);
+        let metadata = await waiting(sink.getFirstPacket({ metadataOnly: true }));
+        if (metadata) sampleExtent(metadata);
+        let actual = await waiting(sink.getFirstPacket());
+        let count = 0, first = Infinity, last = -Infinity;
+        while (metadata || actual) {
+          check();
+          if (!metadata || !actual || metadata.sequenceNumber !== actual.sequenceNumber
+            || metadata.byteLength !== actual.byteLength || metadata.timestamp !== actual.timestamp || metadata.duration !== actual.duration
+            || !Number.isSafeInteger(actual.byteLength) || actual.byteLength < 1 || actual.data.byteLength !== actual.byteLength
+            || !Number.isFinite(actual.timestamp) || !Number.isFinite(actual.duration) || actual.duration < 0) fail('samples MP4 переданы не полностью');
+          const metadataExtent = sampleExtent(metadata), actualExtent = sampleExtent(actual);
+          if (metadataExtent.offset !== actualExtent.offset || metadataExtent.byteLength !== actualExtent.byteLength) fail('диапазон sample MP4 изменился при чтении');
+          allBytes += actual.byteLength;
+          if (++allPackets > 1_000_000 || allBytes > payloadBytes) fail('samples MP4 выходят за доступные media bytes');
+          count++;
+          first = Math.min(first, actual.timestamp); last = Math.max(last, actual.timestamp + actual.duration);
+          if (allPackets % 64 === 0) { await new Promise(resolve => setTimeout(resolve, 0)); check(); }
+          metadata = await waiting(sink.getNextPacket(metadata, { metadataOnly: true }));
+          if (metadata) sampleExtent(metadata);
+          actual = await waiting(sink.getNextPacket(actual));
+        }
+        if (!count || !(last > first)) fail('MP4 не содержит полную непустую дорожку');
+        const declaredDuration = await waiting(track.getDurationFromMetadata());
+        const resolution = await waiting(track.getTimeResolution());
+        const tolerance = Math.max(0.05, 2 / resolution);
+        if (Number.isFinite(declaredDuration) && declaredDuration > 0 && last + tolerance < declaredDuration) fail('длительность MP4 короче заявленной в metadata');
+        const dashTolerance = 0.25;
+        if (Number.isFinite(expected.duration) && expected.duration > 0 && last - first + dashTolerance < expected.duration) fail('длительность MP4 короче заявленной в DASH');
+        tracks.push({ ...info, packetCount: count, duration: last - first });
+      }
+      return tracks;
+    } catch (error) {
+      check();
+      if (String(error?.message || '').startsWith('Instagram:')) throw error;
+      fail(`проверка MP4 отклонена: ${String(error?.message || error).slice(0, 250)}`);
+    } finally { signal?.removeEventListener('abort', abort); dispose(); }
   }
   function base64(bytes) {
     let text = '';
@@ -321,8 +407,11 @@
     return btoa(text);
   }
   function create({ schema = source(), packageUI = globalThis.MendoPackageUI,
-    runtime = globalThis.chrome?.runtime, fetcher } = {}) {
+    runtime = globalThis.chrome?.runtime, fetcher,
+    loadParser = () => import(runtime.getURL('vendor/mediabunny/mediabunny.min.mjs')) } = {}) {
     let running = false;
+    let parserLoad;
+    const parser = () => parserLoad ||= Promise.resolve().then(loadParser).catch(error => { parserLoad = null; throw error; });
     async function run(value, requested, { signal: callerSignal, onProgress } = {}) {
       if (running) fail('сохранение уже выполняется');
       const post = schema.projection(value, { shortcode: value.shortcode });
@@ -342,6 +431,10 @@
         packageUI.check();
       };
       const progress = (stage, number, text) => { check(); onProgress?.({ stage, value: number, text }); };
+      const inspectMp4 = async (blob, version) => {
+        progress('process', null, 'Проверка дорожек MP4');
+        return mp4Tracks(blob, check, await parser(), version, controller.signal);
+      };
       const fetchMedia = fetcher || packageUI.fetch.bind(packageUI);
       async function readFile(url, kind, limit = MAX_FILE_BYTES) {
         check();
@@ -458,13 +551,13 @@
         }
         else if (choice.kind === 'video') {
           file = await readFile(choice.version.url, 'video', choice.transport === 'dash' ? MAX_TRACK_BYTES : MAX_FILE_BYTES);
-          const tracks = await mp4Tracks(file.blob, check);
+          const tracks = await inspectMp4(file.blob, choice.version);
           const videoTrack = tracks.find(track => track.type === 'video');
           if (!videoTrack) fail('файл не содержит видеодорожку');
           if (choice.transport === 'dash' && videoTrack.codec.toLowerCase() !== choice.version.codec.split('.')[0].toLowerCase()) fail('video codec не совпадает с DASH');
           if (choice.transport === 'dash' && choice.audio) {
             const audio = await readFile(choice.audio.url, 'audio', Math.min(MAX_TRACK_BYTES, MAX_FILE_BYTES - file.blob.size));
-            const audioTracks = await mp4Tracks(audio.blob, check);
+            const audioTracks = await inspectMp4(audio.blob, choice.audio);
             if (!audioTracks.some(track => track.type === 'audio' && track.codec === 'mp4a')
               || audioTracks.some(track => track.type === 'video')) fail('audio codec не совпадает с DASH');
             return await processFiles([{ track: 'video', blob: file.blob }, { track: 'audio', blob: audio.blob }],
@@ -475,7 +568,7 @@
         }
         else if (choice.kind === 'audio') {
           file = await readFile(choice.version.url, 'audio', MAX_TRACK_BYTES);
-          const tracks = await mp4Tracks(file.blob, check);
+          const tracks = await inspectMp4(file.blob, choice.version);
           const audio = tracks.find(track => track.type === 'audio');
           if (!audio) fail('в видео нет аудиодорожки');
           if (choice.format === 'm4a' && audio.codec !== 'mp4a') fail('исходный audio codec не поддерживает M4A без перекодирования');

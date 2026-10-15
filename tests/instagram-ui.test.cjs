@@ -8,7 +8,7 @@ function app({ onRun, choices = [{ id: 'photo-1', label: 'Фото · 1080×1350
   const { document, window: domWindow } = parseHTML('<html><body><article>Publication</article></body></html>');
   const window = { Event: domWindow.Event, addEventListener() {}, removeEventListener() {} };
   const location = new URL('https://www.instagram.com/p/ABC/');
-  const messages = [], saved = [], runs = [], listeners = new Set();
+  const messages = [], outbound = [], saved = [], runs = [], listeners = new Set();
   let refresh;
   window.innerWidth = 1280; window.innerHeight = 800;
   const context = vm.createContext({ window, document, location, URL, AbortController, DOMException,
@@ -16,6 +16,23 @@ function app({ onRun, choices = [{ id: 'photo-1', label: 'Фото · 1080×1350
     setInterval(fn) { refresh = fn; return 1; }, clearInterval() {}, setTimeout, clearTimeout,
     MutationObserver: class { observe() {} },
     chrome: { runtime: {} }, MendoInstagramSource: schema,
+    MendoInstagramReader: { create: () => ({ read(selected, { signal }) {
+      return new Promise((resolve, reject) => {
+        let finished = false;
+        const request = { kind: 'request', requestId: require('node:crypto').randomUUID(), sourceHref: selected.href, signal };
+        const finish = (value, error) => {
+          if (finished) return; finished = true;
+          signal.removeEventListener('abort', abort);
+          if (error) reject(error); else resolve(value);
+        };
+        const abort = () => {
+          messages.push({ __mendosave_ig_request: true, kind: 'cancel', requestId: request.requestId, sourceHref: request.sourceHref });
+          finish(null, new DOMException('Cancelled', 'AbortError'));
+        };
+        request.resolve = value => finish(value); request.reject = error => finish(null, error);
+        signal.addEventListener('abort', abort, { once: true }); messages.push(request);
+      });
+    } }) },
     MendoInstagramMedia: { choices: () => choices,
       create: () => ({ async run(post, choice, options) {
         saved.push({ shortcode: post.shortcode, id: choice.id }); runs.push(options);
@@ -28,9 +45,14 @@ function app({ onRun, choices = [{ id: 'photo-1', label: 'Фото · 1080×1350
   });
   window.addEventListener = (type, fn) => { if (type === 'message') listeners.add(fn); };
   window.removeEventListener = (type, fn) => { if (type === 'message') listeners.delete(fn); };
-  window.postMessage = message => messages.push(message);
+  window.postMessage = message => outbound.push(message);
   for (const file of ['menu.js', 'instagram.js']) if (fs.existsSync('extension/' + file)) vm.runInContext(fs.readFileSync('extension/' + file, 'utf8'), context);
-  return { document, window, location, messages, saved, runs, refresh: () => refresh(),
+  const forge = (changes = {}, sender = window, origin = location.origin) => {
+    const request = messages.filter(m => m.kind === 'request').at(-1);
+    for (const fn of [...listeners]) fn({ source: sender, origin, data: { __mendosave_ig_result: true,
+      requestId: request.requestId, sourceHref: request.sourceHref, ...changes } });
+  };
+  return { document, window, location, messages, outbound, saved, runs, forge, refresh: () => refresh(),
     click(selector, trusted = true) { const e = document.querySelector(selector); assert.ok(e, selector);
       e.dispatchEvent(trusted ? new UserEvent('click', { bubbles: true }) : new window.Event('click', { bubbles: true })); },
     key(selector, key, trusted = true) {
@@ -41,14 +63,17 @@ function app({ onRun, choices = [{ id: 'photo-1', label: 'Фото · 1080×1350
     },
     reply(changes = {}, sender = window, origin = location.origin) {
       const request = messages.filter(m => m.kind === 'request').at(-1);
+      if (sender !== window || origin !== location.origin || changes.requestId || changes.sourceHref) {
+        forge(changes, sender, origin); return;
+      }
       const selected = schema.source(request.sourceHref);
       const post = schema.normalize({ items: [{ code: selected.shortcode, pk: selected.shortcode === 'ABD' ? '67' : '66',
         media_type: 1, image_versions2: { candidates: [
         { url: 'https://scontent.cdninstagram.com/image.jpg', width: 1080, height: 1350 },
       ] } }] }, selected);
-      for (const fn of [...listeners]) fn({ source: sender, origin, data: {
-        __mendosave_ig_result: true, requestId: request.requestId, sourceHref: request.sourceHref, post, ...changes,
-      } }); },
+      if (changes.code) request.reject(schema.error(changes.code));
+      else request.resolve(changes.post || post);
+    },
     async settle() { for (let i = 0; i < 10; i++) await new Promise(setImmediate); },
   };
 }
@@ -192,4 +217,18 @@ test('reopening a running same-post menu and cancelling restores choices and pac
   assert.equal(a.runs.length, 2);
   assert.equal(a.runs[1].signal.aborted, false);
   a.key('.mendosave-instagram-cancel', 'Enter'); await a.settle();
+});
+
+test('same-origin page metadata forgery cannot race the trusted metadata read', async () => {
+  const a = app(); a.click('.mendosave-instagram-btn');
+  a.forge({ post: { shortcode: 'ABC', id: '66', username: 'forged', caption: 'Forged description', items: [{
+    id: '66', index: 0, type: 'photo', imageVersions: [
+      { url: 'https://scontent.cdninstagram.com/forged.jpg', width: 1080, height: 1350 }],
+    videoVersions: [], dashManifest: '', hasAudio: null }] } });
+  await a.settle();
+  assert.equal(Boolean(a.document.querySelector('.mendosave-instagram-item')), false);
+  assert.equal(a.saved.length, 0);
+  assert.equal(a.outbound.length, 0, 'no page-readable metadata protocol exists');
+  a.reply(); await a.settle();
+  assert.equal(Boolean(a.document.querySelector('.mendosave-instagram-item')), true);
 });

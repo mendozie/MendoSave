@@ -49,6 +49,21 @@ test('build check rejects remote entrypoints, unsafe CSP and traversal', () => {
     assert.ok(errors.some((error) => error.includes('CSP')));
 });
 
+test('build check verifies packaged web-accessible module references', () => {
+  const root = fs.mkdtempSync(path.join(fixtureArea, 'accessible-'));
+  const output = path.join(root, 'dist', 'chromium');
+  fs.mkdirSync(output, { recursive: true });
+  for (const resource of ['missing.mjs', '../outside.mjs', 'https://example.test/remote.mjs']) {
+    fs.writeFileSync(path.join(output, 'manifest.json'), JSON.stringify({ manifest_version: 3,
+      name: 'MendoSave', version: '0.4.0', background: { service_worker: 'background.js' },
+      content_security_policy: { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'" },
+      web_accessible_resources: [{ resources: [resource], matches: ['https://www.instagram.com/*'] }] }));
+    fs.writeFileSync(path.join(root, 'dist', 'chromium-hashes.json'), '[]');
+    const expected = resource === 'missing.mjs' ? 'missing reference missing.mjs' : 'non-local reference';
+    assert.ok(checkBuild(root, 'chromium', '0.4.0').some(error => error.includes(expected)), resource);
+  }
+});
+
 test('build check accepts the permanent Firefox identity and rejects development or foreign identities', () => {
   const root = fs.mkdtempSync(path.join(fixtureArea, 'identity-'));
   const output = path.join(root, 'dist', 'firefox');

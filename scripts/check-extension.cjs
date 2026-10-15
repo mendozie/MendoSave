@@ -4,6 +4,10 @@ const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { checkBuild } = require('./check-build.cjs');
 const reviewed = [
+  // The only computed import is a fixed runtime.getURL path to the bundled
+  // parser. Its WAR entry is restricted to Instagram; no page URL is used.
+  { code: 'UNSAFE_VAR_ASSIGNMENT', file: 'instagram_media.js', line: 411, column: 24,
+    sha256: '69053814a2785963aa88b34c7530bea9076d5587ad7f50e95ec802eda6c0b2a1' },
   { code: 'UNSAFE_VAR_ASSIGNMENT', file: 'vendor/ffmpeg/814.ffmpeg.js', line: 1, column: 1124,
     sha256: '6fdceaa2bb9765257a5474fd86f4a90c67995d9b8c63df3a7e92f264cda8be71' },
   { code: 'DANGEROUS_EVAL', file: 'vendor/ffmpeg/ffmpeg.js', line: 1, column: 444,
@@ -33,7 +37,7 @@ if (require.main === module) {
   const errors = checkBuild(root, 'firefox', require('../package.json').version);
   for (const entry of reviewed) {
     const bytes = fs.readFileSync(path.join(root, 'dist/firefox', entry.file));
-    if (createHash('sha256').update(bytes).digest('hex') !== entry.sha256) errors.push('Reviewed vendor warning bytes changed');
+    if (createHash('sha256').update(bytes).digest('hex') !== entry.sha256) errors.push('Reviewed warning bytes changed');
   }
   const result = spawnSync(process.execPath, [path.join(root, 'node_modules/web-ext/bin/web-ext.js'), 'lint', '--source-dir', 'dist/firefox', '--output', 'json'], {
     cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 ** 2,
@@ -42,7 +46,7 @@ if (require.main === module) {
     const report = JSON.parse(result.stdout);
     errors.push(...assessLint(report));
     if (result.error || result.status !== 0) errors.push('web-ext process failed');
-    console.log(`web-ext: ${report.errors.length} errors, ${report.notices.length} notices, ${report.warnings.length} reviewed warnings (visible; strict lint still rejects them)`);
+    console.log(`web-ext: ${report.errors.length} errors, ${report.notices.length} notices, ${report.warnings.length} warnings (visible; strict lint still rejects them)`);
     for (const entry of report.warnings) console.log(`${entry.file}:${entry.line}:${entry.column} ${entry.code}`);
   } catch { errors.push('web-ext failed to produce valid JSON'); }
   for (const error of errors) console.error(error);

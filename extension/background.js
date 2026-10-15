@@ -36,6 +36,8 @@ const HANDLED_MESSAGES = new Set([
   'mendosave-recovery-write',
 ]);
 const RECOVERY_KEY = 'nova_recovered';
+// Retain five complete 64-output packages without evicting prepared inputs.
+const RECOVERY_MAX_ENTRIES = 320;
 
 let logWrite = Promise.resolve();
 let pendingLogWrites = 0;
@@ -414,9 +416,9 @@ async function handleMessage(message, sender) {
       }
       if (message.t === 'mendosave-recovery-read') {
         const stored = await chrome.storage.local.get(RECOVERY_KEY);
-        return { ok: true, entries: Array.isArray(stored[RECOVERY_KEY]) ? stored[RECOVERY_KEY] : [] };
+        return { ok: true, entries: Array.isArray(stored[RECOVERY_KEY]) ? stored[RECOVERY_KEY] : [], maxEntries: RECOVERY_MAX_ENTRIES };
       }
-      if (!Array.isArray(message.entries) || message.entries.length > 100
+      if (!Array.isArray(message.entries) || message.entries.length > RECOVERY_MAX_ENTRIES
         || message.entries.some((entry) => !entry || !/^[A-Za-z0-9_-]+\.bin$/.test(entry.id)
           || typeof entry.filename !== 'string' || entry.filename.length > 250
           || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0)) {

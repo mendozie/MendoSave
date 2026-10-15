@@ -2,10 +2,12 @@
   const schema = globalThis.MendoInstagramSource;
   const media = globalThis.MendoInstagramMedia;
   const packages = globalThis.MendoPackageUI;
-  if (!schema || !media || !packages || window.__mendosaveInstagramUI) return;
+  const readerAPI = globalThis.MendoInstagramReader;
+  if (!schema || !media || !packages || !readerAPI || window.__mendosaveInstagramUI) return;
   window.__mendosaveInstagramUI = true;
   let button, menu, status, pending, sourceHref = '', revision = 0, work = null;
   const executor = media.create({ schema, packageUI: packages, runtime: chrome.runtime });
+  const reader = readerAPI.create({ schema });
   const element = (tag, className, text) => {
     const node = document.createElement(tag); node.className = className;
     if (text) node.textContent = text;
@@ -14,34 +16,16 @@
   function abortPending() { pending?.abort(); pending = null; }
   function closeMenu() { ++revision; abortPending(); menu?.remove(); menu = null; status = null; }
   function updateStatus(text) { if (status) status.textContent = text; }
-  function readPost(selected) {
+  async function readPost(selected) {
     abortPending();
-    return new Promise((resolve, reject) => {
-      const requestId = crypto.randomUUID();
-      let timer;
-      const finish = (post, failure) => {
-        clearTimeout(timer); window.removeEventListener('message', receive);
-        if (pending?.id === requestId) pending = null;
-        if (failure) reject(failure); else resolve(post);
-      };
-      const receive = event => {
-        const result = event.data;
-        if (event.source !== window || event.origin !== location.origin || !result || result.__mendosave_ig_result !== true
-          || result.requestId !== requestId || result.sourceHref !== selected.href
-          || !schema.same(selected, schema.source(location.href))) return;
-        try {
-          if (result.code) throw schema.error(result.code);
-          finish(schema.projection(result.post, selected));
-        } catch (failure) { finish(null, failure); }
-      };
-      pending = { id: requestId, abort() {
-        window.postMessage({ __mendosave_ig_request: true, kind: 'cancel', requestId, sourceHref: selected.href }, location.origin);
-        finish(null, new DOMException('Запрос отменён', 'AbortError'));
-      } };
-      timer = setTimeout(() => finish(null, new Error('Instagram не ответил вовремя; повторите попытку')), 15000);
-      window.addEventListener('message', receive);
-      window.postMessage({ __mendosave_ig_request: true, kind: 'request', requestId, sourceHref: selected.href }, location.origin);
-    });
+    const controller = new AbortController();
+    pending = controller;
+    try {
+      const post = await reader.read(selected, { signal: controller.signal });
+      if (controller.signal.aborted) throw new DOMException('Запрос отменён', 'AbortError');
+      if (!schema.same(selected, schema.source(location.href))) throw schema.error('SOURCE_MISMATCH');
+      return schema.projection(post, selected);
+    } finally { if (pending === controller) pending = null; }
   }
   function bindMenu() {
     globalThis.MendoMenu.bind(menu, closeMenu, '.mendosave-instagram-item,.mendo-package-open,.mendosave-instagram-cancel');

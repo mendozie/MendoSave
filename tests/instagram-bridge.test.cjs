@@ -1,146 +1,206 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const vm = require('node:vm');
+const { DOMParser } = require('linkedom');
 const schema = require('../extension/instagram_source.js');
-
+const readerAPI = require('../extension/instagram_bridge.js');
 const url = 'https://www.instagram.com/p/ABC/';
 const photo = () => ({ code: 'ABC', pk: '66', media_type: 1, user: { username: 'fixture' },
   caption: { text: 'Описание\n🙂' }, image_versions2: { candidates: [
     { url: 'https://scontent.cdninstagram.com/image.jpg', width: 1080, height: 1350 },
   ] }, tracking_token: 'never-project-this' });
-function bridge({ payload = photo(), fetcher } = {}) {
-  const listeners = [], received = [], requests = [];
-  const location = new URL(url);
-  const window = { addEventListener(type, fn) { if (type === 'message') listeners.push(fn); },
-    postMessage(message) { received.push(structuredClone(message)); } };
-  const context = vm.createContext({ window, location, URL, TextEncoder, TextDecoder, AbortController,
-    setTimeout, clearTimeout, Date, console, MendoInstagramSource: schema,
-    document: { scripts: payload ? [{ type: 'application/json', textContent: JSON.stringify({ require: [payload] }) }] : [], cookie: '' },
-    fetch: async (target, options) => { requests.push(String(target)); return fetcher ? fetcher(target, options)
-      : new Response('{}', { status: 401 }); } });
-  if (fs.existsSync('extension/instagram_bridge.js')) vm.runInContext(fs.readFileSync('extension/instagram_bridge.js', 'utf8'), context);
-  const request = (changes = {}, source = window, origin = location.origin) => listeners.forEach(fn => fn({
-    source, origin, data: { __mendosave_ig_request: true, kind: 'request', requestId: 'menu_1', sourceHref: url, ...changes },
-  }));
-  return { window, location, received, requests, request, document: context.document,
-    async settle() { for (let i = 0; i < 12; i++) await new Promise(setImmediate); } };
+const html = payload => '<!doctype html><html><body>' + (payload ? '<script type="application/json">'
+  + JSON.stringify({ require: [payload] }).replaceAll('<', '\\u003c') + '</script>' : '') + '</body></html>';
+function response(target, body, options = {}) {
+  const value = new Response(body, options);
+  Object.defineProperty(value, 'url', { value: target });
+  return value;
 }
-test('Instagram bridge projects the selected embedded publication without another request or private fields', async () => {
-  const b = bridge(); b.request(); await b.settle();
-  assert.equal(b.received.length, 1);
-  assert.equal(b.received[0].post.shortcode, 'ABC');
-  assert.equal(b.received[0].post.items.length, 1);
-  assert.equal(b.received[0].post.caption, 'Описание\n🙂');
-  assert.equal(b.requests.length, 0);
-  assert.doesNotMatch(JSON.stringify(b.received), /tracking_token|never-project/);
+function reader({ payload = photo(), fetcher, ...options } = {}) {
+  const location = new URL(url), calls = [];
+  const api = readerAPI.create({ schema, DOMParser, current: () => location.href,
+    fetch: async (target, init) => { calls.push({ url: target, init });
+      return fetcher ? fetcher(target, init) : response(target, html(payload)); }, ...options });
+  return { api, location, calls, read: options => api.read(schema.source(location.href), options) };
+}
+
+test('isolated reader projects only fresh canonical HTTP metadata and keeps the session on Instagram', async () => {
+  const r = reader();
+  const post = await r.read();
+  assert.equal(post.caption, 'Описание\n🙂');
+  assert.equal(post.items.length, 1);
+  assert.doesNotMatch(JSON.stringify(post), /tracking_token|never-project/);
+  assert.deepEqual(r.calls.map(call => call.url), [url]);
+  assert.equal(r.calls[0].init.credentials, 'include');
+  assert.equal(r.calls[0].init.cache, 'no-store');
+  assert.equal(r.calls[0].init.redirect, 'error');
+  assert.deepEqual(r.calls[0].init.headers, { Accept: 'text/html' });
 });
-test('Instagram bridge refuses foreign senders and a different publication before reading the session', async () => {
-  const b = bridge({ payload: null });
-  b.request({}, {}); b.request({}, b.window, 'https://attacker.invalid');
-  b.request({ sourceHref: 'https://www.instagram.com/p/ABD/' });
-  b.request({ sourceHref: url + '?tracking=1' });
-  await b.settle(); assert.equal(b.requests.length, 0); assert.equal(b.received.length, 0);
+
+test('only a missing full HTTP node permits one bound API GET fallback', async () => {
+  const r = reader({ fetcher: async target => response(target,
+    target === url ? html(null) : JSON.stringify({ items: [photo()] })) });
+  assert.equal((await r.read()).id, '66');
+  assert.deepEqual(r.calls.map(call => call.url), [url, 'https://www.instagram.com/api/v1/media/66/info/']);
+  assert.deepEqual(r.calls[1].init.headers, { 'x-ig-app-id': '936619743392459' });
+  assert.doesNotMatch(JSON.stringify(r.calls), /csrf|cookie|authorization/i);
 });
-test('Instagram bridge fallback reads only the bound publication and classifies expired login', async () => {
-  const b = bridge({ payload: null }); b.request(); await b.settle();
-  assert.deepEqual(b.requests, ['https://www.instagram.com/api/v1/media/66/info/']);
-  assert.equal(b.received[0].code, 'AUTH_REQUIRED');
+
+test('HTTP auth, rate limit and unavailable responses retain explicit errors without fallback', async t => {
+  for (const [status, code] of [[401, 'AUTH_REQUIRED'], [403, 'AUTH_REQUIRED'], [429, 'RATE_LIMITED'], [404, 'UNAVAILABLE']]) {
+    await t.test(String(status), async () => {
+      const r = reader({ fetcher: async target => response(target, '', { status }) });
+      await assert.rejects(r.read(), { code }); assert.equal(r.calls.length, 1);
+    });
+  }
 });
-test('Instagram bridge drops a late response after navigation to another publication', async () => {
+
+test('foreign or changed selected sources and redirected responses cannot supply metadata', async () => {
+  const r = reader();
+  await assert.rejects(r.api.read({ shortcode: 'ABC', href: 'https://attacker.invalid/p/ABC/' }), { code: 'INVALID_RESPONSE' });
+  await assert.rejects(r.api.read(schema.source('https://www.instagram.com/p/ABD/')), { code: 'SOURCE_MISMATCH' });
+  assert.equal(r.calls.length, 0);
+  for (const finalURL of ['https://attacker.invalid/p/ABC/', 'https://www.instagram.com/p/ABD/']) {
+    const changed = reader({ fetcher: async () => response(finalURL, html(photo())) });
+    await assert.rejects(changed.read(), { code: 'SOURCE_MISMATCH' });
+  }
+});
+
+test('late HTTP responses after SPA navigation fail the selected-source binding', async () => {
   let complete;
-  const b = bridge({ payload: null, fetcher: () => new Promise(resolve => { complete = resolve; }) });
-  b.request(); await b.settle(); b.location.pathname = '/p/ABD/';
-  complete(new Response(JSON.stringify({ items: [photo()] })));
-  await b.settle(); assert.equal(b.received.length, 0);
-});
-test('Instagram bridge rejects excessive response bytes and 429 with explicit bounded errors', async t => {
-  for (const [name, response, code] of [
-    ['rate', new Response('{}', { status: 429 }), 'RATE_LIMITED'],
-    ['oversize', new Response('{}', { headers: { 'content-length': String(schema.MAX_RESPONSE_BYTES + 1) } }), 'RESPONSE_TOO_LARGE'],
-  ]) await t.test(name, async () => {
-    const b = bridge({ payload: null, fetcher: async () => response }); b.request(); await b.settle();
-    assert.equal(b.received[0].code, code);
-  });
+  const r = reader({ fetcher: () => new Promise(resolve => { complete = resolve; }) });
+  const loading = r.read(); r.location.pathname = '/p/ABD/';
+  complete(response(url, html(photo())));
+  await assert.rejects(loading, { code: 'SOURCE_MISMATCH' });
 });
 
-test('navigation cancellation frees the bridge immediately and late old results cannot overwrite the new post', async () => {
-  let completeOld, oldSignal;
-  const b = bridge({ payload: null, fetcher: (target, options) => {
-    oldSignal = options.signal;
-    return new Promise(resolve => { completeOld = resolve; });
-  } });
-  b.request(); await b.settle();
-  b.location.pathname = '/p/ABD/';
-  const cancel = { kind: 'cancel' };
-  b.request(cancel, {}, b.location.origin);
-  b.request(cancel, b.window, 'https://attacker.invalid');
-  b.request({ ...cancel, sourceHref: 'https://www.instagram.com/p/ABD/' });
-  assert.equal(oldSignal.aborted, false, 'cancel requires matching sender, origin and original source');
-  b.request(cancel);
-  assert.equal(oldSignal.aborted, true, 'old-source cancel remains valid after navigation');
-  b.document.scripts = [{ type: 'application/json', textContent: JSON.stringify({
-    ...photo(), code: 'ABD', pk: '67', caption: { text: 'New post' },
-  }) }];
-  b.request({ requestId: 'menu_2', sourceHref: b.location.href });
-  await b.settle();
-  assert.equal(b.received.length, 1);
-  assert.equal(b.received[0].post.shortcode, 'ABD');
-  completeOld(new Response(JSON.stringify({ items: [photo()] })));
-  await b.settle();
-  assert.equal(b.received.length, 1, 'late cancelled response is suppressed');
+test('cancelled reads allow a new source immediately and suppress the old completion', async () => {
+  let complete;
+  const r = reader({ fetcher: target => target === url ? new Promise(resolve => { complete = resolve; })
+    : response(target, html({ ...photo(), code: 'ABD', pk: '67' })) });
+  const controller = new AbortController();
+  const first = r.read({ signal: controller.signal });
+  controller.abort(); r.location.pathname = '/p/ABD/';
+  assert.equal((await r.read()).shortcode, 'ABD');
+  complete(response(url, html(photo())));
+  await assert.rejects(first, { name: 'AbortError' });
 });
 
-test('embedded legacy GraphQL media uses its matching normalization envelope without a network fallback', async () => {
-  const b = bridge({ payload: { id: '66', shortcode: 'ABC', __typename: 'GraphImage',
+test('abort cancels a stalled response stream and a subsequent read remains usable', async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('<html>')); },
+    cancel() { cancelled = true; } });
+  const r = reader({ fetcher: async target => response(target, stream) });
+  const controller = new AbortController(), loading = r.read({ signal: controller.signal });
+  await new Promise(setImmediate); controller.abort();
+  await assert.rejects(loading, { name: 'AbortError' }); assert.equal(cancelled, true);
+});
+
+test('declared and streamed HTML body limits are enforced and rejected streams are cancelled', async () => {
+  for (const declared of [true, false]) {
+    let cancelled = false;
+    const stream = new ReadableStream({ start(controller) {
+      if (!declared) controller.enqueue(new Uint8Array(readerAPI.MAX_HTML_BYTES + 1));
+    }, cancel() { cancelled = true; } });
+    const r = reader({ fetcher: async target => response(target, stream, declared
+      ? { headers: { 'content-length': String(readerAPI.MAX_HTML_BYTES + 1) } } : {}) });
+    await assert.rejects(r.read(), { code: 'RESPONSE_TOO_LARGE' });
+    assert.equal(cancelled, true);
+  }
+});
+
+test('compressed-size headers do not replace the decoded byte limit or require false length parity', async () => {
+  const r = reader({ fetcher: async target => response(target, html(photo()),
+    { headers: { 'content-length': '1', 'content-encoding': 'gzip' } }) });
+  assert.equal((await r.read()).id, '66');
+});
+
+test('a broken transfer never produces success or an API retry', async () => {
+  const r = reader({ fetcher: async target => response(target, new ReadableStream({ start(controller) {
+    controller.enqueue(new TextEncoder().encode(html(photo()))); controller.error(new Error('network truncated'));
+  } })) });
+  await assert.rejects(r.read(), { code: 'UNAVAILABLE' }); assert.equal(r.calls.length, 1);
+});
+
+test('API JSON body uses its smaller limit and fallback calls are rate bounded', async () => {
+  const r = reader({ fetcher: async target => target === url ? response(target, html(null))
+    : response(target, '{}', { headers: { 'content-length': String(schema.MAX_RESPONSE_BYTES + 1) } }) });
+  await assert.rejects(r.read(), { code: 'RESPONSE_TOO_LARGE' });
+  await assert.rejects(r.read(), { code: 'RATE_LIMITED' });
+  assert.equal(r.calls.length, 3);
+});
+
+test('reader timeout aborts I/O, reports TIMEOUT and clears its timer', async () => {
+  let timeout, cleared = false;
+  const r = reader({ setTimeout(fn) { timeout = fn; return 1; }, clearTimeout() { cleared = true; },
+    fetcher: (target, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true });
+    }) });
+  const loading = r.read(); timeout();
+  await assert.rejects(loading, { code: 'TIMEOUT' }); assert.equal(cleared, true);
+});
+
+test('fresh legacy GraphQL and anonymous shadow/full representations retain all supported media', async () => {
+  const graph = reader({ payload: { id: '66', shortcode: 'ABC', __typename: 'GraphImage',
     display_url: 'https://scontent.cdninstagram.com/photo.jpg', dimensions: { width: 1080, height: 1350 } } });
-  b.request(); await b.settle();
-  assert.equal(b.requests.length, 0);
-  assert.equal(b.received[0].post?.items[0].type, 'photo');
-  assert.equal(b.received[0].post?.shortcode, 'ABC');
-});
-
-test('anonymous embedded scanning skips a source-less shadow and reads the complete same-post video', async () => {
+  assert.equal((await graph.read()).items[0].type, 'photo');
   const full = { ...photo(), __typename: 'XIGPolarisVideoMedia', id: 'POLARIS_66', media_type: 2,
     original_width: 720, original_height: 1280, has_audio: true,
     video_versions: [{ type: 101, url: 'https://video.xx.fbcdn.net/anonymous.mp4' }] };
-  const shadow = { code: 'ABC', pk: '66', media_type: 2, __typename: 'XIGPolarisVideoMedia' };
-  // The reader's bounded depth-first traversal encounters shadow first.
-  const b = bridge({ payload: { full, shadow } }); b.request(); await b.settle();
-  assert.equal(b.requests.length, 0);
-  assert.equal(b.received[0].post?.items[0].type, 'video');
-  assert.deepEqual(b.received[0].post.items[0].videoVersions, [
+  const r = reader({ payload: { full, shadow: { code: 'ABC', pk: '66', media_type: 2 } } });
+  assert.deepEqual((await r.read()).items[0].videoVersions, [
     { url: 'https://video.xx.fbcdn.net/anonymous.mp4', width: 0, height: 0 }]);
+  assert.equal(r.calls.length, 1);
 });
 
-test('invalid full embedded media stays fail-closed unless a complete same-source alternative validates', async () => {
+test('rejected full HTTP nodes remain fail-closed unless another complete selected representation validates', async () => {
   const invalid = { ...photo(), image_versions2: { candidates: [
     { url: 'https://attacker.invalid/image.jpg', width: 1080, height: 1350 }] } };
-  const fail = bridge({ payload: invalid }); fail.request(); await fail.settle();
-  assert.equal(fail.received[0].code, 'INVALID_RESPONSE');
-  assert.equal(fail.requests.length, 0);
-  const recover = bridge({ payload: { complete: photo(), invalid } }); recover.request(); await recover.settle();
-  assert.equal(recover.received[0].post?.items.length, 1);
-  assert.equal(recover.received[0].post?.id, '66');
-  assert.equal(recover.requests.length, 0);
-  const mismatch = bridge({ payload: { other: { ...photo(), code: 'ABD', pk: '67' }, invalid } });
-  mismatch.request(); await mismatch.settle();
-  assert.equal(mismatch.received[0].code, 'INVALID_RESPONSE');
-  assert.equal(mismatch.requests.length, 0);
+  const failed = reader({ payload: invalid });
+  await assert.rejects(failed.read(), { code: 'INVALID_RESPONSE' }); assert.equal(failed.calls.length, 1);
+  const good = reader({ payload: { complete: photo(), invalid } });
+  assert.equal((await good.read()).id, '66'); assert.equal(good.calls.length, 1);
 });
 
-test('incomplete carousel children never become an apparent cover-only success during embedded scanning', async () => {
-  const b = bridge({ payload: { ...photo(), media_type: 8, carousel_media_count: 2,
+test('incomplete HTTP carousel children never become an apparent cover-only success', async () => {
+  const r = reader({ payload: { ...photo(), media_type: 8, carousel_media_count: 2,
     carousel_media: [{ ...photo(), code: undefined, pk: '67' }, { pk: '68', media_type: 2 }] } });
-  b.request(); await b.settle();
-  assert.equal(b.received[0].code, 'INVALID_RESPONSE');
-  assert.equal(b.received[0].post, undefined);
-  assert.equal(b.requests.length, 0);
+  await assert.rejects(r.read(), { code: 'INVALID_RESPONSE' }); assert.equal(r.calls.length, 1);
 });
 
-test('a matching source-less shadow alone still allows the bound API fallback', async () => {
-  const b = bridge({ payload: { code: 'ABC', pk: '66', media_type: 2 } });
-  b.request(); await b.settle();
-  assert.deepEqual(b.requests, ['https://www.instagram.com/api/v1/media/66/info/']);
-  assert.equal(b.received[0].code, 'AUTH_REQUIRED');
+test('Gecko stream cleanup wrappers cannot override a successful read or AbortError', async () => {
+  for (const aborted of [false, true]) {
+    let finishRead, sent = false;
+    const wrapped = { get catch() { throw new Error('Permission denied to access property catch'); } };
+    const body = { getReader() { return {
+      read() {
+        if (aborted) return new Promise(resolve => { finishRead = resolve; });
+        if (sent) return Promise.resolve({ done: true });
+        sent = true; return Promise.resolve({ done: false, value: new TextEncoder().encode(html(photo())) });
+      },
+      cancel() { finishRead?.({ done: true }); return wrapped; }, releaseLock() {},
+    }; } };
+    const r = reader({ fetcher: async target => ({ url: target, status: 200, redirected: false,
+      headers: new Headers(), body }) });
+    const controller = new AbortController(), loading = r.read({ signal: controller.signal });
+    if (aborted) {
+      await new Promise(setImmediate); controller.abort(); await assert.rejects(loading, { name: 'AbortError' });
+    } else assert.equal((await loading).id, '66');
+  }
+});
+
+test('anonymous HTTP metadata explicitly negotiates HTML and preserves the complete mixed carousel', async () => {
+  const image = id => ({ pk: id, media_type: 1,
+    image_versions2: { candidates: [{ url: 'https://scontent.cdninstagram.com/anonymous.jpg' }] } });
+  const video = id => ({ pk: id, media_type: 2, has_audio: true,
+    video_versions: [{ type: 101, url: 'https://video.xx.fbcdn.net/anonymous.mp4' }] });
+  const full = { ...photo(), media_type: 8, carousel_media_count: 4,
+    carousel_media: [image('67'), video('68'), video('69'), image('70')] };
+  const r = reader({ fetcher: async (target, init) => {
+    if (target !== url) throw new TypeError('NetworkError when attempting to fetch resource');
+    return response(target, html(init.headers?.Accept === 'text/html' ? full : null));
+  } });
+  const post = await r.read();
+  assert.deepEqual(post.items.map(item => [item.id, item.type]),
+    [['67', 'photo'], ['68', 'video'], ['69', 'video'], ['70', 'photo']]);
+  assert.equal(r.calls.length, 1, 'complete negotiated HTML does not need an anonymous API request');
 });

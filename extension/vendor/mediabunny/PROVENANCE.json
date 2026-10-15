@@ -4,7 +4,7 @@
   "repository": "https://github.com/Vanilagy/mediabunny",
   "commit": "634186fd5e2dac946bf994a955680b85aceb7709",
   "license": "MPL-2.0",
-  "verifiedDate": "13-10-2026",
+  "verifiedDate": "15-10-2026",
   "packages": [
     {
       "name": "mediabunny",
@@ -37,7 +37,7 @@
     "bitRebuildVerified": false,
     "originalSha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68",
     "originalExactDownloadMatch": true,
-    "modification": "Deterministic parser bounds; scripts/patch-mediabunny.cjs; corresponding full MPL source files and PATCH.md are included",
+    "modification": "Deterministic parser bounds and readonly physical MP4 sample extent projection; scripts/patch-mediabunny.cjs; corresponding full MPL source files and PATCH.md are included",
     "transformRoundTripVerified": true
   },
   "files": [
@@ -50,16 +50,16 @@
     },
     {
       "path": "mediabunny.min.mjs",
-      "bytes": 646794,
-      "sha256": "25e53d0980fc16a1e06b7a89c18515a0ff327f376386b646bab6597b8c2819b5",
+      "bytes": 647016,
+      "sha256": "01c2aed114c87822d1024067912b4853583184dc39c8531370929c46ebaec9f5",
       "modified": true,
       "source": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm",
       "originalSha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68"
     },
     {
       "path": "isobmff-demuxer.ts",
-      "bytes": 120998,
-      "sha256": "c70ae561abf3703406f6a524b175c01733f465396aa2dae92fae408f578f3b6b",
+      "bytes": 121314,
+      "sha256": "9d49d1cddb4e50cc982316721d7a1d81e541d5feae0e404d1e6a046e396353bf",
       "modified": true,
       "source": "npm:mediabunny@1.51.0/src/isobmff/isobmff-demuxer.ts",
       "originalSha256": "bde5d41fdd4db0c4574be69e2e02f4732ade675366efaf030f52215a80eb76a8"
@@ -74,8 +74,8 @@
     },
     {
       "path": "PATCH.md",
-      "bytes": 3392,
-      "sha256": "2c762fd7f51f8b8d89592d899f98621ce633c46616c26f0d256015dab9a31a27",
+      "bytes": 4461,
+      "sha256": "901c60f3794d8ea0ba476dc860c59329ead793cbd5c921e6de75c8cae56e2c39",
       "modified": false,
       "source": "MendoSave local transformation documentation"
     },

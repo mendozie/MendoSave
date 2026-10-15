@@ -50,14 +50,7 @@
   "content_scripts": [
     {
       "matches": ["https://www.instagram.com/*"],
-      "js": ["instagram_source.js", "instagram_bridge.js"],
-      "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": false
-    },
-    {
-      "matches": ["https://www.instagram.com/*"],
-      "js": ["menu.js", "package_queue.js", "package_ui.js", "instagram_source.js", "instagram_media.js", "instagram.js"],
+      "js": ["menu.js", "package_queue.js", "package_ui.js", "instagram_source.js", "instagram_bridge.js", "instagram_media.js", "instagram.js"],
       "css": ["package_ui.css", "instagram.css"],
       "run_at": "document_idle",
       "world": "ISOLATED",
@@ -225,6 +218,12 @@
       "run_at": "document_idle",
       "world": "ISOLATED",
       "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["vendor/mediabunny/mediabunny.min.mjs"],
+      "matches": ["https://www.instagram.com/*"]
     }
   ],
   "content_security_policy": {

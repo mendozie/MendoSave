@@ -38,7 +38,7 @@ function fixture({ closeWriter, save, load, writeIndex } = {}) {
     const processorRuntime = { ...runtime, onMessage: { addListener(fn) { processorListener = fn; } }, onConnect: { addListener(fn) { this.listener = fn; } },
       connect({ name }) { const [client, server] = ports({ id: 'test', url }); server.name = name; host.connect(server); return client; },
       async sendMessage(message) {
-        if (message.t === 'mendosave-recovery-read') return { ok: true, entries };
+        if (message.t === 'mendosave-recovery-read') return { ok: true, entries, maxEntries: 320 };
         if (message.t === 'mendosave-recovery-write') { if (writeIndex) await writeIndex(); entries = message.entries; return { ok: true }; }
         if (message.t === 'mendosave-save') return save ? save(message) : { ok: true, id: 42 };
         if (message.t === 'mendosave-download-state') return { ok: true, state: downloadState, paused: true };

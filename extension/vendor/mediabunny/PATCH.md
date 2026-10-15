@@ -1,6 +1,6 @@
-# Local Mediabunny parser guards
+# Local Mediabunny parser guards and extent projection
 
-Updated: 13-10-2026. Upstream: Mediabunny 1.51.0, commit `634186fd5e2dac946bf994a955680b85aceb7709`, MPL-2.0. Original notices and LICENSE are retained.
+Updated: 15-10-2026. Upstream: Mediabunny 1.51.0, commit `634186fd5e2dac946bf994a955680b85aceb7709`, MPL-2.0. Original notices and LICENSE are retained.
 
 MendoSave modifies the pinned jsDelivr bundle and the corresponding three full MPL source files supplied here:
 
@@ -10,6 +10,8 @@ MendoSave modifies the pinned jsDelivr bundle and the corresponding three full M
 
 The budgets apply to materialized metadata tables/revisits and each retained fragment across tracks/runs. They are not caps on a whole recording's compact PCM sample count: a constant-size `stsz` charges one entry. Valid PCM rechunking and defaults-only fragments remain supported. Files exceeding the metadata budget fail explicitly.
 
+The two MP4 packet construction paths also expose the demuxer's existing physical sample extent as an own `packet.mendoMp4Extent` property. Its value is `Object.freeze({ offset, byteLength })`; `Object.defineProperty` leaves the property non-enumerable, non-writable and non-configurable. Regular samples use `sampleInfo.sampleOffset`/`sampleSize`; fragmented samples use `fragmentSample.byteOffset`/`byteSize`. Both metadata-only and actual-data packets pass through these construction points. This projection adds no parser, index or dependency and does not certify that a sample belongs to `mdat`: malformed container offsets are deliberately projected unchanged so callers can reject them against physical payload boundaries before trusting or saving media. Other containers and newly constructed packets receive no such property.
+
 `PROVENANCE.json` records original and modified hashes. The complete upstream source tree is available in the versioned [npm source archive](https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz) and [Git commit](https://github.com/Vanilagy/mediabunny/tree/634186fd5e2dac946bf994a955680b85aceb7709). To work with the modified TypeScript source tree, replace `src/isobmff/isobmff-demuxer.ts`, `src/isobmff/isobmff-misc.ts` and `src/adts/adts-reader.ts` with the full files supplied here. Their original relative imports are retained.
 
 The shipped bundle is obtained by deterministic local text transformation of the pinned original, without compiling TypeScript or changing the FFmpeg core. From the MendoSave repository, run:
@@ -18,4 +20,4 @@ The shipped bundle is obtained by deterministic local text transformation of the
 node scripts/patch-mediabunny.cjs <original-jsdelivr-bundle> <original-isobmff-demuxer.ts> <original-adts-reader.ts> <original-isobmff-misc.ts>
 ```
 
-The script checks all four original SHA-256 hashes and unique anchors before writing output. Regression tests reverse the transformations, verify the original hashes, and reapply them to reproduce the distributed files exactly. They also exercise the actual public `Input` parser using controlled valid/malformed media metadata; the allocation budget is scaled down only in the test copy. This verifies the transformation and parser guards. A bit-for-bit TypeScript compilation of the generated jsDelivr bundle was not performed.
+The script checks all four original SHA-256 hashes and unique anchors before writing output. Regression tests reverse the transformations, verify the original hashes, and reapply them to reproduce the distributed files exactly. They also exercise the actual public `Input` parser using controlled valid/malformed media metadata; the allocation budget is scaled down only in the resource-guard test copy. Extent tests use the shipped bundle unchanged and cover regular/fragmented MP4, metadata/actual packets, immutable property descriptors and raw projection of corrupted sample offsets. This verifies the transformation, parser guards and projection. A bit-for-bit TypeScript compilation of the generated jsDelivr bundle was not performed.

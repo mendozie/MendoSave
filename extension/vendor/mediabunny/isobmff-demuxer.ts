@@ -3161,6 +3161,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
 			sampleInfo.sampleSize,
 		);
 
+		Object.defineProperty(packet, "mendoMp4Extent", {
+			value: Object.freeze({ offset: sampleInfo.sampleOffset, byteLength: sampleInfo.sampleSize }),
+		});
+
 		this.packetToSampleIndex.set(packet, sampleIndex);
 
 		return packet;
@@ -3206,6 +3210,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
 			fragment.moofOffset + sampleIndex,
 			fragmentSample.byteSize,
 		);
+
+		Object.defineProperty(packet, "mendoMp4Extent", {
+			value: Object.freeze({ offset: fragmentSample.byteOffset, byteLength: fragmentSample.byteSize }),
+		});
 
 		this.packetToFragmentLocation.set(packet, { fragment, sampleIndex });
 

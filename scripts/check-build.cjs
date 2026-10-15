@@ -87,6 +87,7 @@ function checkBuild(root, target, version) {
   for (const name of [...(manifest.background?.scripts || []), manifest.background?.service_worker, manifest.action?.default_popup,
     ...Object.values(manifest.icons || {}), ...Object.values(manifest.action?.default_icon || {})].filter(Boolean)) reference(name);
   for (const script of manifest.content_scripts || []) for (const name of [...(script.js || []), ...(script.css || [])]) reference(name);
+  for (const resource of manifest.web_accessible_resources || []) for (const name of resource.resources || []) reference(name);
   for (const [name, bytes] of files) if (name.endsWith('.html')) {
     const text = bytes.toString('utf8');
     for (const match of text.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)) reference(match[1], name);

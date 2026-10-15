@@ -11,6 +11,7 @@
     INVALID_RESPONSE: 'Instagram вернул неподдержанные данные публикации',
     SOURCE_MISMATCH: 'ответ Instagram относится к другой публикации',
     RESPONSE_TOO_LARGE: 'данные Instagram превышают допустимый размер',
+    TIMEOUT: 'Instagram не ответил вовремя; повторите попытку',
   });
   function error(code) {
     const selected = Object.hasOwn(ERROR_TEXT, code) ? code : 'INVALID_RESPONSE';
@@ -152,6 +153,16 @@
       const edges = graph.edge_sidecar_to_children?.edges;
       if (graph.__typename === 'GraphSidecar' && !Array.isArray(edges)) throw error('INVALID_RESPONSE');
       if (edges !== undefined && !Array.isArray(edges)) throw error('INVALID_RESPONSE');
+      if (edges) {
+        const declared = graph.edge_sidecar_to_children;
+        if (declared.count !== undefined && (!Number.isSafeInteger(declared.count) || declared.count !== edges.length)) {
+          throw error('INVALID_RESPONSE');
+        }
+        if (declared.page_info != null && (!object(declared.page_info)
+          || (declared.page_info.has_next_page !== undefined && declared.page_info.has_next_page !== false))) {
+          throw error('INVALID_RESPONSE');
+        }
+      }
       return projection({ shortcode: expected.shortcode, id,
         username: graph.owner?.username ?? '', caption: graph.edge_media_to_caption?.edges?.[0]?.node?.text ?? '',
         items: edges ? edges.map((edge, index) => graphqlItem(edge?.node, index)) : [graphqlItem(graph, 0)] }, expected);
