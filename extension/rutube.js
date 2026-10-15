@@ -60,6 +60,7 @@
 
   let downloadInProgress = false;
   let menu;
+  const menuState = MendoMenu.createState();
   let menuAnchor;
   let toast;
 
@@ -306,22 +307,7 @@
   // ---- UI ------------------------------------------------------------------
 
   function createIcon() {
-    const namespace = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(namespace, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(namespace, 'circle');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16.9');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#35d477');
-    ring.setAttribute('stroke-width', '2.2');
-    const arrows = document.createElementNS(namespace, 'path');
-    arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
-    svg.append(ring, arrows);
-    return svg;
+    return MendoMenu.icon(document);
   }
 
   let toastRevision = 0;
@@ -352,6 +338,7 @@
   }
 
   function closeMenu(restoreFocus = false) {
+    menuState.remember(menu);
     menu?.remove();
     menu = undefined;
     if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
@@ -372,16 +359,16 @@
     menu = document.createElement('div');
     const openedMenu = menu;
     const videoId = videoIdFromPage();
+    menuState.route(location.href);
+    const sourceKey = `${location.href}|${videoId}`;
+    const snapshot = menuState.get(sourceKey);
     const current = () => {
       if (menu !== openedMenu) return false;
       if (videoIdFromPage() !== videoId) { closeMenu(); return false; }
       return true;
     };
     menu.className = 'mendosave-rt-menu';
-    const heading = document.createElement('div');
-    heading.className = 'mendosave-rt-head';
-    heading.textContent = `MendoSave v${chrome.runtime.getManifest().version}`;
-    menu.append(heading);
+    MendoMenu.decorate(menu, { title: 'Rutube', subtitle: 'Сохранить видео', close: () => closeMenu(true) });
     const loading = document.createElement('div');
     loading.className = 'mendosave-rt-item mendosave-rt-muted';
     loading.textContent = 'Читаю список качеств…';
@@ -392,12 +379,12 @@
 
     try {
       if (!videoId) throw new Error('не удалось определить идентификатор видео');
-      const options = await fetchPlayOptions(videoId);
+      const options = snapshot ? snapshot.options : await fetchPlayOptions(videoId);
       if (!current()) return;
-      const master = await fetchText(options.master);
+      const variants = snapshot ? snapshot.variants : parseMasterPlaylist(await fetchText(options.master), options.master);
       if (!current()) return;
-      const variants = parseMasterPlaylist(master, options.master);
       loading.remove();
+      MendoMenu.decorate(menu, { title: 'Rutube', subtitle: options.title, close: () => closeMenu(true) });
       if (options.isLive) {
         const live = document.createElement('div');
         live.className = 'mendosave-rt-item mendosave-rt-muted';
@@ -406,6 +393,7 @@
         return;
       }
       if (!variants.length) throw new Error('Rutube не предложил ни одного качества');
+      const qualityItems = [];
       for (const variant of variants) {
         const item = document.createElement('div');
         item.className = 'mendosave-rt-item';
@@ -425,7 +413,9 @@
           void startDownload(variant, options);
         });
         menu.append(item);
+        qualityItems.push(item);
       }
+      MendoMenu.compact(menu, { groups: [{ title: 'Видео', items: qualityItems }], onToggle: positionMenu });
       if (variants.length > 1) globalThis.MendoPackageUI?.add(menu, {
         title: options.title, source: `rutube:${videoId}`, close: closeMenu,
         back: async () => {
@@ -437,12 +427,17 @@
         options: variants.map((variant) => ({
           id: `rutube-${variant.height}-${variant.bandwidth}`, label: `${variant.height}p MP4`,
           compatibilityKey: `${variant.height}:${variant.bandwidth}`, group: 'Видео',
+          family: 'video', title: 'Видео', detail: `${variant.height}p · MP4`,
           run: () => startDownload(variant, options),
         })),
       });
       globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-rt-item[role="button"],.mendo-package-open');
+      menuState.set(sourceKey, { options, variants });
+      menuState.attach(menu, sourceKey, JSON.stringify(variants.map(variant => [variant.height, variant.bandwidth])));
+      positionMenu();
     } catch (error) {
       if (!current()) return;
+      menuState.clear();
       loading.remove();
       const failed = document.createElement('div');
       failed.className = 'mendosave-rt-item mendosave-rt-muted';
@@ -456,7 +451,7 @@
     const button = document.getElementById(BUTTON_ID);
     if (!button || !menu) return;
     const box = button.getBoundingClientRect();
-    const width = 260;
+    const width = menu.getBoundingClientRect().width || 320;
     const left = Math.max(8, Math.min(window.innerWidth - width - 8, box.left + box.width / 2 - width / 2));
     menu.style.left = `${left}px`;
     // Open downwards when there is not enough room above the button.
@@ -530,6 +525,7 @@
       }
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(9000);
+      menuState.clear();
       if (bundled) throw error;
       await reportError('rutube/download', error, { height: variant?.height, page: location.href });
     } finally {
@@ -582,6 +578,7 @@
   }
 
   function ensureButton() {
+    menuState.route(location.href);
     if (document.getElementById(BUTTON_ID)) {
       if (isShorts()) {
         // The carousel swaps cards; keep the button on the active one.

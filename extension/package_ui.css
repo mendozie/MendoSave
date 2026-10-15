@@ -5,10 +5,13 @@
 .mendo-package-dialog {
   position: fixed; inset: 12px; height: fit-content; z-index: 2147483647;
   box-sizing: border-box; width: min(480px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
-  overflow: auto; margin: auto; padding: 20px; border: 1px solid #3e6551; border-radius: 12px;
-  background: #171b19; color: #f1f5f2; font: 14px/1.45 system-ui, sans-serif;
+  display: flex; flex-direction: column; overflow: hidden; margin: auto; padding: 0;
+  border: 1px solid #405347; border-radius: 12px; color-scheme: dark;
+  background: #1b201d; color: #f1f5f2; font: 13px/1.4 system-ui, sans-serif;
   box-shadow: 0 8px 48px #0008;
 }
+.mendo-package-dialog:not([open]) { display: none; }
+.mendo-package-dialog *, .mendo-package-dialog *::before { box-sizing: border-box; }
 .mendo-package-resume {
   position: fixed; left: 20px; bottom: 20px; z-index: 2147483646;
   display: flex; align-items: center; gap: 12px;
@@ -22,30 +25,60 @@
 .mendo-package-resume > .mendo-package-close { flex: none; width: 32px; height: 32px; font-size: 22px; line-height: 1; text-align: center; }
 .mendo-package-resume button:disabled { opacity: .5; cursor: default; }
 .mendo-package-resume[hidden] { display: none !important; }
-.mendo-package-dialog h2 { font: 600 19px/1.3 system-ui, sans-serif; margin: 0 0 5px; }
-.mendo-package-dialog p { margin: 12px 0; overflow-wrap: anywhere; color: #ced8d1; }
-.mendo-package-header { display: grid; gap: 12px; }
-.mendo-package-windowbar { display: flex; align-items: center; gap: 10px; }
-.mendo-package-drag-handle { flex: 1; min-width: 0; min-height: 28px; cursor: grab; user-select: none; touch-action: none; }
-.mendo-package-drag-handle::before { content: '⋮⋮'; display: block; text-align: center; color: #6c8e79; font-size: 18px; }
+.mendo-package-dialog h2 { flex: none; font: 650 15px/1.3 system-ui, sans-serif; margin: 0; white-space: nowrap; }
+.mendo-package-dialog p { margin: 0; overflow-wrap: anywhere; color: #ced8d1; }
+.mendo-package-header { flex: none; display: grid; grid-template-columns: 30px minmax(0, 1fr) 24px 30px; align-items: center; gap: 8px; min-height: 48px; padding: 7px 10px; border-bottom: 1px solid #36443a; }
+.mendo-package-heading { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.mendo-package-heading > h2, .mendo-package-heading > .mendo-package-source { line-height: 20px; }
+.mendo-package-source { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aada2; font-size: 12px; }
+.mendo-package-source::before { content: '· '; }
+.mendo-package-drag-handle { display: grid; place-items: center; width: 24px; height: 30px; color: #799083; cursor: grab; user-select: none; touch-action: none; }
 .mendo-package-dragging .mendo-package-drag-handle { cursor: grabbing; }
-.mendo-package-header p { margin: 0; }
-.mendo-package-header button { justify-self: start; padding: 2px 0; border: 0; background: transparent; color: #b7ddc6; font: inherit; cursor: pointer; }
-.mendo-package-header .mendo-package-close { flex: none; width: 32px; height: 32px; padding: 0; color: #ecfff3; font-size: 22px; line-height: 1; }
-.mendo-package-choices { margin-top: 16px; padding: 12px 0 16px; border-top: 1px solid #34443a; border-bottom: 1px solid #34443a; }
-.mendo-package-choices [role="status"] { font-size: 13px; }
-.mendo-package-list { display: grid; gap: 3px; }
-.mendo-package-group { margin: 9px 5px 1px; color: #a8ccb7; font: 600 12px/1.4 system-ui, sans-serif; }
-.mendo-package-group:first-child { margin-top: 0; }
-.mendo-package-list label { display: flex; align-items: flex-start; gap: 10px; padding: 9px 5px; cursor: pointer; }
-.mendo-package-list span { overflow-wrap: anywhere; }
-.mendo-package-list input { flex: none; width: 17px; height: 17px; margin: 2px 0; accent-color: #35d477; }
-.mendo-package-dialog progress { width: 100%; height: 12px; accent-color: #35d477; }
-.mendo-package-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.mendo-package-actions button { flex: 1 1 120px; padding: 10px; color: #ecfff3; background: #21583b; border: 1px solid #41835d; border-radius: 7px; font: inherit; cursor: pointer; }
-.mendo-package-actions [data-action="hide"] { flex: 0 1 auto; background: #282f2b; border-color: #5b6860; }
+.mendo-package-header button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #c2d4c9; font: 20px/1 system-ui, sans-serif; cursor: pointer; }
+.mendo-package-header button:hover:not(:disabled) { background: #303c34; }
+.mendo-package-header svg { display: block; width: 18px; height: 18px; }
+.mendo-package-header [data-action="back"] { display: grid; place-items: center; border: 1px solid #405347; border-radius: 8px; background: #26332a; }
+.mendo-package-header [data-action="back"] svg { width: 19px; height: 19px; }
+.mendo-package-choices { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.mendo-package-list { display: flex; flex-direction: column; flex: 1; min-height: 0; max-height: 420px; gap: 7px; padding: 10px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #536b5c #1b201d; }
+.mendo-package-card { flex: none; min-width: 0; border: 1px solid #3b4b40; border-radius: 8px; background: #232c26; overflow: hidden; }
+.mendo-package-primary { display: flex; align-items: center; gap: 8px; padding-right: 10px; min-width: 0; }
+.mendo-package-list label { display: flex; align-items: center; gap: 9px; padding: 10px; cursor: pointer; min-width: 0; }
+.mendo-package-primary > label { flex: 1; padding-right: 0; }
+.mendo-package-option-copy { display: flex; flex-direction: column; min-width: 0; color: #b7c9bd; font-size: 12px; }
+.mendo-package-option-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mendo-package-group { color: #edf5ef; font: 600 13px/1.4 system-ui, sans-serif; margin-bottom: 2px; }
+.mendo-package-thumbnail { position: relative; display: grid; place-items: center; flex: 0 0 42px; width: 42px; height: 42px; overflow: hidden; border: 1px solid #485f50; border-radius: 5px; background: #303f34; color: #a0c6ad; font-size: 24px; }
+.mendo-package-thumbnail img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.mendo-package-list input { flex: none; width: 17px; height: 17px; margin: 0; accent-color: #4dda8c; cursor: pointer; }
+.mendo-package-primary select { flex: 0 1 112px; width: 112px; max-width: 40%; min-width: 65px; padding: 6px 5px; border: 1px solid #53695b; border-radius: 5px; background: #303c34; color: #e9f5ed; font: inherit; text-overflow: ellipsis; }
+.mendo-package-variants { border-top: 1px solid #37493d; font-size: 12px; }
+.mendo-package-variants summary { padding: 6px 10px; color: #a5c6b1; cursor: pointer; }
+.mendo-package-variants label { padding: 7px 12px; border-top: 1px solid #334137; }
+.mendo-package-footer { flex: none; padding: 10px 12px 12px; border-top: 1px solid #3d4f43; background: #1d251f; }
+.mendo-package-selection-tools { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; font-size: 12px; }
+.mendo-package-selection-tools [data-role="selection-count"] { margin-right: auto; white-space: nowrap; color: #c0d7c8; }
+.mendo-package-selection-tools button { padding: 2px 0; border: 0; background: none; color: #a9d8ba; font: inherit; white-space: nowrap; cursor: pointer; }
+.mendo-package-footer [role="status"] { margin: 0 0 5px; font-size: 11px; color: #9eafa4; }
+.mendo-package-dialog progress { display: block; width: 100%; height: 5px; margin: 0 0 9px; accent-color: #4dda8c; }
+.mendo-package-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.mendo-package-actions button { flex: 1 1 120px; min-width: 0; padding: 9px 8px; color: #eafff0; background: #29613e; border: 1px solid #4d9265; border-radius: 6px; font: 600 12px/1.3 system-ui, sans-serif; cursor: pointer; }
+.mendo-package-actions [data-action="hide"] { flex: 0 1 auto; background: #2c352f; border-color: #526359; font-weight: 400; }
 .mendo-package-actions [data-action="cancel"] { background: #3a2727; border-color: #885353; }
 .mendo-package-dialog [hidden] { display: none !important; }
-.mendo-package-dialog button:disabled { opacity: .5; cursor: default; }
+.mendo-package-dialog button:disabled, .mendo-package-dialog select:disabled, .mendo-package-dialog input:disabled { opacity: .5; cursor: default; }
 .mendo-package-dialog :focus-visible, .mendo-package-open:focus-visible, .mendo-package-resume button:focus-visible { outline: 2px solid #78e4a8; outline-offset: 3px; }
-@media (max-width: 400px) { .mendo-package-dialog { padding: 14px; } .mendo-package-actions button { flex-basis: 100%; } }
+@media (max-width: 400px) {
+  .mendo-package-header { gap: 5px; padding-inline: 7px; }
+  .mendo-package-dialog h2 { font-size: 14px; }
+  .mendo-package-header { grid-template-columns: 30px minmax(0, 1fr) 20px 30px; }
+  .mendo-package-drag-handle { width: 20px; }
+  .mendo-package-list { padding: 8px; gap: 6px; }
+  .mendo-package-list label { gap: 7px; padding: 8px; }
+  .mendo-package-primary { gap: 6px; padding-right: 8px; }
+  .mendo-package-thumbnail { flex-basis: 34px; width: 34px; height: 38px; }
+  .mendo-package-primary select { flex-basis: 94px; width: 94px; font-size: 12px; }
+  .mendo-package-footer { padding: 9px; }
+  .mendo-package-selection-tools { gap: 9px; font-size: 11px; }
+  .mendo-package-actions button { flex-basis: 95px; padding-inline: 6px; font-size: 11px; }
+}

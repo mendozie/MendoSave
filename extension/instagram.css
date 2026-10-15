@@ -1,0 +1,41 @@
+.mendosave-instagram-btn {
+  position: fixed; z-index: 2147483600; box-sizing: border-box;
+  display: grid; place-items: center; width: 44px; height: 44px; padding: 5px;
+  border: 1px solid #51695b66; border-radius: 50%; background: #1b241fd9;
+  color: #35d477; box-shadow: 0 3px 12px #0003; cursor: pointer;
+}
+.mendosave-instagram-btn svg { display: block; width: 32px; height: 32px; }
+.mendosave-instagram-btn:hover { background: #294333; border-color: #35d47788; }
+.mendosave-instagram-btn:focus-visible { outline: 2px solid #78e4a8; outline-offset: 3px; }
+.mendosave-instagram-menu.mendo-menu {
+  position: fixed; z-index: 2147483601; width: 360px; max-height: min(700px, calc(100dvh - 16px));
+  padding: 9px; border-radius: 16px;
+}
+.mendosave-instagram-status { margin: 8px 7px; color: #a6b4ab; font-size: 11px; overflow-wrap: anywhere; }
+.mendosave-instagram-card { margin: 8px 0; padding: 10px; border: 1px solid #3b4b40; border-radius: 11px; background: #252d27; }
+.mendosave-instagram-group { margin: 0 0 7px; color: #afc1b6; font: 600 11px/1.4 system-ui, sans-serif; }
+.mendosave-instagram-item,.mendosave-instagram-cancel {
+  display: flex; align-items: center; gap: 10px; box-sizing: border-box; width: 100%; min-width: 0;
+  margin: 3px 0; padding: 9px; border: 0; border-radius: 8px;
+  color: #eef5f0; background: #ffffff05; font: inherit; text-align: left;
+  cursor: pointer; overflow-wrap: anywhere;
+}
+.mendosave-instagram-item > svg { flex: none; width: 28px; height: 28px; }
+.mendosave-instagram-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.mendosave-instagram-action { font-size: 13px; font-weight: 600; }
+.mendosave-instagram-detail { color: #9fb7a8; font-size: 11px; }
+.mendosave-instagram-quality-label { display: flex; align-items: center; gap: 9px; margin-top: 6px; padding-left: 9px; color: #a7b6ad; font-size: 11px; }
+.mendosave-instagram-quality { flex: 1; min-width: 0; max-width: 100%; padding: 7px; border: 1px solid #4e6657; border-radius: 7px; color: #dfede4; background: #303d34; font: inherit; }
+.mendosave-instagram-extras-toggle { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; padding: 10px 8px; font-size: 12px; }
+.mendosave-instagram-extras-toggle svg { width: 16px; height: 16px; }
+.mendosave-instagram-extras-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.mendosave-instagram-extras { padding: 0 3px 5px; }
+.mendosave-instagram-extra { flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px; font-size: 12px; }
+.mendosave-instagram-extra small { color: #9fb7a8; font-size: 11px; }
+.mendosave-instagram-cancel { margin-top: 7px; background: #4b2b2b; color: #ffe3e3; justify-content: center; }
+.mendosave-instagram-item:hover { background: #ffffff0d; }
+.mendosave-instagram-menu :is(button,select):disabled { opacity: .5; cursor: default; }
+@media (max-width: 420px) {
+  .mendosave-instagram-menu.mendo-menu { padding: 7px; }
+  .mendosave-instagram-card { padding: 8px; }
+}

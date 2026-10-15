@@ -7,6 +7,8 @@ const originals = {
   mp4: 'bde5d41fdd4db0c4574be69e2e02f4732ade675366efaf030f52215a80eb76a8',
   adts: 'b2269b6e2218c16715ad33470560428e4cbab5c8e7c8301edaee6ace5564c2d3',
   misc: 'b15f691d7d9b17fe518fe9afd678eaa6d2f67eec961cb7a9257cc1c54c9ab4ec',
+  flac: '7895b67f19d0bee698b1d9227616ea75589330bb0e5adafeee972f6759194c7a',
+  codec: '77f2b6736f24e691ebb1d62b5dee321e8284069857ed5b1c04d2fdbc7fa27519',
 };
 const edits = {
   bundle: [
@@ -50,7 +52,32 @@ const edits = {
     ['\tconst dataSize = view.getUint32(pos);\n\tpos += 4;\n',
       '\tconst dataSize = view.getUint32(pos);\n\tpos += 4;\n\tif (dataSize > contents.length - pos) throw new Error("Invalid MP4 encryption metadata");\n'],
   ],
+  flac: [
+    ['\t\t\t\tif (packetIndex === -1) {\n\t\t\t\t\tawait this.demuxer.advanceReader();',
+      '\t\t\t\tif (packetIndex === -1) {\n\t\t\t\t\tif (this.demuxer.lastSampleLoaded) return null;\n\t\t\t\t\tawait this.demuxer.advanceReader();'],
+  ],
+  codec: [
+    ['\tconst readLeb128 = (): number | null => {', '\tconst readLeb128 = (): number => {'],
+    ['\t\tfor (let i = 0; i < 8; i++) {\n\t\t\tconst byte = bitstream.readAlignedByte();\n\n\t\t\tvalue |= ((byte & 0x7f) << (i * 7));',
+      '\t\tfor (let i = 0; i < 8; i++) {\n\t\t\tif (bitstream.getBitsLeft() < 8) throw new Error("Invalid AV1 OBU size");\n\t\t\tconst byte = bitstream.readAlignedByte();\n\n\t\t\tvalue += (byte & 0x7f) * 2 ** (i * 7);\n\t\t\tif (value >= 2 ** 32 - 1) throw new Error("Invalid AV1 OBU size");'],
+    ['\t\t\tif (i === 7 && (byte & 0x80)) {\n\t\t\t\treturn null;\n\t\t\t}',
+      '\t\t\tif (i === 7 && (byte & 0x80)) {\n\t\t\t\tthrow new Error("Invalid AV1 OBU size");\n\t\t\t}'],
+    ['\t\t// Spec requirement\n\t\tif (value >= 2 ** 32 - 1) {\n\t\t\treturn null;\n\t\t}\n\n\t\treturn value;', '\t\treturn value;'],
+    ['\t\tif (obuExtension) {\n\t\t\tbitstream.skipBits(8);',
+      '\t\tif (obuExtension) {\n\t\t\tif (bitstream.getBitsLeft() < 8) throw new Error("Invalid AV1 OBU size");\n\t\t\tbitstream.skipBits(8);'],
+    ['\t\t\tconst obuSizeValue = readLeb128();\n\t\t\tif (obuSizeValue === null) return; // It was invalid\n\t\t\tobuSize = obuSizeValue;', '\t\t\tobuSize = readLeb128();'],
+    ['\t\tassert(bitstream.pos % 8 === 0);\n\n\t\tyield {\n\t\t\ttype: obuType,',
+      '\t\tif (obuSize > Math.floor(bitstream.getBitsLeft() / 8)) throw new Error("Invalid AV1 OBU size");\n\t\tassert(bitstream.pos % 8 === 0);\n\n\t\tyield {\n\t\t\ttype: obuType,'],
+  ],
 };
+edits.bundle.push([
+  'if(s===-1){await this.demuxer.advanceReader();continue}',
+  'if(s===-1){if(this.demuxer.lastSampleLoaded)return null;await this.demuxer.advanceReader();continue}',
+]);
+edits.bundle.push([
+  'io=function*(i){const e=new j(i),t=()=>{let r=0;for(let s=0;s<8;s++){const n=e.readAlignedByte();if(r|=(n&127)<<s*7,!(n&128))break;if(s===7&&n&128)return null}return r>=2**32-1?null:r};for(;e.getBitsLeft()>=8;){e.skipBits(1);const r=e.readBits(4),s=e.readBits(1),n=e.readBits(1);e.skipBits(1),s&&e.skipBits(8);let a;if(n){const o=t();if(o===null)return;a=o}else a=Math.floor(e.getBitsLeft()/8);p(e.pos%8===0),yield{type:r,data:i.subarray(e.pos/8,e.pos/8+a)},e.skipBits(a*8)}}',
+  'io=function*(i){const e=new j(i),t=()=>{let r=0;for(let s=0;s<8;s++){if(e.getBitsLeft()<8)throw new Error("Invalid AV1 OBU size");const n=e.readAlignedByte();r+=(n&127)*2**(s*7);if(r>=2**32-1)throw new Error("Invalid AV1 OBU size");if(!(n&128))break;if(s===7)throw new Error("Invalid AV1 OBU size")}return r};for(;e.getBitsLeft()>=8;){e.skipBits(1);const r=e.readBits(4),s=e.readBits(1),n=e.readBits(1);e.skipBits(1);if(s){if(e.getBitsLeft()<8)throw new Error("Invalid AV1 OBU size");e.skipBits(8)}const a=n?t():Math.floor(e.getBitsLeft()/8);if(a>Math.floor(e.getBitsLeft()/8))throw new Error("Invalid AV1 OBU size");p(e.pos%8===0),yield{type:r,data:i.subarray(e.pos/8,e.pos/8+a)},e.skipBits(a*8)}}',
+]);
 // Charge retained physical tables and revisits before allocation/iteration.
 // One demuxer budget spans boxes and tracks; compact constant-size tables
 // charge one entry regardless of their logical sample count.
@@ -122,6 +149,40 @@ for (const [kind, charge] of Object.entries({ stts: 'entryCount', ctts: 'entryCo
   const anchor = `${prefix}${skip}${extra}\t\t\t\tconst entryCount = readU32Be(slice);`;
   edits.mp4.push([anchor, `${anchor}\n\t\t\t\tmendoClaimMp4Table(this, ${charge});`]);
 }
+// Project the demuxer's existing physical sample extent without introducing a
+// second index or treating container metadata as validated media ownership.
+edits.bundle.push([
+  'return this.packetToSampleIndex.set(c,e),c',
+  'return Object.defineProperty(c,"mendoMp4Extent",{value:Object.freeze({offset:s.sampleOffset,byteLength:s.sampleSize})}),this.packetToSampleIndex.set(c,e),c',
+]);
+edits.mp4.push([
+  '\t\tthis.packetToSampleIndex.set(packet, sampleIndex);',
+  '\t\tObject.defineProperty(packet, "mendoMp4Extent", {\n\t\t\tvalue: Object.freeze({ offset: sampleInfo.sampleOffset, byteLength: sampleInfo.sampleSize }),\n\t\t});\n\n\t\tthis.packetToSampleIndex.set(packet, sampleIndex);',
+]);
+edits.bundle.push([
+  'return this.packetToFragmentLocation.set(l,{fragment:e,sampleIndex:t}),l',
+  'return Object.defineProperty(l,"mendoMp4Extent",{value:Object.freeze({offset:n.byteOffset,byteLength:n.byteSize})}),this.packetToFragmentLocation.set(l,{fragment:e,sampleIndex:t}),l',
+]);
+edits.mp4.push([
+  '\t\tthis.packetToFragmentLocation.set(packet, { fragment, sampleIndex });',
+  '\t\tObject.defineProperty(packet, "mendoMp4Extent", {\n\t\t\tvalue: Object.freeze({ offset: fragmentSample.byteOffset, byteLength: fragmentSample.byteSize }),\n\t\t});\n\n\t\tthis.packetToFragmentLocation.set(packet, { fragment, sampleIndex });',
+]);
+// Bound regular MP4 lookup work by the normalized physical sample table.
+// One lazy prefix index also avoids rescanning a whole chunk for each packet.
+edits.bundle.push(
+  ['const MENDO_MAX_EXPANDED_MP4_SAMPLES=1000000;\n',
+    'const MENDO_MAX_EXPANDED_MP4_SAMPLES=1000000;\nconst MENDO_MP4_SAMPLE_SIZE_PREFIXES=new WeakMap();\n'],
+  ['let g=0,m=f;if(i.sampleSizes.length===1)m+=c*(e-h),g+=c*u.samplesPerChunk;else for(let y=h;y<h+u.samplesPerChunk;y++){const k=i.sampleSizes[y];y<e&&(m+=k),g+=k}',
+    'const mendoEnd=h+u.samplesPerChunk;if(!Number.isSafeInteger(d)||d<0||d>=i.chunkOffsets.length||!Number.isSafeInteger(h)||h<0||!Number.isSafeInteger(u.samplesPerChunk)||u.samplesPerChunk<1||!Number.isSafeInteger(mendoEnd)||!Number.isSafeInteger(e)||e<h||e>=mendoEnd)throw new Error("Invalid MP4 chunk range");let g=0,m=f;if(i.sampleSizes.length===1)m+=c*(e-h),g+=c*u.samplesPerChunk;else{if(mendoEnd>i.sampleSizes.length||i.sampleSizes.length>MENDO_MAX_EXPANDED_MP4_SAMPLES*4)throw new Error("Invalid MP4 chunk range");let mendoPrefix=MENDO_MP4_SAMPLE_SIZE_PREFIXES.get(i);if(!mendoPrefix){mendoPrefix=new Float64Array(i.sampleSizes.length+1);for(let mendoIndex=0;mendoIndex<i.sampleSizes.length;mendoIndex++){const mendoSum=mendoPrefix[mendoIndex]+i.sampleSizes[mendoIndex];if(!Number.isSafeInteger(mendoSum)||mendoSum<mendoPrefix[mendoIndex])throw new Error("Invalid MP4 chunk range");mendoPrefix[mendoIndex+1]=mendoSum}MENDO_MP4_SAMPLE_SIZE_PREFIXES.set(i,mendoPrefix)}m+=mendoPrefix[e]-mendoPrefix[h];g=mendoPrefix[mendoEnd]-mendoPrefix[h]}'],
+);
+edits.mp4.push(
+  ['const getSampleInfo = (sampleTable: SampleTable, sampleIndex: number): SampleInfo | null => {',
+    'const MENDO_MP4_SAMPLE_SIZE_PREFIXES = new WeakMap<SampleTable, Float64Array>();\n\nconst getSampleInfo = (sampleTable: SampleTable, sampleIndex: number): SampleInfo | null => {'],
+  ['\tlet chunkSize = 0;\n\tlet sampleOffset = chunkOffset;',
+    '\tconst endSampleIndexOfChunk = startSampleIndexOfChunk + chunkEntry.samplesPerChunk;\n\tif (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= sampleTable.chunkOffsets.length\n\t\t|| !Number.isSafeInteger(startSampleIndexOfChunk) || startSampleIndexOfChunk < 0\n\t\t|| !Number.isSafeInteger(chunkEntry.samplesPerChunk) || chunkEntry.samplesPerChunk < 1\n\t\t|| !Number.isSafeInteger(endSampleIndexOfChunk) || !Number.isSafeInteger(sampleIndex)\n\t\t|| sampleIndex < startSampleIndexOfChunk || sampleIndex >= endSampleIndexOfChunk) {\n\t\tthrow new Error("Invalid MP4 chunk range");\n\t}\n\tlet chunkSize = 0;\n\tlet sampleOffset = chunkOffset;'],
+  ['\t\tfor (let i = startSampleIndexOfChunk; i < startSampleIndexOfChunk + chunkEntry.samplesPerChunk; i++) {\n\t\t\tconst sampleSize = sampleTable.sampleSizes[i]!;\n\n\t\t\tif (i < sampleIndex) {\n\t\t\t\tsampleOffset += sampleSize;\n\t\t\t}\n\t\t\tchunkSize += sampleSize;\n\t\t}',
+    '\t\tif (endSampleIndexOfChunk > sampleTable.sampleSizes.length\n\t\t\t|| sampleTable.sampleSizes.length > MENDO_MAX_EXPANDED_MP4_SAMPLES * 4) {\n\t\t\tthrow new Error("Invalid MP4 chunk range");\n\t\t}\n\t\tlet prefix = MENDO_MP4_SAMPLE_SIZE_PREFIXES.get(sampleTable);\n\t\tif (!prefix) {\n\t\t\tprefix = new Float64Array(sampleTable.sampleSizes.length + 1);\n\t\t\tfor (let i = 0; i < sampleTable.sampleSizes.length; i++) {\n\t\t\t\tconst sum = prefix[i]! + sampleTable.sampleSizes[i]!;\n\t\t\t\tif (!Number.isSafeInteger(sum) || sum < prefix[i]!) {\n\t\t\t\t\tthrow new Error("Invalid MP4 chunk range");\n\t\t\t\t}\n\t\t\t\tprefix[i + 1] = sum;\n\t\t\t}\n\t\t\tMENDO_MP4_SAMPLE_SIZE_PREFIXES.set(sampleTable, prefix);\n\t\t}\n\t\tsampleOffset += prefix[sampleIndex]! - prefix[startSampleIndexOfChunk]!;\n\t\tchunkSize = prefix[endSampleIndexOfChunk]! - prefix[startSampleIndexOfChunk]!;'],
+);
 function hash(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 function transform(kind, bytes, reverse = false) {
   let text = bytes.toString('utf8');
@@ -134,12 +195,12 @@ function transform(kind, bytes, reverse = false) {
 }
 if (require.main === module) {
   const inputs = process.argv.slice(2);
-  if (inputs.length !== 4) throw new Error('Usage: node scripts/patch-mediabunny.cjs <original-bundle> <original-isobmff-demuxer.ts> <original-adts-reader.ts> <original-isobmff-misc.ts>');
+  if (inputs.length !== 6) throw new Error('Usage: node scripts/patch-mediabunny.cjs <original-bundle> <original-isobmff-demuxer.ts> <original-adts-reader.ts> <original-isobmff-misc.ts> <original-flac-demuxer.ts> <original-codec-data.ts>');
   const area = path.resolve(__dirname, '../extension/vendor/mediabunny');
-  const outputs = ['bundle', 'mp4', 'adts', 'misc'].map((kind, index) => {
+  const outputs = ['bundle', 'mp4', 'adts', 'misc', 'flac', 'codec'].map((kind, index) => {
     const bytes = fs.readFileSync(inputs[index]);
     if (hash(bytes) !== originals[kind]) throw new Error(`Unexpected original ${kind} hash`);
-    return { file: { bundle: 'mediabunny.min.mjs', mp4: 'isobmff-demuxer.ts', adts: 'adts-reader.ts', misc: 'isobmff-misc.ts' }[kind], bytes: transform(kind, bytes) };
+    return { file: { bundle: 'mediabunny.min.mjs', mp4: 'isobmff-demuxer.ts', adts: 'adts-reader.ts', misc: 'isobmff-misc.ts', flac: 'flac-demuxer.ts', codec: 'codec-data.ts' }[kind], bytes: transform(kind, bytes) };
   });
   for (const output of outputs) fs.writeFileSync(path.join(area, output.file), output.bytes);
 }

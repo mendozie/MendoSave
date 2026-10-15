@@ -57,6 +57,16 @@ test('the processor accesses recovery storage through runtime while a content pa
   }
 });
 
+test('recovery publishes its finite capacity and rejects an oversized replacement without losing the saved index', async () => {
+  const browser = browserContext(), sender = browser.processorSender();
+  const entries = Array.from({ length: 320 }, (_, index) => ({ id: `ready${index}.bin`, filename: `ready${index}.txt`, bytes: 1, manualOnly: true }));
+  assert.equal((await browser.message({ t: 'mendosave-recovery-write', entries }, sender)).ok, true);
+  const read = await browser.message({ t: 'mendosave-recovery-read' }, sender);
+  assert.equal(read.maxEntries, 320);
+  assert.equal((await browser.message({ t: 'mendosave-recovery-write', entries: [...entries, { id: 'extra.bin', filename: 'extra.txt', bytes: 1 }] }, sender)).ok, false);
+  assert.deepEqual(JSON.parse(JSON.stringify((await browser.message({ t: 'mendosave-recovery-read' }, sender)).entries)), entries);
+});
+
 test('subtitle data URLs are saved by the bundled Blob host instead of downloads.download', async () => {
   const browser = browserContext({ downloads: {
     async download({ url }) { assert.equal(url.startsWith('data:'), false); return 42; },

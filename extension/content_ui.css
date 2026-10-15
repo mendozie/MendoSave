@@ -24,12 +24,14 @@
 .mendosave-compact-btn {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
   margin: 8px 0;
-  padding: 8px 12px;
-  border: 1px solid #35d477;
-  border-radius: 20px;
-  background: #202020;
+  width: 38px;
+  height: 38px;
+  padding: 7px;
+  justify-content: center;
+  border: 1px solid #ffffff1a;
+  border-radius: 50%;
+  background: #202422;
   color: #f1f1f1;
   cursor: pointer;
   font: inherit;

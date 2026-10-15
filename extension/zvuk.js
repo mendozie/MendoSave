@@ -50,6 +50,7 @@
   const BATCH_LIMIT = 60;
 
   let menu;
+  const menuState = MendoMenu.createState();
   let busy = false;
   let toastBox;
 
@@ -263,6 +264,7 @@
       notification.hide(result.isPreview ? 8000 : 4000);
       return result.filename;
     } catch (error) {
+      if (error?.name !== 'AbortError') menuState.clear();
       if (bundled) throw error;
       if (error?.name === 'AbortError') {
         notification.set('Загрузка отменена', 1);
@@ -300,6 +302,7 @@
           if (result.isPreview) previews += 1;
         } catch (error) {
           if (error?.name === 'AbortError') throw error;
+          menuState.clear();
           failed += 1;
           log('batch', `track ${track.id} failed: ${String(error?.message || error)}`);
         }
@@ -410,6 +413,7 @@
   // ---- menu ------------------------------------------------------------------
 
   function closeMenu() {
+    menuState.remember(menu);
     menu?.remove();
     menu = undefined;
     document.removeEventListener('click', onOutsideClick, true);
@@ -454,8 +458,16 @@
     if (packageRunning()) return;
     if (menu) { closeMenu(); return; }
     menu = createElement('div', 'mendosave-zvuk-menu');
-    menu.append(createElement('div', 'mendosave-zvuk-head',
-      `MendoSave v${chrome.runtime.getManifest().version}`));
+    const openedMenu = menu, sourceHref = location.href;
+    const ids = trackIdsOnPage();
+    const wanted = [trackId, ...ids.filter((id) => id !== trackId)];
+    const sourceKey = JSON.stringify([sourceHref, trackId, wanted]);
+    menuState.route(sourceHref);
+    const cachedTracks = menuState.get(sourceKey);
+    const current = () => menu === openedMenu && location.href === sourceHref
+      && button.isConnected && button.dataset.mendosaveTrack === trackId;
+    const restoreFocus = () => { closeMenu(); if (button.isConnected) button.focus(); };
+    MendoMenu.decorate(menu, { title: 'Звук', subtitle: 'Сохранить трек', close: restoreFocus });
     const loading = createElement('div', 'mendosave-zvuk-item mendosave-zvuk-muted', 'Читаю данные трека…');
     menu.append(loading);
     document.body.appendChild(menu);
@@ -464,13 +476,12 @@
     document.addEventListener('keydown', onMenuKeydown, true);
 
     try {
-      const ids = trackIdsOnPage();
-      const wanted = [trackId, ...ids.filter((id) => id !== trackId)];
-      const byId = await loadTracks(wanted);
-      if (!menu) return;
+      const byId = cachedTracks || await loadTracks(wanted);
+      if (!current()) return;
       loading.remove();
       const own = byId.get(trackId);
       if (!own) throw new Error('Звук не отдал данные этого трека');
+      MendoMenu.decorate(menu, { title: 'Звук', subtitle: own.title, close: restoreFocus });
       const rest = wanted.map((id) => byId.get(id)).filter(Boolean);
 
       addItem(
@@ -483,9 +494,15 @@
       }
       menu.append(createElement('div', 'mendosave-zvuk-menu-note',
         'Сохраняется доступный MP3. Если Звук отдаёт только фрагмент, это отмечается в имени файла.'));
+      MendoMenu.compact(menu, { groups: [{ title: 'Аудио', items: [...menu.querySelectorAll('.mendosave-zvuk-item[role="button"]')] }] });
+      MendoMenu.bind(menu, restoreFocus, '.mendosave-zvuk-item[role="button"]');
+      menuState.set(sourceKey, byId, () => button.isConnected && button.dataset.mendosaveTrack === trackId
+        && JSON.stringify([trackId, ...trackIdsOnPage().filter(id => id !== trackId)]) === JSON.stringify(wanted));
+      menuState.attach(menu, sourceKey, JSON.stringify(rest.map(track => [track.id, track.title, track.duration, track.artist])));
       positionMenu(button);
     } catch (error) {
-      if (!menu) return;
+      if (!current()) return;
+      menuState.clear();
       loading.remove();
       menu.append(createElement('div', 'mendosave-zvuk-item mendosave-zvuk-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
@@ -509,22 +526,7 @@
   // The same ring-and-arrows mark the YouTube button uses, so one extension does
   // not look like two.
   function createIcon() {
-    const namespace = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(namespace, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(namespace, 'circle');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16.9');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#35d477');
-    ring.setAttribute('stroke-width', '2.2');
-    const arrows = document.createElementNS(namespace, 'path');
-    arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
-    svg.append(ring, arrows);
-    return svg;
+    return MendoMenu.icon(document);
   }
 
   function makeButton(trackId) {
@@ -564,6 +566,7 @@
   }
 
   function ensureButtons() {
+    menuState.route(location.href);
     for (const row of document.querySelectorAll(ROW_SELECTOR)) mountInRow(row);
   }
 

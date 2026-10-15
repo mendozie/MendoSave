@@ -10,10 +10,11 @@
     const sources = new Set();
     const archives = new Map();
     const producers = new Map();
+    const reservations = new Map();
     const timerStart = effects.setTimeout || setTimeout;
     const timerStop = effects.clearTimeout || clearTimeout;
     const transferTimeout = effects.transferTimeoutMs ?? 60000;
-    let initialization, sweeping = false;
+    let initialization, sweeping = false, beginning = false;
     if (!Number.isSafeInteger(transferTimeout) || transferTimeout < 1 || transferTimeout > 300000) {
       throw new Error('Некорректный таймаут передачи');
     }
@@ -66,6 +67,7 @@
       return left.tabId === right.tabId && left.frameId === right.frameId && left.documentId === right.documentId;
     }
     function position(entry) {
+      if (beginning) throw new Error('Пакет ещё подготавливается');
       const p = host.owned(entry.owner, entry.packageId);
       if (!Number.isInteger(entry.packageIndex) || entry.packageIndex < 0 || p.index !== entry.packageIndex
         || p.entries[entry.packageIndex] || p.busy) throw new Error('Результат не принадлежит текущей позиции пакета');
@@ -90,7 +92,7 @@
       return host.output(currentOwner, id, blob, filename, job);
     }
     function workActive() {
-      return Boolean(host.active || transfers.size || sources.size || archives.size || producers.size);
+      return Boolean(beginning || host.active || transfers.size || sources.size || archives.size || producers.size || reservations.size);
     }
     async function sweep() {
       if (workActive() || sweeping) throw new Error('Очистка запрещена: работа уже выполняется');
@@ -222,14 +224,41 @@
       });
       return entry.chain;
     }
+    async function releasePackage(p) {
+      const release = reservations.get(p);
+      reservations.delete(p);
+      await release?.();
+    }
+    async function beginPackage(currentOwner, message) {
+      if (beginning || reservations.size) throw new Error('Другой пакет ещё выполняется');
+      beginning = true;
+      let p;
+      try {
+        // Claim the owner synchronously, but keep positions closed until the
+        // asynchronous storage admission has supplied its cleanup lease.
+        const result = await host.begin(currentOwner, message);
+        p = host.active;
+        const release = await effects.reservePackage?.(p);
+        if (release) reservations.set(p, release);
+        p.controller.signal.throwIfAborted();
+        return result;
+      } catch (error) {
+        if (p && host.active === p) await host.cancel(currentOwner, message).catch(() => {});
+        if (p) await releasePackage(p);
+        throw error;
+      } finally { beginning = false; }
+    }
     async function cancelPackage(currentOwner, message) {
-      const result = await host.cancel(currentOwner, message);
-      await Promise.allSettled([...transfers.entries()].filter(([, entry]) => entry.packageId === message.packageId)
-        .map(async ([id, entry]) => {
-          await entry.chain.catch(() => {});
-          try { if (transfers.get(id) === entry && entry.writer) { await cleanup(entry); transfers.delete(id); } } finally { effects.onActivity?.(); }
-        }));
-      return result;
+      const p = host.owned(currentOwner, message.packageId, true);
+      try {
+        const result = await host.cancel(currentOwner, message);
+        await Promise.allSettled([...transfers.entries()].filter(([, entry]) => entry.packageId === message.packageId)
+          .map(async ([id, entry]) => {
+            await entry.chain.catch(() => {});
+            try { if (transfers.get(id) === entry && entry.writer) { await cleanup(entry); transfers.delete(id); } } finally { effects.onActivity?.(); }
+          }));
+        return result;
+      } finally { await releasePackage(p); }
     }
     function sourceUrl(value) {
       if (typeof value !== 'string' || value.length > 16384) throw new Error('Некорректный адрес медиа');
@@ -316,6 +345,7 @@
       }
     }
     function connect(port) {
+      if (!port?.name?.startsWith('mendosave-transfer:') && !port?.name?.startsWith('mendosave-package:')) return false;
       if (sweeping) { port.disconnect?.(); return false; }
       if (port?.name?.startsWith('mendosave-transfer:')) {
         const id = port.name.slice('mendosave-transfer:'.length);
@@ -363,8 +393,10 @@
       if (p.busy) throw new Error('Пакет уже сохраняется');
       try { return await host.finish(currentOwner, message); }
       finally {
-        const entry = archives.get(message.packageId);
-        if (entry) { await cleanup(entry); archives.delete(message.packageId); }
+        try {
+          const entry = archives.get(message.packageId);
+          if (entry) { await cleanup(entry); archives.delete(message.packageId); }
+        } finally { if (host.active !== p) await releasePackage(p); }
       }
     }
     function handle(message, sender) {
@@ -376,9 +408,13 @@
       if (message?.t === 'mendosave-save-source') return run(() => sourceMessage(message, sender));
       if (BLOB_ROUTES.has(message?.t)) return run(() => blobMessage(message, sender));
       if (!action) return undefined;
+      if (action === 'begin') return run(() => beginPackage(owner(sender), message));
       if (action === 'cancel') return run(() => cancelPackage(owner(sender), message));
       if (action === 'finish') return run(() => finishPackage(owner(sender), message));
-      return run(() => host[action](owner(sender), message));
+      return run(() => {
+        if (beginning) throw new Error('Пакет ещё подготавливается');
+        return host[action](owner(sender), message);
+      });
     }
     return { host, handle, connect, output, positionAvailable, initialize, sweep,
       jobsActive: () => sweeping || workActive() };

@@ -4,6 +4,30 @@ const { PackageHost } = require('../extension/package_host.js');
 const owner = { tabId: 7, frameId: 0, documentId: 'doc7' };
 const plan = { packageId: 'package7', mode: 'zip', title: 'Test', items: [{ id: 'mp4', label: '720p MP4' }, { id: 'mp3', label: 'MP3' }] };
 
+test('packages accept all 64 outputs and reject 65 before claiming the host', async t => {
+  for (const mode of ['files', 'zip']) await t.test(mode, async () => {
+    const saved = [], archived = [];
+    const host = new PackageHost({ names: names => names,
+      async prepare(blob, filename) { return { blob, filename }; },
+      async archive(entries) { archived.push(...entries.map(entry => entry.filename)); return new Blob(['zip']); },
+      async save(_blob, filename) { saved.push(filename); return saved.length; }, async discard() {},
+    });
+    const items = Array.from({ length: 65 }, (_, index) => ({ id: `item-${index}`, label: `Item ${index}` }));
+    await assert.rejects(() => host.begin(owner, { ...plan, mode, items }), /Некорректный план/);
+    assert.deepEqual(saved, []); assert.deepEqual(archived, []);
+    assert.deepEqual(await host.begin(owner, { ...plan, mode, items: items.slice(0, 64) }), { ok: true });
+    for (let index = 0; index < 64; index++) {
+      host.next(owner, { packageId: plan.packageId, index });
+      await host.output(owner, plan.packageId, new Blob([`bytes-${index}`]), `item-${index}.txt`);
+      host.complete(owner, { packageId: plan.packageId, index });
+    }
+    assert.equal((await host.finish(owner, { packageId: plan.packageId })).count, 64);
+    const expected = items.slice(0, 64).map(item => `${item.id}.txt`);
+    assert.deepEqual(mode === 'zip' ? archived : saved, expected, 'every selected output reaches its destination in order');
+    if (mode === 'zip') assert.deepEqual(saved, ['Test.zip']);
+  });
+});
+
 test('format queue state is bound to the top-frame document and cannot be changed from another tab', async () => {
   const host = new PackageHost({});
   await host.begin(owner, plan);

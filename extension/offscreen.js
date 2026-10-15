@@ -743,6 +743,7 @@ function beginJob(message) {
   if (typeof message.jobId !== 'string' || !message.jobId) return { ok: false, error: 'идентификатор задания отсутствует' };
   if (!Number.isInteger(message.tabId)) return { ok: false, error: 'вкладка загрузки не определена' };
   if ((message.format != null && !['mp3', 'mp4'].includes(message.format))
+    || (message.audioCopyOnly !== undefined && typeof message.audioCopyOnly !== 'boolean')
     || (message.filename != null && (typeof message.filename !== 'string' || !message.filename.length || message.filename.length > 250))
     || ['duration', 'scaleHeight', 'videoSize', 'audioSize', 'expectedBytes'].some((key) => message[key] != null
       && (typeof message[key] !== 'number' || !Number.isFinite(message[key]) || message[key] < 0))
@@ -750,6 +751,11 @@ function beginJob(message) {
     || ['videoMime', 'audioMime', 'videoPrefixMime'].some((key) => message[key] != null
       && (typeof message[key] !== 'string' || message[key].length > 200))) {
     return { ok: false, error: 'Некорректные параметры задания.' };
+  }
+  if (message.audioCopyOnly === true && (message.format !== 'mp3' || message.audioFormat !== 'original'
+    || !/mp4a|aac|opus|vorbis/i.test(message.audioMime || '')
+    || (message.audioCaptureRate !== undefined && message.audioCaptureRate !== 1))) {
+    return { ok: false, error: 'Невозможно сохранить исходное аудио без перекодирования с этими параметрами.' };
   }
   let rejectCancel;
   const cancelWait = new Promise((_, reject) => { rejectCancel = reject; });
@@ -780,6 +786,7 @@ function beginJob(message) {
     format: message.format || 'mp4',
     audioFormat: ['original', 'mp3', 'm4a', 'aac', 'flac', 'wav'].includes(message.audioFormat)
       ? message.audioFormat : 'mp3',
+    audioCopyOnly: message.audioCopyOnly === true,
     videoId: /^[A-Za-z0-9_-]{6,}$/.test(String(message.videoId || '')) ? String(message.videoId) : '',
     audioQuality: message.audioQuality === 'best' ? 'best' : 'standard',
     // Coub-shaped job: a short muted video plus a separate soundtrack that
@@ -1243,7 +1250,8 @@ function buildRuns(job, videoName, audioName, videoPrefixName, coverName) {
     const m4aFromAac = job.audioFormat === 'm4a' && /mp4a|aac/i.test(job.audioMime || '');
     if ((job.audioFormat === 'original' || m4aFromAac) && (job.audioCaptureRate || 1) <= 1.0001) {
       // Passthrough of the source stream: AAC stays in .m4a, Opus/Vorbis go to
-      // their native Ogg containers. Encoded fallback below covers copy errors.
+      // their native Ogg containers. Ordinary jobs retain the encoded fallback;
+      // a promised original-audio result must fail when stream copy fails.
       const sourceIsAac = /mp4a|aac/i.test(job.audioMime || '');
       const sourceIsVorbis = /vorbis/i.test(job.audioMime || '');
       const copyOut = sourceIsAac ? 'out.m4a' : (sourceIsVorbis ? 'out.ogg' : 'out.opus');
@@ -1264,7 +1272,7 @@ function buildRuns(job, videoName, audioName, videoPrefixName, coverName) {
         args: [...progressOutput, ...audioInput, '-vn', ...exactDuration,
           '-c:a', 'copy', ...(sourceIsAac ? ['-movflags', '+faststart'] : []), copyOut],
       });
-      pushEncoded('out.m4a', 'audio/mp4', '.m4a',
+      if (!job.audioCopyOnly) pushEncoded('out.m4a', 'audio/mp4', '.m4a',
         ['-c:a', 'aac', '-b:a', '256k'], ['-movflags', '+faststart']);
     } else if (job.audioFormat === 'm4a' || (job.audioFormat === 'original')) {
       pushEncoded('out.m4a', 'audio/mp4', '.m4a',
@@ -1563,11 +1571,13 @@ async function recoveryDirectory() {
   return root.getDirectoryHandle(RECOVERY_DIR, { create: true });
 }
 
-async function readRecoveryIndex() {
+async function readRecoveryState() {
   const response = await sendToWorker({ t: 'mendosave-recovery-read' }, { retries: 3 });
   if (!response?.ok) throw new Error(response?.error || 'Recovery index is unavailable');
-  return Array.isArray(response.entries) ? response.entries : [];
+  if (!Number.isSafeInteger(response.maxEntries) || response.maxEntries < 1) throw new Error('Recovery capacity is unavailable');
+  return { entries: Array.isArray(response.entries) ? response.entries : [], maxEntries: response.maxEntries };
 }
+async function readRecoveryIndex() { return (await readRecoveryState()).entries; }
 
 async function writeRecoveryIndex(entries) {
   const response = await sendToWorker({ t: 'mendosave-recovery-write', entries }, { retries: 3 });
@@ -1575,13 +1585,33 @@ async function writeRecoveryIndex(entries) {
 }
 
 let recoveryChanges = Promise.resolve();
-function changeRecovery(update) {
-  const result = holdWork(() => recoveryChanges.catch(() => {}).then(async () => {
-    const entries = await readRecoveryIndex();
-    await writeRecoveryIndex(await update(entries));
-  }));
+let recoveryReservation = null;
+const recoveryCapacityError = () => new Error('Не осталось места для новых подготовленных файлов. Сначала сохраните готовые файлы через значок MendoSave и повторите попытку позже.');
+function serializeRecovery(operation) {
+  const result = holdWork(() => recoveryChanges.catch(() => {}).then(operation));
   recoveryChanges = result;
   return result;
+}
+function changeRecovery(update) {
+  return serializeRecovery(async () => {
+    const { entries, maxEntries } = await readRecoveryState();
+    const next = await update(entries);
+    if (next.length + (recoveryReservation?.remaining || 0) > maxEntries) throw recoveryCapacityError();
+    await writeRecoveryIndex(next);
+  });
+}
+function reservePackageRecovery(p) {
+  if (p.mode !== 'zip') return undefined;
+  // Admission and writes share one queue: standalone recovery cannot consume
+  // positions already promised to an accepted ZIP plan.
+  return serializeRecovery(async () => {
+    const { entries, maxEntries } = await readRecoveryState();
+    p.controller.signal.throwIfAborted();
+    if (recoveryReservation || entries.length + p.items.length > maxEntries) throw recoveryCapacityError();
+    const reservation = { packageId: p.id, remaining: p.items.length };
+    recoveryReservation = reservation;
+    return () => serializeRecovery(() => { if (recoveryReservation === reservation) recoveryReservation = null; });
+  });
 }
 
 async function stashForRecovery(blob, filename, options = {}) {
@@ -1594,10 +1624,18 @@ async function stashForRecovery(blob, filename, options = {}) {
     await blob.stream().pipeTo(new WritableStream({
       write: bytes => writable.write(bytes), close: () => writable.close(), abort: () => writable.abort(),
     }), { signal: options.signal });
-    await changeRecovery(entries => [...entries, {
-      id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
-      ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
-    }]);
+    await serializeRecovery(async () => {
+      const { entries, maxEntries } = await readRecoveryState();
+      options.signal?.throwIfAborted();
+      const reservation = options.manualOnly && recoveryReservation?.packageId === options.packageId ? recoveryReservation : null;
+      const remaining = (recoveryReservation?.remaining || 0) - (reservation ? 1 : 0);
+      if ((reservation && reservation.remaining < 1) || entries.length + 1 + remaining > maxEntries) throw recoveryCapacityError();
+      await writeRecoveryIndex([...entries, {
+        id, filename, type: blob.type || '', bytes: blob.size, createdAt: Date.now(), savedAt: 0,
+        ...(options.manualOnly ? { manualOnly: true, reason: 'package', packageId: options.packageId } : {}),
+      }]);
+      if (reservation) reservation.remaining--;
+    });
   } catch (error) {
     await writable?.abort?.().catch(() => {});
     await dir.removeEntry(id).catch(() => {});
@@ -2901,6 +2939,7 @@ async function reportError(error) {
 const packageIO = globalThis.MendoPackageIO.create({
   runtimeId: chrome.runtime.id, getURL: path => chrome.runtime.getURL(path), storage: navigator.storage,
   archive: globalThis.MendoArchive, saveBlob,
+  reservePackage: reservePackageRecovery,
   onActivity: updateKeepAlive,
   positionBusy(p) { return (activeJob?.packageId === p.id && activeJob.packageIndex === p.index)
     || (staging?.packageId === p.id && staging.packageIndex === p.index); },

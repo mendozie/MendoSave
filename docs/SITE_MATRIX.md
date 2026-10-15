@@ -1,5 +1,7 @@
 # MendoSave - проверенная совместимость
 
+Кандидат Instagram 0.4.0 от 15-10-2026 проверен в отдельных muted profiles Zen 1.23.2b / Gecko 157.0.1 и Edge 155.0.4283.45 на Windows, с входом и без входа. После review-коррекций повторно проверены Reel DASH/progressive MP4 H.264 720×1280 с AAC, исходный M4A и MP3; смешанная карусель - два фото, два silent MP4 и TXT. 40 новых outputs проверены, media декодированы полностью, ZIP совпал с новыми отдельными файлами. Отдельное фото `BsOGulcndj-` дополнительно дало одинаковые JPEG 584×584 и UTF-8 TXT в Zen auth/anonymous и Edge anonymous. Native controlled fixture проверила ZIP64/retry и сохранность 320 recovery inputs. Отмена/повтор, keyboard и wide/narrow UI проверены; реальная SPA-навигация проверена в авторизованном Zen, anonymous profile click получил login wall Instagram. Закрытая публикация не проверена. Это unsigned кандидат для ручной приёмки, опубликованный выпуск остаётся 0.3.3. [Полный отчёт и ограничения](INSTAGRAM_VERIFICATION.md).
+
 Дополнительная проверка 0.3.3 от 13-10-2026: отдельный Zen 1.23.2b / Gecko 157.0.1 завершил bounded diagnostic TXT через actual worker/native download, сохранив последние записи, State и Details и скрыв dummy secret. Popup Save As/персистентность, реальный package component, native keyboard и full-close проверены на viewports 1246×883/326×843 и 1246×983/326×843. Новые MP4 auxiliary guards проверены actual parser regression; прежние site/media scenarios указаны ниже с их собственными revisions. [Финальная релизная проверка](RELEASE_VERIFICATION_033.md).
 
 Окончательный подписанный XPI 0.3.3 постоянно обновил 0.3.1 и остался активным после полного перезапуска Zen с обязательной проверкой подписей. Контрольный Coub «Со звуком · один проход» дал завершённый MP4 3 580 865 bytes: H.264 880×720, 300 кадров / 10 с и AAC 10,008005 с. Полный decode, первый/последний кадры, звук на обоих концах и освобождение обработчика проверены. Это новый итоговый Zen-прогон; финальный повтор Edge для 0.3.3 не заявляется.
@@ -60,7 +62,7 @@ Live, очередь материалов плейлиста и пакет фо�
 
 После parser guards Mediabunny в текущей сборке **57 файлов Firefox / 58 Chromium** повторены свежие YouTube MP4, Coub MP3 и Twitch VOD в обоих профилях: шесть complete downloads, конечные tracks/duration/timestamps и полное декодирование прошли, ошибок подключённых extension contexts не зарегистрировано. YouTube прошёл через изменённый Mediabunny worker-remux; Coub source MP3 и Twitch FFmpeg TS-remux подтверждают соответствующие сохранённые пути. Bundle имеет SHA-256 `30dedb32345d3ccc025df5ed6af5c518f79eb589fcf757022ae2af0eaffaec58`. Подробности и граница malformed parser tests - в [отчёте фазы 4](PHASE4_VERIFICATION.md).
 
-Musify отключён и исключён из обеих сборок. Instagram, другие ОС, другие Firefox-производные, произвольные версии Zen и весь каталог каждой площадки не подтверждены.
+Musify отключён и исключён из обеих сборок. Другие ОС, другие Firefox-производные, произвольные версии Zen и весь каталог каждой площадки не подтверждены. Instagram проверен только в объёме кандидата выше.
 
 ## Дополнительные проверки перед выпуском 0.3.2 - 13-10-2026
 

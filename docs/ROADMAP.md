@@ -1,11 +1,52 @@
 # MendoSave - roadmap
 
 Основание: [PROJECT_SPEC.md](PROJECT_SPEC.md).
-Актуализировано: 13-10-2026.
+Актуализировано: 15-10-2026.
 
 `[ ]` - не начато; `[~]` - выполняется либо остаётся необходимая проверка; `[x]` - результат технически проверен. Пользовательская приёмка и публикация отмечаются отдельно. Дальние этапы уточняются перед выполнением по spec; они не расширяют разрешения автоматически.
 
 ## Текущее состояние
+
+### Выпуск 0.4.0 - подписан и опубликован, 15-10-2026
+
+Пользователь принял интерфейс B с небольшой правкой выравнивания шапки и SVG-стрелки «Назад», поручил commit, обновление документов/README, подписание Mozilla и Release обоих движков. Это прямое решение заменило прежний запрет merge, подписи и выпуска для текущего среза; общая политика ручной приёмки в AGENTS.md сохраняется. **[0.4.0 подписана Mozilla и опубликована](https://github.com/mendozie/MendoSave/releases/tag/v0.4.0)** 15-10-2026 в 23:28:37 MSK (20:28:37 UTC). Релизный tag/runtime/source закреплён за `456b157241167cd1aa36d576c8ef0ec1e2f2ed66`; все шесть assets скачаны обратно и сверены. Отчёт и изменения проходят через [PR #10](https://github.com/mendozie/MendoSave/pull/10); актуальный merge state доступен по ссылке.
+
+| Этап | Статус | Результат и оставшаяся проверка |
+|---|---|---|
+| REL040-1 | [x] | Приёмка B и разрешение выпуска получены; уточнение шапки записано в UIB-006. Native targeted QA в Zen 1.23.2b / Gecko 157.0.1 и Edge 155.0.4283.45: viewport 1440×1000 и 360×800; центры Back/grip/× совпали, baseline заголовка/источника совпала, bbox стрелки 6,6,12,12. Back+Enter, ×, drag на +65/+30 и Tab/Shift+Tab прошли на синтетической компонентной странице |
+| REL040-2 | [x] | Новый Standard repository security scan завершён с тремя medium findings в vendor parser. Узкие исправления MP4/FLAC/AV1 прошли RED/green, 81 targeted tests и независимый correction review без подтверждённых surviving findings. Исходный scan сохранён; WASM/native source coverage частичная. [Область и ограничения](SECURITY_REVIEW_040.md) |
+| REL040-3 | [x] | Runtime `456b157` проверен: scoped lint, provenance, обе сборки по 69 файлов, manifests/CSP, outgoing и web-ext прошли. [CI run 38799429945](https://github.com/mendozie/MendoSave/actions/runs/38799429945): Windows/Linux по 1051/1051 tests, archive reproducibility; три Linux-архива совпали с локальными по SHA-256. Managed review этого head завершён 15-10-2026 без findings. Документы и чистые скриншоты README обновлены; последующий docs-only diff проверяется отдельно |
+| REL040-4 | [x] | Mozilla одобрила unlisted 0.4.0: version 6582334, file 5126466; ID/version/channel и notes прочитаны после fresh reload. Signed XPI содержит 69 app entries и пять signature entries; меняется только JSON-форматирование manifest, остальные app bytes совпали. Скачанный из Mozilla source совпал по SHA-256 и прошёл CRC |
+| REL040-5 | [x] | Permanent signed upgrade 0.3.3 → 0.4.0 в новом отдельном Zen сохранил ID/UUID и все пять настроек после полного restart. Подпись обязательна, signedState 2, установка постоянная и активная. Header/native controls при 1440×1000 и 360×800 прошли повторно; девять screenshots просмотрены. Новый полный media-проход не выполнялся |
+| REL040-6 | [x] | GitHub Release сохранён как latest, draft false / prerelease false; tag/source и все шесть assets прочитаны. Скачанные signed XPI, Chromium ZIP, source, release-manifest, signing-manifest и SIGNED_SHA256SUMS совпали по полным bytes/hashes; три архива прошли CRC. [Релизный отчёт](RELEASE_VERIFICATION_040.md) |
+
+Проверка шапки и новые иллюстрации подтверждают только общий компонент на синтетических данных. Прежний кандидат `be84a2031b3fd0a656da125dc8a79cf52c7215a4`, его пакеты, native media и CI evidence сохранены в [UI_B_VERIFICATION.md](UI_B_VERIFICATION.md); эти результаты не перенесены автоматически на новый релизный head. Новый полный media-проход пользователь не запрашивал. Закрытая публикация Instagram, ограничения реальных сайтов и прежний отрицательный MP3-результат в длительно работавшем сеансе Zen сохранены в отчётах. Сбой собственного QA helper при остановке записан отдельно; исправлен только ignored helper, проверка продолжена с сохранённого этапа. Итоговая остановка подтвердила отсутствие собственных процессов и свободные порты, профиль сохранён. Следующий продуктовый шаг - обратная связь после установленной 0.4.0.
+
+### Общий интерфейс B - исходный кандидат до приёмки, 15-10-2026
+
+Пользователь выбрал однострочную шапку B и разрешил реализацию UIB-001..UIB-005 во всех включённых сервисах. Исходный кандидат подготовлен в `feat/instagram-support` поверх `5d09469`. Прежние пакеты и evidence сохраняются. Условия этого этапа до ручной приёмки заменены новым решением в блоке выпуска 0.4.0 выше.
+
+| Этап | Статус | Результат и проверка | Зависимости |
+|---|---|---|---|
+| UIB-S1 | [x] | Общая тема/меню и пакет B: карточки вариантов, первоначальный нулевой выбор, скрытый multi-quality, предел 64; TDD и native controls проверены | - |
+| UIB-S2 | [x] | Instagram: значок у активного Reel, компактный выбор качества, снимок для возврата без чтения; TDD source/cache/cancel, native same-source/SPA и retry fixtures прошли | Общий API UIB-S1 |
+| UIB-S3 | [x] | 1042/1042 tests; сборки по 67 файлов, ESLint 0 errors/17 прежних warnings, web-ext 0 errors/4 прежних warnings, outgoing 0 findings. Zen/Edge auth/anonymous files/ZIP, MP3, wide/narrow и live Coub/YouTube проверены; startup port defect исправлен. Native Zen negative/restart и границы adaptive ZIP записаны в [отчёте](UI_B_VERIFICATION.md) | UIB-S1, UIB-S2 |
+| UIB-S4 | [x] | Internal review и managed pass `f024c68` завершены без открытых findings; последующий test-only diff проверен локально. Windows/Linux CI и воспроизводимость `be84a20` прошли; unsigned кандидат сохранён отдельно, CRC/полные bytes/Git/CI hashes сверены. [Установка и приёмка](UI_B_VERIFICATION.md) | UIB-S3 |
+
+Исходный технический срез завершён и передан unsigned для ручной проверки. Последующая приёмка получена 15-10-2026; корректировка шапки и актуальное состояние выпуска отмечены выше. Результаты таблицы относятся к указанным кандидатам и не заменяют отдельные проверки последующей релизной сборки.
+
+### Instagram - исходный кандидат, 15-10-2026
+
+Разрешена реализация согласованного среза IG-001..IG-005. Работа выполнялась в отдельной task branch; актуальный порядок передачи и выпуска находится в AGENTS.md. На этапе исходной передачи опубликованным выпуском была 0.3.3; текущая поставка 0.4.0 описана выше.
+
+| Этап | Статус | Результат и проверка | Зависимости |
+|---|---|---|---|
+| IG-S1 | [x] | Bounded canonical HTTP reader в ISOLATED, без MAIN bus/DOM authority; schema, source/late/cancel и полный anonymous carousel с `Accept: text/html` проверены | - |
+| IG-S2 | [x] | Реальные размеры/packets/extents MP4 проверяются до сохранения; recovery 320 и admission полного ZIP-плана. Meaningful negative cases, 1000 tests и focused correction review прошли | IG-S1 |
+| IG-S3 | [x] | Исправленная сборка: Zen/Edge, auth/anonymous, оба Reel transport и аудиоварианта, carousel files/ZIP exact. Native controlled 64/retry/320 и UI/keyboard проверены; [ограничения](INSTAGRAM_VERIFICATION.md) | IG-S2 |
+| IG-S4 | [x] | Четыре замечания первого [PR #10](https://github.com/mendozie/MendoSave/pull/10) исправлены и resolved; второй managed pass runtime `a8198b5` завершён без новых findings. Windows/Linux CI, reproducibility и unsigned archives с CRC/Git bytes/hashes прошли; [пакеты и установка](INSTAGRAM_VERIFICATION.md). На этом этапе PR был draft без разрешения merge; последующее решение указано выше | IG-S3 |
+
+Закрытая публикация не проверена: контрольный материал не выбран; пользователь разрешил этот пропуск. Реальные фото проверены в карусели и в отдельной публикации; новый single-photo проход Zen auth/anonymous и Edge anonymous сохранил одинаковые JPEG/TXT bytes. Исходный unsigned кандидат 0.4.0 подготовлен и передан пользователю. Последующее решение от 15-10-2026 разрешает выпуск с общим интерфейсом B; текущее состояние и оставшиеся проверки указаны выше.
 
 Срез `0.3.2-r2` принят пользователем 13-10-2026. После PR corrections итоговая версия **0.3.3 подписана и [выпущена](https://github.com/mendozie/MendoSave/releases/tag/v0.3.3)**. [PR #8](https://github.com/mendozie/MendoSave/pull/8) объединён в main, task branch удалена; GitHub-репозиторий публичный. README, описание и скриншоты обновлены. Исходные кандидаты и необходимые доказательства сохранены; ручные обновления и unlisted остаются выбранным способом поставки.
 
@@ -157,7 +198,7 @@ Evidence: A-008/A-010, подтверждённое подписание/уст�
 
 ## Последующее исследование
 
-Instagram Reels, другие Firefox-производные, другие ОС и дополнительные UX-функции рассматриваются после основной совместимости. Возможность сохранить внешнюю папку между пакетами без диалогов потребовала бы другого подхода; Native Messaging сейчас не выбран.
+Другие Firefox-производные, другие ОС и дополнительные UX-функции рассматриваются после основной совместимости. Instagram входит в отдельный текущий срез выше. Возможность сохранить внешнюю папку между пакетами без диалогов потребовала бы другого подхода; Native Messaging сейчас не выбран.
 
 ## Журнал состояния
 
@@ -174,3 +215,5 @@ Instagram Reels, другие Firefox-производные, другие ОС 
 | 10-10-2026 | Фаза 3 технически завершена, версия 0.3.0 | Save As, выбранная очередь и STORE ZIP; 269 tests, реальные Coub/SRT, Cancel/recovery/two-tab и 128 MiB в Zen/Chromium. В PR #2 подтверждённая утечка recovery bytes исправлена; приватность сохраняется, релизные границы записаны. |
 | 10-10-2026 | Фаза 4: проверены code/pipeline slice и runtime guards; выбран сначала файл, затем магазин | 295 tests, vendor hashes/licenses, fresh audit, три byte-verified archives. Существующее ядро сохраняется без новой среды. Ветка `chore/release-readiness` опубликована приватно; внешний выпуск не выполнялся. |
 | 10-10-2026 | Получен подписанный Mozilla unlisted XPI 0.3.0 без страницы в магазине | Постоянный ID `mendosave@mendozie`; matching source snapshot `fa034ac`, 296 tests. Saved «Одобрено», hidden channel и reviewer notes проверены. Постоянная установка, подпись, полный restart и завершённый декодируемый Coub MP3 подтверждены в отдельном Zen-профиле. Репозиторий остаётся приватным. |
+| 15-10-2026 | B принят, выпуск 0.4.0 разрешён с небольшой правкой шапки | Native targeted header QA прошла на синтетическом компоненте в Zen/Edge при 1440×1000 и 360×800. Standard security scan выявил три medium vendor-parser findings; исправления, финальные checks/review/CI, Mozilla signing/upgrade и Release readback ещё не завершены. |
+| 15-10-2026 | 0.4.0 подписана Mozilla и опубликована; шесть Release assets сверены | Frozen runtime/source `456b157` прошёл Windows/Linux CI по 1051/1051 tests, archive reproducibility и managed review без findings. Signed upgrade 0.3.3 → 0.4.0, полный restart, ID/UUID/пять настроек и header controls прошли; новый полный media-проход не выполнялся. Актуальная интеграция отчёта и изменений - в PR #10. |

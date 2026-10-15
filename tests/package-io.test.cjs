@@ -15,6 +15,58 @@ test('package routes bind actual sender ownership and decline unrelated routes',
   assert.equal((await io.handle({ t: 'mendosave-package-next', packageId: 'package7', index: 0 }, sender)).ok, true);
 });
 
+test('cancelling package admission drains a late reservation before another package can start', async () => {
+  let enter, resolveReservation, held = false, releases = 0, calls = 0;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const pending = new Promise(resolve => { resolveReservation = resolve; });
+  const { io } = fixture({ async reservePackage() {
+    assert.equal(held, false, 'an earlier package must release its admission lease');
+    held = true;
+    if (++calls === 1) { enter(); await pending; }
+    return () => { held = false; releases++; };
+  } });
+  const starting = io.handle(plan, sender);
+  const prematureNext = io.handle({ t: 'mendosave-package-next', packageId: plan.packageId, index: 0 }, sender);
+  try {
+    await entered;
+    assert.equal((await prematureNext).ok, false, 'a packet queued immediately after begin cannot bypass admission');
+    assert.equal((await io.handle({ t: 'mendosave-package-next', packageId: plan.packageId, index: 0 }, sender)).ok, false);
+    assert.equal((await io.handle({ t: 'mendosave-package-cancel', packageId: plan.packageId }, sender)).ok, true);
+    assert.equal((await io.handle({ ...plan, packageId: 'tooEarly' }, sender)).ok, false);
+    resolveReservation();
+    assert.equal((await starting).cancelled, true);
+    assert.equal(releases, 1); assert.equal(io.jobsActive(), false);
+    assert.equal((await io.handle({ ...plan, packageId: 'afterCleanup' }, sender)).ok, true);
+    await io.handle({ t: 'mendosave-package-cancel', packageId: 'afterCleanup' }, sender);
+    assert.equal(releases, 2); assert.equal(held, false);
+  } finally { resolveReservation(); }
+});
+
+test('failed admission and failed ZIP saving both release capacity for the next valid package', async () => {
+  let held = false, rejectAdmission = true, releases = 0;
+  const { io } = fixture({ async reservePackage() {
+    if (rejectAdmission) { rejectAdmission = false; throw new Error('admission storage unavailable'); }
+    assert.equal(held, false); held = true;
+    return () => { held = false; releases++; };
+  }, async saveBlob() { throw new Error('native save failed'); } });
+  const zipPlan = { ...plan, mode: 'zip', items: [...plan.items, { id: 'text', label: 'Text' }] };
+  const failed = await io.handle(zipPlan, sender);
+  assert.equal(failed.ok, false); assert.match(failed.error, /admission storage unavailable/);
+  assert.equal(io.jobsActive(), false);
+  assert.equal((await io.handle(zipPlan, sender)).ok, true);
+  for (let index = 0; index < 2; index++) {
+    await io.handle({ t: 'mendosave-package-next', packageId: plan.packageId, index }, sender);
+    await io.output({ tabId: 7, frameId: 0, documentId: 'doc7' }, plan.packageId, index, new Blob(['ready bytes']), `item${index}.txt`);
+    await io.handle({ t: 'mendosave-package-complete', packageId: plan.packageId, index }, sender);
+  }
+  const finishing = await io.handle({ t: 'mendosave-package-finish', packageId: plan.packageId }, sender);
+  assert.equal(finishing.ok, false); assert.match(finishing.error, /native save failed/);
+  assert.equal(held, false); assert.equal(releases, 1);
+  assert.equal((await io.handle({ ...zipPlan, packageId: 'afterFailure' }, sender)).ok, true);
+  await io.handle({ t: 'mendosave-package-cancel', packageId: 'afterFailure' }, sender);
+  assert.equal(releases, 2);
+});
+
 const transferId = '12345678-1234-4234-8234-123456789012';
 const opening = { t: 'mendosave-blob-open', transferId, filename: 'video.mp4', mime: 'video/mp4', size: 5 };
 test('single Blob handoff writes exact bytes to OPFS and saves once after complete delivery', async () => {
@@ -289,6 +341,32 @@ test('startup sweep removes owned temporary UUID files and preserves recovery an
   await assert.rejects(() => io.sweep(), /выполняется/);
   assert.equal(files.size, 4);
   await io.handle({ t: 'mendosave-blob-abort', transferId }, sender);
+});
+
+test('startup sweep leaves unrelated ports to their owner while rejecting package and transfer connections', async () => {
+  let release, entered;
+  const sweepStarted = new Promise(resolve => { entered = resolve; });
+  const blocked = new Promise(resolve => { release = resolve; });
+  const base = fixture();
+  const { io } = fixture({ storage: {
+    getDirectory: async () => { entered(); await blocked; return base.storage.getDirectory(); },
+  } });
+  const starting = io.initialize();
+  await sweepStarted;
+  try {
+    for (const name of ['mendosave-producer', 'mendosave-processor', 'mendosave-twitch-recording:job7', 'elsewhere']) {
+      let disconnected = 0;
+      assert.equal(io.connect({ name, sender, disconnect() { disconnected++; } }), false);
+      assert.equal(disconnected, 0, `${name} belongs to another runtime router`);
+    }
+    for (const name of [`mendosave-transfer:${transferId}`, 'mendosave-package:package7']) {
+      let disconnected = 0;
+      assert.equal(io.connect({ name, sender, disconnect() { disconnected++; } }), false);
+      assert.equal(disconnected, 1, `${name} cannot connect while temporary storage is being swept`);
+    }
+  } finally { release(); await starting; }
+  assert.equal(io.jobsActive(), false);
+  assert.equal(base.files.size, 0);
 });
 
 test('direct output and external work cannot compete with an IO producer for the same position', async () => {

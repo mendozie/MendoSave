@@ -12,7 +12,7 @@ const mediabunny = smallBudgetLibrary();
 
 test('shipped bundle and modified MPL sources round-trip to pinned originals', () => {
   const { originals, transform, hash } = require('../scripts/patch-mediabunny.cjs');
-  for (const [kind, file] of Object.entries({ bundle: 'mediabunny.min.mjs', mp4: 'isobmff-demuxer.ts', adts: 'adts-reader.ts', misc: 'isobmff-misc.ts' })) {
+  for (const [kind, file] of Object.entries({ bundle: 'mediabunny.min.mjs', mp4: 'isobmff-demuxer.ts', adts: 'adts-reader.ts', misc: 'isobmff-misc.ts', flac: 'flac-demuxer.ts', codec: 'codec-data.ts' })) {
     const shipped = require('node:fs').readFileSync(require('node:path').join(__dirname, '../extension/vendor/mediabunny', file));
     const original = transform(kind, shipped, true);
     assert.equal(hash(original), originals[kind]);

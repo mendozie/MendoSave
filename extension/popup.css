@@ -6,8 +6,8 @@ body {
   width: min(288px, calc(100vw - 28px));
   margin: 0;
   padding: 14px;
-  background: #181a1c;
-  color: #f1f1f1;
+  background: #202422;
+  color: #f0f3f1;
   font: 13px/1.45 "Segoe UI", Roboto, Arial, sans-serif;
 }
 
@@ -57,9 +57,9 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid #3c4043;
-  border-radius: 7px;
-  background: #222528;
+  border: 1px solid #3a3f3d;
+  border-radius: 9px;
+  background: #292f2b;
   color: #9aa0a6;
   cursor: pointer;
 }
@@ -77,8 +77,8 @@ body {
 .status {
   margin: 12px 0 0;
   padding: 9px 11px;
-  border-radius: 8px;
-  background: #222528;
+  border-radius: 12px;
+  background: #292f2b;
   color: #c9cdd1;
 }
 
@@ -111,8 +111,8 @@ body {
 .section {
   margin-top: 12px;
   padding: 10px 11px 11px;
-  border: 1px solid #2b2f33;
-  border-radius: 8px;
+  border: 1px solid #3a3f3d;
+  border-radius: 14px;
 }
 
 .section-head {
@@ -199,3 +199,6 @@ body {
   opacity: 0.6;
   cursor: default;
 }
+
+:is(button, select, a, input):focus-visible { outline: 2px solid #55d991; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .icon-btn.busy svg { animation: none; } }

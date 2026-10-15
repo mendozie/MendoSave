@@ -14,7 +14,7 @@ function track(stream, send) {
 async function download(app) {
   app.click(app.document.querySelector('.mendosave-zvuk-btn'));
   await app.settle();
-  app.click(app.document.querySelector('[role="button"].mendosave-zvuk-item'));
+  app.click(app.document.querySelector('[role="menuitem"].mendosave-zvuk-item'));
   await app.settle();
 }
 
@@ -52,7 +52,7 @@ test('Zvuk menu activates its selected track once with Enter or Space', async (t
     const app = track({ high: 'https://media.invalid/full.mp3' });
     app.click(app.document.querySelector('.mendosave-zvuk-btn'));
     await app.settle();
-    const item = app.document.querySelector('[role="button"].mendosave-zvuk-item');
+    const item = app.document.querySelector('[role="menuitem"].mendosave-zvuk-item');
     assert.equal(app.press(item, key, true).defaultPrevented, true);
     assert.equal(app.press(item, 'a').defaultPrevented, false);
     assert.equal(app.messages.some((x) => x.t === 'mendosave-save'), false);

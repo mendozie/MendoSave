@@ -1,6 +1,6 @@
 # Зависимости и исходный код
 
-Проверено: 10-10-2026. FFmpeg и zip.js сохраняют закреплённые runtime bytes. В Mediabunny добавлены локальные ограничения парсера; поставляются соответствующие изменённые MPL-исходники и воспроизводимое преобразование bundle. Добавлены лицензии, provenance, отдельный lockfile для advisory audit и проверки supply chain.
+Проверено: 15-10-2026. FFmpeg и zip.js сохраняют закреплённые runtime bytes. В Mediabunny добавлены локальные ограничения парсера и неизменяемая проекция физических границ MP4 sample; поставляются соответствующие изменённые MPL-исходники и воспроизводимое преобразование bundle. Лицензии, provenance, отдельный lockfile для advisory audit и проверки supply chain сохранены.
 
 ## Закреплённая поставка
 
@@ -30,12 +30,13 @@ npm run audit:dependencies
 
 Первая команда офлайн проверяет recorded vendor/license hashes и отсутствие незарегистрированных vendor files, exact direct dependency versions, соответствие lockfile и SHA-512 npm integrity. Вторая дополнительно получает свежие audit reports для tooling и runtime. Единственное исключение - указанная advisory, exact installed versions и три exact dependency nodes, пока npm предлагает только конкретный major downgrade. Новая advisory, новый dependency path/version, совместимое исправление или некорректный report приводят к ошибке. Runtime audit исключений не имеет. Успех этого gate допускает известную tooling advisory; он не означает нулевой audit count.
 
-## Три предупреждения web-ext
+## Четыре предупреждения web-ext
 
-`web-ext` 10.7.0 на Firefox build: 0 errors, 3 warnings. Bytes библиотек, к которым относятся эти предупреждения, сохранены; предупреждения видимы, CSP не ослаблена.
+`web-ext` 10.7.0 на Firefox build кандидата 0.4.0: 0 errors, 0 notices, 4 warnings. Три прежних относятся к неизменённым FFmpeg/zip.js; новое - к загрузке bundled parser адаптером Instagram. Предупреждения видимы, CSP не ослаблена. Gate проверяет точные code/file/line/column и SHA-256 рассмотренных файлов; новое предупреждение или изменение bytes требуют нового разбора.
 
 | Warning | Источник и проверенная граница |
 |---|---|
+| `UNSAFE_VAR_ASSIGNMENT`, `instagram_media.js:411` | Dynamic import получает единственный постоянный путь `vendor/mediabunny/mediabunny.min.mjs` через `chrome.runtime.getURL`. Страница и metadata не выбирают URL модуля. Только этот pure module доступен через WAR только origin Instagram; привилегированные файлы не открыты. Реальная загрузка и обработка MP4 проверяются в отдельных профилях Zen/Chromium. |
 | `UNSAFE_VAR_ASSIGNMENT`, `vendor/ffmpeg/814.ffmpeg.js:1` | Dynamic import используется только как fallback после `importScripts(coreURL)`. `loadSingleThreadFFmpeg()` передаёт локальные core/WASM URLs из `chrome.runtime.getURL`. Унаследованный default тоже локален. Контекст worker и CSP ограничивают extension scripts локальной поставкой. Другой core URL не является разрешённой конфигурацией продукта. |
 | `DANGEROUS_EVAL`, `vendor/ffmpeg/ffmpeg.js:1` | Webpack global lookup немедленно возвращает `globalThis`, когда он существует; `new Function("return this")` - fallback старого окружения. Проверенные Zen/Chromium имеют `globalThis`, поэтому этот branch не нужен. String eval запрещён текущей CSP; разрешён только `wasm-unsafe-eval`. Удаление fallback изменило бы официальный bundle без улучшения используемого пути. |
 | `UNSAFE_VAR_ASSIGNMENT`, `vendor/zipjs/zip-native.min.js:1` | Dynamic import относится к worker setup библиотеки. `MendoArchive.write` задаёт `useWebWorkers: false` и ZIP STORE для writer и каждой entry. Regression test запускает реальные browser scripts с Worker/fetch, которые бросают ошибку, и запрещённым dynamic code execution; ZIP успешно создаётся. |
@@ -47,7 +48,7 @@ npm run audit:dependencies
 Для JS зафиксированы следующие независимые источники:
 
 - [FFmpeg wrapper/build recipe](https://github.com/ffmpegwasm/ffmpeg.wasm/tree/e0d4c62a229ba58ea0c6e6b881e289f2fefe97c4), [wrapper npm source distribution](https://registry.npmjs.org/@ffmpeg/ffmpeg/-/ffmpeg-0.12.10.tgz). Унаследованная модификация worker полностью описана в provenance; `ffmpeg.js` официальный.
-- [Mediabunny source commit](https://github.com/Vanilagy/mediabunny/tree/634186fd5e2dac946bf994a955680b85aceb7709), [npm archive с `src/` и MPL-2.0](https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz). Generated jsDelivr bundle использует Rollup 4.62.2 и esbuild 0.28.1 по своему header. Локальные изменения ограничивают MP4 metadata expansion, проверяют PCM chunk ranges и минимальную длину ADTS frames. Полные изменённые MPL-файлы поставляются рядом с bundle; [PATCH.md](../extension/vendor/mediabunny/PATCH.md) описывает замену файлов в upstream source tree и детерминированное преобразование. Tests проверяют hashes обратного/прямого преобразования и настоящий `Input` parser. Повторная bit-for-bit компиляция generated bundle из TypeScript не выполнялась. Runtime не загружает код с CDN.
+- [Mediabunny source commit](https://github.com/Vanilagy/mediabunny/tree/634186fd5e2dac946bf994a955680b85aceb7709), [npm archive с `src/` и MPL-2.0](https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz). Generated jsDelivr bundle использует Rollup 4.62.2 и esbuild 0.28.1 по своему header. Локальные изменения ограничивают MP4 metadata expansion, проверяют PCM/regular chunk ranges и минимальную длину ADTS frames, завершают пустой FLAC lookup на EOF и проверяют unsigned AV1 OBU lengths до yield. Regular MP4 использует ленивый prefix index нормализованной физической таблицы. Они также предоставляют `packet.mendoMp4Extent` для проверки границ sample вызывающим кодом. Проекция сама не подтверждает принадлежность к `mdat`. Полные изменённые MPL-файлы поставляются рядом с bundle; [PATCH.md](../extension/vendor/mediabunny/PATCH.md) описывает замену файлов в upstream source tree и детерминированное преобразование. Tests проверяют hashes обратного/прямого преобразования, настоящий `Input` parser и extent для regular/fragmented metadata/actual packets. Повторная bit-for-bit компиляция generated bundle из TypeScript не выполнялась. Runtime не загружает код с CDN.
 - [zip.js source commit](https://github.com/gildas-lormeau/zip.js/tree/38508528fe00b094447d9122b7725ab412149e2d), [npm archive с `lib/`, license и native bundle](https://registry.npmjs.org/@zip.js/zip.js/-/zip.js-2.20.0.tgz). Bundle bytes воспроизводимо получены из versioned npm archive; компиляция из `lib/` не повторялась.
 
 ## Принятая сборка

@@ -188,7 +188,7 @@ test('Zvuk single-track cancellation remains terminal and old dismissal cannot h
   const timers = controlledTimers(app);
   async function choose() {
     app.click(app.document.querySelector('.mendosave-zvuk-btn')); await app.settle();
-    app.click(app.document.querySelector('[role="button"].mendosave-zvuk-item')); await app.settle();
+    app.click(app.document.querySelector('[role="menuitem"].mendosave-zvuk-item')); await app.settle();
   }
   await choose();
   const box = app.document.querySelector('.mendosave-zvuk-toast');

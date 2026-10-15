@@ -9,6 +9,217 @@ function create(options) {
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+function changeChoice(document, input, checked) {
+  input.checked = checked; input.dispatchEvent(new document.defaultView.Event('change'));
+}
+function chooseQuality(document, select, value) {
+  for (const option of select.querySelectorAll('option')) option.selected = option.value === value;
+  select.dispatchEvent(new document.defaultView.Event('change'));
+}
+
+test('a family shows one empty primary choice and changing quality keeps every real file independently selectable', async () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const ran = [], packets = [];
+  const options = [
+    { id: 'one-1080', family: 'one', title: 'Видео 1', detail: '1080p', label: 'Видео 1 · 1080p' },
+    { id: 'one-720', family: 'one', title: 'Видео 1', detail: '720p', label: 'Видео 1 · 720p' },
+    { id: 'two', family: 'two', title: 'Фото 2', label: 'Фото 2 · JPEG' },
+  ].map(item => ({ ...item, async run() { ran.push(item.id); return `${item.id}.file`; } }));
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+    async sendMessage(message) { packets.push(message); return { ok: true }; },
+  } });
+  ui.add(document.getElementById('menu'), { title: 'Carousel', source: 'carousel', options }).click();
+  const dialog = document.querySelector('dialog'), cards = dialog.querySelectorAll('.mendo-package-card');
+  assert.equal(cards.length, 2, 'qualities of one media item share a compact card');
+  const card = cards[0], select = card.querySelector('select');
+  assert.equal(select.value, 'one-1080', 'the existing first quality is the initial choice');
+  assert.equal(dialog.querySelectorAll('input').length, 3, 'no real variant is replaced or duplicated');
+  assert.equal([...dialog.querySelectorAll('input')].some(input => input.checked), false);
+  assert.match(dialog.querySelector('[data-role="selection-count"]').textContent, /0/);
+  chooseQuality(document, select, 'one-720');
+  assert.equal(card.querySelector('.mendo-package-primary input').value, 'one-720');
+  assert.equal([...dialog.querySelectorAll('input')].some(input => input.checked), false, 'quality selection does not select a file');
+  changeChoice(document, card.querySelector('.mendo-package-primary input'), true);
+  const details = card.querySelector('details'); details.open = true;
+  changeChoice(document, details.querySelector('input[value="one-1080"]'), true);
+  assert.match(dialog.querySelector('[data-role="selection-count"]').textContent, /2/);
+  dialog.querySelector('[data-mode="files"]').click(); while (ui.running) await new Promise(setImmediate);
+  assert.deepEqual(ran, ['one-1080', 'one-720'], 'queue keeps original order and exact selected identities');
+  assert.deepEqual(packets.find(message => message.t === 'mendosave-package-begin').items.map(item => item.id), ran);
+});
+
+test('Select all adds current primary files while extras stay manual and Clear removes hidden selections too', () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const ui = create({ document, runtime: { async sendMessage() { return { ok: true }; } } });
+  ui.add(document.getElementById('menu'), { title: 'Clip', options: [
+    { id: 'v1080', group: 'Видео', label: '1080p' }, { id: 'v720', group: 'Видео', label: '720p' },
+    { id: 'photo', label: 'Фото' }, { id: 'audio', group: 'Аудио', label: 'MP3', secondary: true },
+    { id: 'caption', label: 'Текст', secondary: true },
+  ] }).click();
+  const dialog = document.querySelector('dialog'), select = dialog.querySelector('select');
+  chooseQuality(document, select, 'v720');
+  assert.ok(dialog.querySelector('select') === select, 'quality control survives its first change');
+  dialog.querySelector('[data-action="select-all"]').click();
+  const selectedIds = () => [...dialog.querySelectorAll('input')].filter(input => input.checked).map(input => input.value).sort();
+  assert.deepEqual(selectedIds(), ['photo', 'v720']);
+  const details = dialog.querySelector('details');
+  changeChoice(document, details.querySelector('input[value="v1080"]'), true);
+  assert.match(details.querySelector('summary').textContent, /1 выбран/);
+  details.open = false;
+  assert.match(dialog.querySelector('[data-role="selection-count"]').textContent, /3/);
+  dialog.querySelector('[data-action="clear"]').click();
+  assert.deepEqual(selectedIds(), []);
+  assert.equal(dialog.querySelector('[data-mode="files"]').disabled, true);
+  assert.equal(dialog.querySelector('[data-mode="zip"]').disabled, true);
+  assert.doesNotMatch(details.querySelector('summary').textContent, /выбран/);
+});
+
+test('Back and compatible reopen restore quality, disclosure and scroll, while changed compatibility invalidates presentation state', async () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  let revision = 'original';
+  const ui = create({ document, runtime: { async sendMessage() { return { ok: true }; } } });
+  const opener = ui.add(document.getElementById('menu'), { title: 'Clip', source: 'same', back() { return opener; }, options() {
+    return ['1080', '720'].map(id => ({ id, family: 'video', title: 'Видео', label: `${id}p`, compatibilityKey: `${id}:${revision}` }));
+  } });
+  opener.click();
+  let dialog = document.querySelector('dialog'), list = dialog.querySelector('.mendo-package-list');
+  chooseQuality(document, dialog.querySelector('select'), '720');
+  changeChoice(document, dialog.querySelector('.mendo-package-primary input'), true);
+  dialog.querySelector('details').open = true; list.scrollTop = 147;
+  dialog.querySelector('[data-action="back"]').click(); await new Promise(setImmediate);
+  opener.click(); dialog = document.querySelector('dialog'); list = dialog.querySelector('.mendo-package-list');
+  assert.equal(dialog.querySelector('select').value, '720');
+  assert.equal(dialog.querySelector('details').open, true);
+  assert.equal(list.scrollTop, 147);
+  assert.equal(dialog.querySelector('.mendo-package-primary input').checked, true);
+  opener.click();
+  assert.equal(document.querySelector('select').value, '720', 'refresh of the live picker preserves the current quality');
+  assert.equal(list.scrollTop, 147);
+  dialog.querySelector('[data-action="back"]').click(); await new Promise(setImmediate);
+  revision = 'changed'; opener.click(); dialog = document.querySelector('dialog');
+  assert.equal(dialog.querySelector('select').value, '1080');
+  assert.equal(dialog.querySelector('details').open, false);
+  assert.equal(dialog.querySelector('.mendo-package-list').scrollTop, 0);
+  assert.equal([...dialog.querySelectorAll('input')].some(input => input.checked), false);
+});
+
+test('package previews accept bounded HTTPS Instagram CDN images and fall back without loading page or foreign URLs', () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const urls = ['https://scontent.cdninstagram.com/preview.jpg?size=large', 'https://www.instagram.com/p/item/',
+    'https://cdninstagram.com.evil.test/image.jpg', 'javascript:alert(1)', 'https://user:pass@scontent.cdninstagram.com/a.jpg',
+    'https://scontent.cdninstagram.com:8443/a.jpg', `https://scontent.cdninstagram.com/${'a'.repeat(9000)}`];
+  const ui = create({ document, runtime: {} });
+  ui.add(document.getElementById('menu'), { title: 'Preview', options: urls.map((thumbnail, id) => ({ id, label: `Item ${id}`, thumbnail })) }).click();
+  const images = document.querySelectorAll('.mendo-package-thumbnail img');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].src, urls[0]);
+  assert.equal(images[0].getAttribute('referrerpolicy'), 'no-referrer');
+  assert.equal(document.querySelectorAll('.mendo-package-card').length, urls.length);
+  images[0].dispatchEvent(new document.defaultView.Event('error'));
+  assert.equal(document.querySelectorAll('.mendo-package-thumbnail img').length, 0, 'expired or CSP-blocked previews leave a visible icon');
+  assert.ok(document.querySelector('.mendo-package-thumbnail').textContent.trim());
+});
+
+test('running packages lock compact quality and bulk choices until the existing cancellation cleanup completes', async () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  let started, finishCleanup;
+  const entered = new Promise(resolve => { started = resolve; });
+  const cleanup = new Promise(resolve => { finishCleanup = resolve; });
+  const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+    async sendMessage(message) { if (message.t === 'mendosave-package-cancel') await cleanup; return { ok: true }; },
+  } });
+  ui.add(document.getElementById('menu'), { title: 'Clip', options: ['1080', '720'].map(id => ({ id, family: 'video', label: `${id}p`,
+    async run() { started(); return new Promise((_, reject) => { ui.signal.addEventListener('abort', () => {
+      const error = new Error('cancelled'); error.name = 'AbortError'; reject(error);
+    }, { once: true }); }); },
+  })) }).click();
+  const dialog = document.querySelector('dialog');
+  dialog.querySelector('[data-action="select-all"]').click();
+  dialog.querySelector('[data-mode="files"]').click(); await entered;
+  try {
+    const controls = [...dialog.querySelectorAll('select,[data-action="select-all"],[data-action="clear"]')];
+    assert.ok(controls.every(control => control.disabled), 'all plan controls lock during work');
+    dialog.querySelector('[data-action="cancel"]').click(); await new Promise(setImmediate);
+    assert.ok(controls.every(control => control.disabled), 'cleanup still owns the plan');
+    finishCleanup(); while (ui.running) await new Promise(setImmediate);
+    assert.ok(controls.every(control => !control.disabled));
+    assert.equal(dialog.querySelector('.mendo-package-primary input').checked, true);
+  } finally {
+    void ui.cancel(); finishCleanup(); while (ui.running) await new Promise(setImmediate);
+  }
+});
+
+test('closed extra variants still count toward the 64-file limit and remain available for revision', () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const ui = create({ document, runtime: {} });
+  ui.add(document.getElementById('menu'), { title: 'Clip', options: Array.from({ length: 65 }, (_, id) => ({ id: `v${id}`, family: 'video', label: `Quality ${id}` })) }).click();
+  const dialog = document.querySelector('dialog'), details = dialog.querySelector('details');
+  for (const input of dialog.querySelectorAll('input')) changeChoice(document, input, true);
+  details.open = false;
+  assert.match(details.querySelector('summary').textContent, /64 выбрано/);
+  assert.match(dialog.querySelector('[data-role="selection-count"]').textContent, /65/);
+  assert.equal(dialog.querySelector('[data-mode="files"]').disabled, true);
+  assert.equal(dialog.querySelector('[data-mode="zip"]').disabled, true);
+  dialog.querySelector('[data-action="select-all"]').click();
+  assert.equal([...dialog.querySelectorAll('input')].filter(input => input.checked).length, 65, 'bulk selection never silently drops extra qualities');
+  dialog.querySelector('[data-action="clear"]').click();
+  assert.equal([...dialog.querySelectorAll('input')].some(input => input.checked), false);
+});
+
+test('flat numeric option identities stay independent even when zero is not the first item', () => {
+  const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+  const ui = create({ document, runtime: {} });
+  ui.add(document.getElementById('menu'), { title: 'Flat choices', options: [{ id: 1, label: 'One' }, { id: 0, label: 'Zero' }] }).click();
+  assert.equal(document.querySelectorAll('.mendo-package-card').length, 2);
+  assert.equal(document.querySelectorAll('select').length, 0);
+  assert.deepEqual([...document.querySelectorAll('input')].map(input => input.value), ['1', '0']);
+});
+
+test('package preflight blocks 65 choices before any work and recovers at 64 without dropping selections', async t => {
+  for (const mode of ['files', 'zip']) await t.test(mode, async () => {
+    const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+    const packets = [], ran = [];
+    const options = Array.from({ length: 65 }, (_, index) => ({ id: `item-${index}`, label: `Item ${index}`,
+      async run() { ran.push(index); return `item-${index}.txt`; },
+    }));
+    const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+      async sendMessage(message) { packets.push(message); return { ok: true, filename: 'Clip.zip' }; },
+    } });
+    ui.add(document.getElementById('menu'), { title: 'Clip', options });
+    document.querySelector('.mendo-package-open').click();
+    const dialog = document.querySelector('dialog');
+    let inputs = [...dialog.querySelectorAll('input')];
+    const change = (input, checked) => { input.checked = checked; input.dispatchEvent(new document.defaultView.Event('change')); };
+    for (const input of inputs) change(input, true);
+    const files = dialog.querySelector('[data-mode="files"]'), zip = dialog.querySelector('[data-mode="zip"]');
+    assert.equal(files.disabled, true); assert.equal(zip.disabled, true);
+    const status = dialog.querySelector('[role="status"]');
+    assert.match(status.textContent, /65/); assert.match(status.textContent, /не больше 64/);
+    assert.equal(inputs.filter(input => input.checked).length, 65, 'the user can revise every selected choice');
+    files.click(); zip.click();
+    for (const [button, key] of [[files, 'Enter'], [zip, ' ']]) {
+      const event = new UserEvent('keydown', { bubbles: true, cancelable: true }); event.key = key; button.dispatchEvent(event);
+    }
+    await new Promise(setImmediate);
+    assert.equal(ui.running, false); assert.deepEqual(packets, []); assert.deepEqual(ran, []);
+    document.querySelector('.mendo-package-open').click();
+    inputs = [...dialog.querySelectorAll('input')];
+    assert.equal(inputs.filter(input => input.checked).length, 65, 'refresh retains the selection for the same source');
+    assert.equal(files.disabled && zip.disabled, true);
+    assert.match(status.textContent, /65.*не больше 64/, 'refresh cannot replace the preflight warning with the idle prompt');
+    change(inputs[64], false);
+    assert.equal(files.disabled, false); assert.equal(zip.disabled, false);
+    assert.doesNotMatch(status.textContent, /Снимите/);
+    dialog.querySelector(`[data-mode="${mode}"]`).click();
+    while (ui.running) await new Promise(setImmediate);
+    const started = packets.find(message => message.t === 'mendosave-package-begin');
+    assert.equal(started.mode, mode);
+    assert.deepEqual(started.items.map(item => item.id), options.slice(0, 64).map(item => item.id));
+    assert.deepEqual(ran, Array.from({ length: 64 }, (_, index) => index));
+    assert.match(status.textContent, /Готово/);
+  });
+});
+
 test('Blob preparation waits for producer readiness and retains its lease until native finish settles', async () => {
   const transport = producerPorts({ autoAck: false }), calls = [];
   let finish;
@@ -167,6 +378,51 @@ test('Blob host loss during asynchronous byte reading prevents a later chunk or 
   while (!calls.includes('mendosave-blob-open')) await new Promise(setImmediate);
   transport.ports[0].disconnect(); read(Uint8Array.of(1, 2, 3).buffer); await rejected;
   assert.deepEqual(calls, ['mendosave-ensure', 'mendosave-blob-open', 'mendosave-blob-abort']);
+});
+
+test('a pre-aborted Blob caller never acquires a producer or opens a transfer', async () => {
+  const controller = new AbortController(), transport = producerPorts(), calls = [];
+  controller.abort();
+  const ui = create({ runtime: { connect: transport.connect,
+    async sendMessage(message) { calls.push(message.t); return { ok: true }; },
+  } });
+  await assert.rejects(ui.saveBlob(new Blob(['bytes']), 'photo.jpg', { signal: controller.signal }), { name: 'AbortError' });
+  assert.deepEqual(transport.ports, []); assert.deepEqual(calls, []);
+});
+
+test('caller cancellation aborts Blob transfer or Save As immediately and drains cleanup before producer release', async t => {
+  for (const phase of ['read', 'chunk', 'finish']) await t.test(phase, async () => {
+    const controller = new AbortController(), transport = producerPorts(), calls = [];
+    let entered, releaseBoundary, releaseCleanup;
+    const reached = new Promise(resolve => { entered = resolve; });
+    const boundary = new Promise(resolve => { releaseBoundary = resolve; });
+    const cleanup = new Promise(resolve => { releaseCleanup = resolve; });
+    const blob = { type: 'image/jpeg', size: 3, slice: () => ({ async arrayBuffer() {
+      if (phase === 'read') { entered(); await boundary; }
+      return Uint8Array.of(1, 2, 3).buffer;
+    } }) };
+    const ui = create({ runtime: { connect: transport.connect,
+      async sendMessage(message) {
+        calls.push(message.t);
+        if (message.t === `mendosave-blob-${phase}`) { entered(); await boundary; }
+        if (message.t === 'mendosave-blob-abort') await cleanup;
+        return { ok: true, filename: 'photo.jpg' };
+      },
+    } });
+    const saving = ui.saveBlob(blob, 'photo.jpg', { signal: controller.signal });
+    const rejected = assert.rejects(saving, { name: 'AbortError' });
+    try {
+      await reached; controller.abort(); await new Promise(setImmediate);
+      assert.equal(calls.includes('mendosave-blob-abort'), true, 'abort reaches the host while the original operation is pending');
+      assert.equal(transport.ports[0].disconnected, false);
+      releaseBoundary(); await new Promise(setImmediate);
+      assert.equal(transport.ports[0].disconnected, false, 'abort cleanup still owns the producer');
+      releaseCleanup(); await rejected;
+      assert.equal(transport.ports[0].disconnected, true);
+      assert.equal(calls.filter(name => name === 'mendosave-blob-abort').length, 1);
+      if (phase !== 'finish') assert.equal(calls.includes('mendosave-blob-finish'), false);
+    } finally { releaseBoundary(); releaseCleanup(); await rejected; }
+  });
 });
 
 test('Blob transfer ID creation failure releases a ready producer without opening host transfer state', async () => {
@@ -620,23 +876,27 @@ test('Back reconstructs the current source menu and focuses a live opener withou
     async sendMessage(message) { packets.push(message); return { ok: true }; },
   } });
   const render = () => {
-    const menu = document.createElement('div'); menu.dataset.source = source; document.body.append(menu);
+    const menu = document.createElement('div'); menu.dataset.source = source; menu.scrollTop = 173; document.body.append(menu);
     const opener = ui.add(menu, { title: 'Same title', source, close() { menu.remove(); },
       back() { return render(); }, options: ['video', 'audio'].map(id => ({ id, label: `${source} ${id}`,
         async run() { ran.push(source); return `${id}.file`; } })) });
-    opener.focus = () => { focused = opener; };
+    opener.focus = options => { focused = opener; if (!options?.preventScroll) menu.scrollTop = 0; };
     return opener;
   };
   const oldOpener = render(); oldOpener.click();
   assert.equal(oldOpener.isConnected, false);
   const back = document.querySelector('[data-action="back"]');
   assert.ok(back, 'the header provides an explicit return action');
-  assert.equal(back.textContent, '← Назад');
+  assert.equal(back.textContent, '');
+  assert.ok(back.querySelector('svg'));
+  assert.equal(back.getAttribute('aria-label'), 'Назад');
+  assert.equal(back.title, 'Назад');
   assert.equal(document.querySelector('[data-action="cancel"]').hidden, true, 'idle footer has no equal Close action');
   source = 'material-B'; back.click(); await new Promise(setImmediate);
   const liveOpener = document.querySelector('.mendo-package-open');
   assert.ok(liveOpener?.isConnected); assert.ok(focused === liveOpener);
   assert.equal(liveOpener.parentElement.dataset.source, 'material-B');
+  assert.equal(liveOpener.parentElement.scrollTop, 173, 'restoring focus must preserve the returned menu position');
   assert.equal(document.querySelectorAll('dialog').length, 0);
   assert.equal(document.querySelectorAll('.mendo-package-resume').length, 0);
   assert.deepEqual(packets, []); assert.deepEqual(ran, []);

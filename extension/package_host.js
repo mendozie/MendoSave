@@ -6,7 +6,7 @@
       if (!Number.isInteger(owner.tabId) || owner.frameId !== 0
         || !/^[A-Za-z0-9_-]{1,100}$/.test(request.packageId || '')
         || !['files', 'zip'].includes(request.mode) || typeof request.title !== 'string' || request.title.length > 250
-        || !Array.isArray(request.items) || !request.items.length || request.items.length > 20
+        || !Array.isArray(request.items) || !request.items.length || request.items.length > 64
         || (request.mode === 'zip' && request.items.length < 2)
         || request.items.some(item => !item || typeof item.id !== 'string' || !item.id.length || item.id.length > 100
           || typeof item.label !== 'string' || !item.label.length || item.label.length > 250)

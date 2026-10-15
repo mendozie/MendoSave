@@ -12,6 +12,43 @@ function capturePicker(app) {
   };
 }
 
+test('Coub Back reuses validated current metadata without another request', async () => {
+  const payload = require('./fixtures/coub-item.json').payload;
+  const app = adapter('coub.js', '<div data-permalink="or1i6abuay"><div class="viewer"></div></div>',
+    'https://coub.com/view/or1i6abuay', async () => ({ ok: true, json: async () => payload }));
+  capturePicker(app); app.click(app.document.querySelector('.mendosave-coub-btn')); await app.settle();
+  const picker = app.picker, reads = app.requests.length;
+  picker.close(); const control = await picker.back();
+  assert.equal(control.isConnected, true);
+  assert.equal(app.requests.length, reads);
+  assert.ok(app.document.querySelector('.mendo-menu-header'));
+  assert.ok(app.document.querySelector('.mendo-menu-group'));
+});
+
+test('Rutube Back reuses current options and quality metadata without another request', async () => {
+  const app = adapter('rutube.js', '<div class="player"><video></video></div>',
+    'https://rutube.ru/video/5295f2a858cdace0855c40f8a48f4676/', async url => url.includes('/api/play/options/')
+      ? { ok: true, json: async () => ({ title: 'Fixture', duration: 1000, video_balancer: { m3u8: 'https://media.invalid/master.m3u8' } }) }
+      : { ok: true, text: async () => '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000,RESOLUTION=256x144\n144.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=640x360\n360.m3u8\n' });
+  capturePicker(app); app.click(app.document.querySelector('#mendosave-rutube-btn')); await app.settle();
+  const picker = app.picker, reads = app.requests.length;
+  picker.close(); const control = await picker.back();
+  assert.equal(control.isConnected, true);
+  assert.equal(app.requests.length, reads);
+});
+
+test('Twitch Back reuses current clip metadata without another request', async () => {
+  const app = adapter('twitch_ui.js', '<video></video><div class="player-controls__right-control-group"></div>',
+    'https://clips.twitch.tv/OriginalClip', async () => ({ ok: true, json: async () => ({ data: { clip: {
+      title: 'Fixture', videoQualities: [{ quality: '360', sourceURL: 'https://media.invalid/a.mp4' }, { quality: '720', sourceURL: 'https://media.invalid/b.mp4' }],
+    } } }) }));
+  capturePicker(app); app.click(app.document.querySelector('#mendosave-twitch-record')); await app.settle();
+  const picker = app.picker, reads = app.requests.length;
+  picker.close(); const control = await picker.back();
+  assert.equal(control.isConnected, true);
+  assert.equal(app.requests.length, reads);
+});
+
 test('Coub standalone controls share arrows, Home/End and restore the live trigger on Escape', async () => {
   const payload = require('./fixtures/coub-item.json').payload;
   const app = adapter('coub.js', '<div data-permalink="or1i6abuay"><div class="viewer"></div></div>',

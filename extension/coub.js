@@ -75,6 +75,7 @@
   const MUX_BYTE_LIMIT = 700_000_000;
 
   let menu;
+  const menuState = MendoMenu.createState();
   let menuAnchor;
   let busy = false;
   let toastBox;
@@ -478,6 +479,7 @@
       return filename;
     } catch (error) {
       acceptingProgress = false;
+      if (error?.name !== 'AbortError') menuState.clear();
       if (error?.name === 'AbortError') {
         notification.set('Загрузка отменена', 1);
         notification.hide(5000);
@@ -499,22 +501,7 @@
   // ---- UI ---------------------------------------------------------------------
 
   function createIcon() {
-    const namespace = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(namespace, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(namespace, 'circle');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16.9');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#35d477');
-    ring.setAttribute('stroke-width', '2.2');
-    const arrows = document.createElementNS(namespace, 'path');
-    arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
-    svg.append(ring, arrows);
-    return svg;
+    return MendoMenu.icon(document);
   }
 
   let toastRevision = 0;
@@ -545,6 +532,7 @@
   }
 
   function closeMenu(restoreFocus = false) {
+    menuState.remember(menu);
     menu?.remove();
     menu = undefined;
     if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
@@ -613,19 +601,20 @@
     menu = document.createElement('div');
     const openedMenu = menu, sourceHref = location.href;
     const permalink = permalinkFor(button);
+    menuState.route(sourceHref);
+    const sourceKey = `${sourceHref}|${permalink}`;
+    const cachedInfo = menuState.get(sourceKey);
     const current = () => {
       if (menu !== openedMenu) return false;
       if (location.href !== sourceHref || permalinkFor(button) !== permalink) { closeMenu(); return false; }
       return true;
     };
     menu.className = 'mendosave-coub-menu';
-    const heading = document.createElement('div');
-    heading.className = 'mendosave-coub-head';
-    heading.textContent = `MendoSave v${chrome.runtime.getManifest().version}`;
+    MendoMenu.decorate(menu, { title: 'Coub', subtitle: 'Сохранить коуб', close: () => closeMenu(true) });
     const loading = document.createElement('div');
     loading.className = 'mendosave-coub-item mendosave-coub-muted';
     loading.textContent = 'Читаю данные коуба…';
-    menu.append(heading, loading);
+    menu.append(loading);
     document.body.appendChild(menu);
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
@@ -633,11 +622,13 @@
 
     try {
       if (!permalink) throw new Error('не удалось определить коуб');
-      const info = await loadCoub(permalink);
+      const info = cachedInfo || await loadCoub(permalink);
       if (!current()) return;
       loading.remove();
       const choices = buildChoices(info);
       if (!choices.length) throw new Error('у этого коуба нет файлов для скачивания');
+      MendoMenu.decorate(menu, { title: 'Coub', subtitle: info.title || info.permalink, close: () => closeMenu(true) });
+      const groups = new Map();
       for (const choice of choices) {
         const item = document.createElement('div');
         item.className = 'mendosave-coub-item';
@@ -656,7 +647,11 @@
           void runChoice(info, choice);
         });
         menu.append(item);
+        const title = choice.kind === 'audio' ? 'Аудио' : choice.kind === 'sound' ? 'Видео со звуком' : 'Видео без звука';
+        if (!groups.has(title)) groups.set(title, []);
+        groups.get(title).push(item);
       }
+      MendoMenu.compact(menu, { groups: [...groups].map(([title, items]) => ({ title, items })), onToggle: () => positionMenu(button) });
       if (choices.length > 1) globalThis.MendoPackageUI?.add(menu, {
         title: info.title || info.permalink, source: `coub:${info.permalink}`,
         close: closeMenu,
@@ -672,13 +667,18 @@
         options: choices.map((choice) => ({
           id: `coub-${choice.kind}-${choice.video?.key || 'mp3'}-${choice.loop ? 'loop' : 'single'}`,
           label: choice.text, compatibilityKey: choice.text, group: choice.kind === 'audio' ? 'Аудио' : 'Видео',
+          family: choice.kind, title: choice.kind === 'audio' ? 'Аудио' : choice.kind === 'sound' ? 'Видео со звуком' : 'Видео без звука',
+          detail: [choice.text, choice.hint].filter(Boolean).join(' · '), secondary: choice.kind === 'audio',
           run: () => runChoice(info, choice),
         })),
       });
       globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-coub-item[role="button"],.mendo-package-open');
+      menuState.set(sourceKey, info, () => button.isConnected && permalinkFor(button) === permalink);
+      menuState.attach(menu, sourceKey, JSON.stringify(choices.map(choice => [choice.kind, choice.video?.key, choice.loop, choice.text, choice.hint])));
       positionMenu(button);
     } catch (error) {
       if (!current()) return;
+      menuState.clear();
       loading.remove();
       menu.append(createElement('div', 'mendosave-coub-item mendosave-coub-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
@@ -710,6 +710,7 @@
   // Coub's own class and is already `position: relative`.
 
   function ensureButtons() {
+    menuState.route(location.href);
     for (const viewer of document.querySelectorAll('.viewer')) {
       if (viewer.querySelector(`.${BUTTON_CLASS}`)) continue;
       if (!permalinkFor(viewer)) continue;

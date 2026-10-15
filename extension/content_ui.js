@@ -16,6 +16,7 @@
 
   let requestSequence = 1;
   let menu;
+  const menuState = MendoMenu.createState();
   let menuOpening = false;
   let menuRequest = 0;
   let downloadInProgress = false;
@@ -187,22 +188,7 @@
   // The brand icon everywhere: a perfectly round ring with two equilateral
   // down-arrows that touch (the upper apex meets the lower triangle's edge).
   function createCircleIcon() {
-    const namespace = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(namespace, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(namespace, 'circle');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16.9');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#35d477');
-    ring.setAttribute('stroke-width', '2.2');
-    const arrows = document.createElementNS(namespace, 'path');
-    arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
-    svg.append(ring, arrows);
-    return svg;
+    return MendoMenu.icon(document);
   }
 
   // The Shorts variant deliberately does not share .mendosave-download-btn: that
@@ -229,7 +215,7 @@
       circle.append(createCircleIcon());
       button.append(circle, createElement('span', 'mendosave-shorts-label', 'MendoSave'));
     } else if (variant === 'compact') {
-      button.append(createCircleIcon(), createElement('span', null, 'MendoSave'));
+      button.append(createCircleIcon());
     } else {
       button.append(createCircleIcon());
     }
@@ -270,6 +256,7 @@
   let mountedVideoId = null;
 
   function ensureButton() {
+    menuState.route(location.href);
     // Swiping the Shorts feed replaces the video without a navigation event; an
     // open menu would keep offering the previous reel's qualities.
     const currentVideoId = videoIdFromLocation();
@@ -321,6 +308,7 @@
   }
 
   function closeMenu() {
+    menuState.remember(menu);
     menuRequest += 1;
     menuOpening = false;
     if (menu?.contains(document.activeElement)) document.getElementById(BUTTON_ID)?.focus();
@@ -335,15 +323,6 @@
 
   function createHeading(text) {
     return createElement('div', 'mendosave-menu-head', text);
-  }
-
-  function createBrandHeading() {
-    const heading = createElement('div', 'mendosave-menu-head mendosave-brand-head');
-    const label = createElement('span');
-    const version = chrome.runtime.getManifest().version;
-    label.append(`MendoSave v${version}`);
-    heading.append(label);
-    return heading;
   }
 
   function setItemLabel(item, title, description) {
@@ -398,10 +377,10 @@
   let packageOptions = [];
   function addDownloadItems(info, { videoAllowed = true } = {}) {
     if (videoAllowed) {
-      menu.append(createHeading('Видео'));
+      const items = [];
       const heights = [...new Set(info.heights || [])].sort((a, b) => b - a);
       for (const height of heights) {
-        packageOptions.push({ id: `video-${height}`, label: `Видео ${height}p`, group: 'Видео',
+        packageOptions.push({ id: `video-${height}`, label: `Видео ${height}p`, group: 'Видео', title: 'Видео', detail: `${height}p · MP4`, family: 'video',
           run: (transcode) => startDownload({ format: 'mp4', height }, info, { transcode }) });
         const item = createElement('div', 'mendosave-menu-item');
         setItemLabel(item, `${height}p`, 'MP4 video');
@@ -410,12 +389,14 @@
           startDownload({ format: 'mp4', height }, info);
         });
         menu.append(item);
+        items.push(item);
       }
+      MendoMenu.compact(menu, { groups: [{ title: 'Видео', items }] });
     }
 
-    menu.append(createHeading('Аудио'));
+    const audioItems = [];
     for (const audio of audioFormatsFor(info)) {
-      packageOptions.push({ id: `audio-${audio.id}`, label: `Аудио ${audio.title} · ${audio.note}`, group: 'Аудио',
+      packageOptions.push({ id: `audio-${audio.id}`, label: `Аудио ${audio.title} · ${audio.note}`, group: 'Аудио', title: 'Аудио', detail: `${audio.title} · ${audio.note}`, family: 'audio', secondary: Boolean(videoAllowed && info.heights?.length),
         run: () => startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, audio.title, audio.note);
@@ -424,7 +405,9 @@
         startDownload({ format: 'mp3', height: null, audioFormat: audio.id }, info);
       });
       menu.append(item);
+      audioItems.push(item);
     }
+    MendoMenu.compact(menu, { groups: [{ title: 'Аудио', items: audioItems }] });
   }
 
   function addLiveSection(info) {
@@ -474,7 +457,7 @@
     ];
     for (const [extension, format, description] of formats) {
       const label = `${extension} · ${language} · ${description}`;
-      packageOptions.push({ id: `sub-${format}`, label, group: 'Субтитры', compatibilityKey: JSON.stringify([format, subtitleSource]),
+      packageOptions.push({ id: `sub-${format}`, label, group: 'Субтитры', family: `subtitle-${language}`, title: `Субтитры · ${language}`, detail: `${extension} · ${description}`, secondary: true, compatibilityKey: JSON.stringify([format, subtitleSource]),
         run: () => downloadSubtitles(info, format, subtitleSource) });
       const item = createElement('div', 'mendosave-menu-item');
       setItemLabel(item, label);
@@ -524,6 +507,10 @@
     return Object.freeze(availableOptions.map((option) => Object.freeze({
       id: option.id,
       group: option.group,
+      title: option.title,
+      detail: option.id.startsWith('video-') ? `${option.detail} · ${transcode ? 'H.264/AAC' : 'исходные кодеки'}` : option.detail,
+      family: option.family,
+      secondary: option.secondary,
       compatibilityKey: option.compatibilityKey || (option.id.startsWith('video-') ? `${option.id}:${transcode}` : option.id),
       label: option.id.startsWith('video-')
         ? `${option.label} · ${transcode ? 'H.264/AAC' : 'исходные кодеки'}` : option.label,
@@ -547,13 +534,24 @@
     menuOpening = true;
     const request = ++menuRequest;
     const sourceVideoId = videoIdFromLocation();
+    const sourceHref = location.href;
+    menuState.route(sourceHref);
+    const sourceKey = `${sourceHref}|${sourceVideoId}`;
+    const snapshot = menuState.get(sourceKey);
 
     try {
-      const [info, availability, settings] = await Promise.all([
-        callHook('info'),
+      const reusable = snapshot?.info.videoId === sourceVideoId && !snapshot.info.isLive;
+      const [cachedOrFreshInfo, availability, settings] = await Promise.all([
+        reusable ? snapshot.info : callHook('info'),
         callHook('subs-available'),
         chrome.storage.local.get(['transcode']),
       ]);
+      // A selected caption track can change without navigating the video.
+      // Re-read its owning info only when the lightweight source probe proves
+      // the cached revision is stale; never relabel the old revision as new.
+      const info = reusable && availability?.available && Number.isSafeInteger(cachedOrFreshInfo.sourceRevision)
+        && availability.source?.revision !== cachedOrFreshInfo.sourceRevision
+        ? await callHook('info') : cachedOrFreshInfo;
       if (request !== menuRequest || sourceVideoId !== videoIdFromLocation() || info.videoId !== sourceVideoId) {
         return document.getElementById(BUTTON_ID);
       }
@@ -564,7 +562,7 @@
       let packageOpener;
       packageOptions = [];
       packageTranscode = Boolean(settings.transcode);
-      menu.append(createBrandHeading());
+      MendoMenu.decorate(menu, { title: IS_MUSIC ? 'YouTube Music' : 'YouTube', subtitle: info.title, close: closeMenu });
       if (info.isLive) {
         addLiveSection(info);
       } else {
@@ -583,16 +581,21 @@
       }
       document.body.append(menu);
 
+      MendoMenu.bind(menu, closeMenu);
+      if (!info.isLive) {
+        menuState.set(sourceKey, { info });
+        menuState.attach(menu, sourceKey, JSON.stringify(snapshotPackageOptions(info, packageOptions).map(option => [option.id, option.compatibilityKey])));
+      } else menuState.clear();
       const buttonRect = document.getElementById(BUTTON_ID)?.getBoundingClientRect();
       if (buttonRect) {
         MendoMenu.place(menu, buttonRect, window.innerWidth, window.innerHeight);
       }
-      MendoMenu.bind(menu, closeMenu);
       const opened = menu;
       setTimeout(() => { if (menu === opened) document.addEventListener('click', closeMenuOnOutsideClick, true); });
       return packageOpener || document.getElementById(BUTTON_ID);
     } catch (error) {
       if (request !== menuRequest || sourceVideoId !== videoIdFromLocation()) return document.getElementById(BUTTON_ID);
+      menuState.clear();
       menu?.remove(); menu = undefined;
       const notification = getToast();
       notification.set(`Ошибка: ${error.message || error}`, 1);
@@ -901,6 +904,7 @@
       }
       notification.set(`Ошибка: ${error.message || error}`, 1);
       notification.hide(6000);
+      menuState.clear();
       if (globalThis.MendoPackageUI?.running) throw error;
       await reportError('ui/subtitles', error, { format, videoId: material.videoId });
     }
@@ -1207,6 +1211,7 @@
         }
         return false;
       }
+      menuState.clear();
       if (packageDownload) {
         if (error?.details?.reloadRequired) {
           const terminal = new Error('Пакет остановлен: получение медиаданных прервано. Автоматическое обновление и продолжение не выполнялись. Уже сохранённые файлы остаются. Для повторной попытки обновите исходную страницу и запустите пакет заново.', { cause: error });
@@ -2420,7 +2425,7 @@
 
   new MutationObserver(scheduleButton).observe(document.documentElement, { childList: true, subtree: true });
   document.addEventListener('yt-navigate-finish', scheduleButton);
-  window.addEventListener('resize', () => { closeMenu(); scheduleButton(); });
+  window.addEventListener('resize', scheduleButton);
   scheduleButton();
   // With an active queue the freshly navigated track starts playing out loud
   // for the seconds before the download begins; silence it as early as

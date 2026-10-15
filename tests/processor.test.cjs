@@ -10,8 +10,8 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
       id: 'mendosave@test', getURL: (path) => `moz-extension://test/${path}`,
       onMessage: { addListener(fn) { listener = fn; } },
       async sendMessage(message) {
-        if (message.t === 'mendosave-recovery-read') return State.readRecovery
-          ? State.readRecovery(message) : { ok: true, entries: State.entries || [] };
+        if (message.t === 'mendosave-recovery-read') return { maxEntries: 320, ...(State.readRecovery
+          ? await State.readRecovery(message) : { ok: true, entries: State.entries || [] }) };
         return sendMessage ? sendMessage(message) : { ok: true };
       },
     },
@@ -48,6 +48,80 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
   });
   return { message, close() { for (const timer of timers) clearInterval(timer); } };
 }
+
+test('strict original audio never falls back to AAC encoding when stream copy fails', async () => {
+  const executions = [], saves = [];
+  const processor = processorContext(message => {
+    if (message.t === 'mendosave-save') { saves.push(message); return { ok: true, id: 42 }; }
+    if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
+    return { ok: true };
+  }, class {
+    on() {} async load() {} terminate() {} async writeFile() {} async deleteFile() {}
+    async exec(args) { executions.push([...args]); return args[args.indexOf('-c:a') + 1] === 'copy' ? 1 : 0; }
+    async readFile() { return new Uint8Array([1, 2, 3]); }
+  });
+  const source = Buffer.concat(['ftyp', 'moov', 'mdat'].map(type => Buffer.from([0, 0, 0, 8, ...Buffer.from(type)])));
+  try {
+    assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'original', filename: 'Original.m4a',
+      format: 'mp3', audioFormat: 'original', audioCopyOnly: true, audioMime: 'audio/mp4; codecs="mp4a.40.2"' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-chunk', jobId: 'original', track: 'audio', b64: source.toString('base64') })).ok, true);
+    const result = await processor.message({ t: 'mendosave-finalize', jobId: 'original' });
+    assert.equal(result.ok, false, 'copy failure must not silently produce a lossy replacement');
+    assert.equal(executions.length, 1);
+    assert.equal(executions[0][executions[0].indexOf('-c:a') + 1], 'copy');
+    assert.deepEqual(saves, []);
+    assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'after', format: 'mp3' })).ok, true);
+    await processor.message({ t: 'mendosave-abort', jobId: 'after' });
+  } finally { processor.close(); }
+});
+
+test('invalid copy-only audio requests are rejected before claiming the processor', async () => {
+  const processor = processorContext();
+  const original = { t: 'mendosave-begin', jobId: 'invalid-original', format: 'mp3',
+    audioFormat: 'original', audioCopyOnly: true, audioMime: 'audio/mp4; codecs="mp4a.40.2"' };
+  try {
+    for (const invalid of [
+      ...[null, 'true', 1, {}, []].map(audioCopyOnly => ({ audioCopyOnly })),
+      { format: 'mp4' }, { audioFormat: 'mp3' }, { audioFormat: undefined },
+      { audioMime: 'audio/mpeg' }, { audioMime: 'audio/mp4' },
+      { audioCaptureRate: 2 }, { audioCaptureRate: 1.00001 }, { audioCaptureRate: '1' }, { audioCaptureRate: 0 },
+    ]) {
+      const result = await processor.message({ ...original, ...invalid });
+      assert.equal(result.ok, false, JSON.stringify(invalid));
+      assert.match(result.error, /параметр/i);
+    }
+    assert.equal((await processor.message({ ...original, jobId: 'valid-original', audioCaptureRate: 1 })).ok, true);
+    await processor.message({ t: 'mendosave-abort', jobId: 'valid-original' });
+  } finally { processor.close(); }
+});
+
+test('copy-only audio can save M4A while ordinary original-audio jobs retain the AAC fallback', async t => {
+  for (const audioCopyOnly of [true, false, undefined]) await t.test(String(audioCopyOnly), async () => {
+    const executions = [], saves = [];
+    const source = Buffer.concat(['ftyp', 'moov', 'mdat'].map(type => Buffer.from([0, 0, 0, 8, ...Buffer.from(type)])));
+    const processor = processorContext(message => {
+      if (message.t === 'mendosave-save') { saves.push(message); return { ok: true, id: 42 }; }
+      if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
+      return { ok: true };
+    }, class {
+      on() {} async load() {} terminate() {} async writeFile() {} async deleteFile() {}
+      async exec(args) {
+        const codec = args[args.indexOf('-c:a') + 1]; executions.push(codec);
+        return audioCopyOnly === true || codec !== 'copy' ? 0 : 1;
+      }
+      async readFile() { return new Uint8Array(source); }
+    });
+    try {
+      assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'audio', filename: 'Audio.mp3',
+        format: 'mp3', audioFormat: 'original', audioCopyOnly, audioMime: 'audio/mp4; codecs="mp4a.40.2"' })).ok, true);
+      await processor.message({ t: 'mendosave-chunk', jobId: 'audio', track: 'audio', b64: source.toString('base64') });
+      const result = await processor.message({ t: 'mendosave-finalize', jobId: 'audio' });
+      assert.equal(result.ok, true); assert.equal(result.filename, 'Audio.m4a');
+      assert.deepEqual(executions, audioCopyOnly === true ? ['copy'] : ['copy', 'aac']);
+      assert.equal(saves.length, 1); assert.equal(saves[0].filename, 'Audio.m4a');
+    } finally { processor.close(); }
+  });
+});
 
 test('staging enforces per-track and aggregate byte budgets and releases rejected data', async () => {
   const processor = processorContext(undefined, undefined, Date, undefined, { smallStagingBudget: true });
@@ -519,6 +593,8 @@ test('unreachable worker still parks exact ready bytes and recovery flush saves 
 function recoveryFixture(onSave, onIndexWrite = () => {}, options = {}) {
   const files = new Map(), state = { entries: [], fastTimers: true };
   if (options.readRecovery) state.readRecovery = () => options.readRecovery(state.entries);
+  if (options.recoveryBackend) state.readRecovery = () => options.recoveryBackend.message(
+    { t: 'mendosave-recovery-read' }, options.recoverySender);
   state.storage = { async estimate() { return { usage: 0, quota: 8 * 1024 ** 3 }; },
     async getDirectory() { return { async getDirectoryHandle(name) {
       if (name !== 'nvs-recovered') return {
@@ -551,10 +627,17 @@ function recoveryFixture(onSave, onIndexWrite = () => {}, options = {}) {
         }, async getFile() { return files.get(id); } };
       }, async removeEntry(id) { files.delete(id); } };
     } }; } };
-  const processor = processorContext(message => {
+  const processor = processorContext(async message => {
     if (message.t === 'mendosave-save') return onSave(message);
     if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
-    if (message.t === 'mendosave-recovery-write') { onIndexWrite(message); state.entries = message.entries; }
+    if (message.t === 'mendosave-recovery-write') {
+      onIndexWrite(message);
+      if (options.recoveryBackend) {
+        const response = await options.recoveryBackend.message(message, options.recoverySender);
+        if (!response?.ok) return response;
+      }
+      state.entries = message.entries;
+    }
     return { ok: true };
   }, undefined, Date, undefined, state);
   function park(id) {
@@ -563,6 +646,130 @@ function recoveryFixture(onSave, onIndexWrite = () => {}, options = {}) {
   }
   return { processor, files, state, park };
 }
+
+function boundedRecoveryFixture(onSave = () => ({ ok: true, id: 42 })) {
+  const backend = require('./background-harness.cjs').browserContext();
+  const fixture = recoveryFixture(onSave, undefined, { recoveryBackend: backend, recoverySender: backend.processorSender() });
+  return { ...fixture, backend };
+}
+
+async function prepareRecoveryPackage(processor, packageId, count = 64) {
+  const items = Array.from({ length: count }, (_, index) => ({ id: `item${index}`, label: `Item ${index}` }));
+  const begun = await processor.message({ t: 'mendosave-package-begin', packageId, mode: 'zip', title: packageId, items });
+  assert.equal(begun.ok, true, begun.error);
+  for (let index = 0; index < count; index++) {
+    const transferId = crypto.randomUUID(), bytes = Buffer.from(`${packageId}-${index}`);
+    const binding = { packageId, packageIndex: index };
+    assert.equal((await processor.message({ t: 'mendosave-package-next', packageId, index })).ok, true);
+    const opened = await processor.message({ t: 'mendosave-blob-open', transferId, filename: `${packageId}-${index}.txt`, mime: 'text/plain', size: bytes.length, ...binding });
+    assert.equal(opened.ok, true, opened.error);
+    assert.equal((await processor.message({ t: 'mendosave-blob-chunk', transferId, sequence: 0, data: bytes.toString('base64'), ...binding })).ok, true);
+    const finished = await processor.message({ t: 'mendosave-blob-finish', transferId, ...binding });
+    assert.equal(finished.ok, true, finished.error);
+    assert.equal((await processor.message({ t: 'mendosave-package-complete', packageId, index })).ok, true);
+  }
+}
+
+async function parkStandaloneAudio(processor, jobId) {
+  assert.equal((await processor.message({ t: 'mendosave-begin', jobId, format: 'mp3', audioMime: 'audio/mpeg', filename: `${jobId}.mp3` })).ok, true);
+  await processor.message({ t: 'mendosave-chunk', jobId, track: 'audio', b64: '//uQAAECAw==' });
+  return processor.message({ t: 'mendosave-finalize', jobId });
+}
+
+test('two cancelled 64-output ZIPs remain recoverable while another full retry finishes through the real recovery backend', async () => {
+  const { processor, backend, files } = boundedRecoveryFixture();
+  try {
+    await new Promise(setImmediate);
+    for (const id of ['cancelA', 'cancelB']) {
+      await prepareRecoveryPackage(processor, id);
+      assert.equal((await processor.message({ t: 'mendosave-package-cancel', packageId: id })).ok, true);
+    }
+    const retained = structuredClone(backend.data.nova_recovered);
+    assert.equal(retained.length, 128);
+    for (const entry of retained) {
+      assert.equal(entry.manualOnly, true);
+      assert.equal(await files.get(entry.id).text(), entry.filename.slice(0, -4));
+    }
+    await prepareRecoveryPackage(processor, 'retry');
+    const finished = await processor.message({ t: 'mendosave-package-finish', packageId: 'retry' });
+    assert.equal(finished.ok, true, finished.error);
+    assert.equal(finished.count, 64);
+    assert.deepEqual(structuredClone(backend.data.nova_recovered), retained, 'finishing a retry cannot evict older manual recovery');
+    for (const entry of retained) assert.equal(await files.get(entry.id).text(), entry.filename.slice(0, -4));
+    await prepareRecoveryPackage(processor, 'afterFinish', 2);
+    await processor.message({ t: 'mendosave-package-cancel', packageId: 'afterFinish' });
+  } finally { processor.close(); }
+});
+
+test('five retained full ZIPs reject another plan before preparation without evicting any recoverable bytes', async () => {
+  let saves = 0;
+  const { processor, backend, files } = boundedRecoveryFixture(() => { saves++; return { ok: true, id: 42 }; });
+  try {
+    await new Promise(setImmediate);
+    for (let number = 0; number < 5; number++) {
+      await prepareRecoveryPackage(processor, `retained${number}`);
+      assert.equal((await processor.message({ t: 'mendosave-package-cancel', packageId: `retained${number}` })).ok, true);
+    }
+    const retained = structuredClone(backend.data.nova_recovered), ids = [...files.keys()];
+    assert.equal(retained.length, 320);
+    const rejected = await processor.message({ t: 'mendosave-package-begin', packageId: 'noSpace', mode: 'zip', title: 'No Space',
+      items: Array.from({ length: 64 }, (_, index) => ({ id: `new${index}`, label: `New ${index}` })) });
+    assert.equal(rejected.ok, false, 'reject the whole plan before a caller starts preparing its first file');
+    assert.match(rejected.error, /сохраните.*значок MendoSave/i);
+    assert.equal((await processor.message({ t: 'mendosave-package-next', packageId: 'noSpace', index: 0 })).ok, false);
+    assert.deepEqual(structuredClone(backend.data.nova_recovered), retained);
+    assert.deepEqual([...files.keys()], ids);
+    assert.equal(saves, 0);
+    for (const entry of retained) {
+      assert.equal(entry.manualOnly, true);
+      assert.equal(await files.get(entry.id).text(), entry.filename.slice(0, -4));
+    }
+    assert.equal((await processor.message({ t: 'mendosave-package-begin', packageId: 'filesStillWork', mode: 'files', title: 'Files',
+      items: [{ id: 'direct', label: 'Direct' }] })).ok, true, 'ordinary separate saving needs no recovery reservation');
+    await processor.message({ t: 'mendosave-package-cancel', packageId: 'filesStillWork' });
+  } finally { processor.close(); }
+});
+
+test('a ZIP reserves its whole plan against concurrent standalone recovery and releases unused space on cancel', async () => {
+  const { processor, backend, files } = boundedRecoveryFixture(() => ({ ok: false, error: 'Could not establish connection. Receiving end does not exist.' }));
+  let releaseRead, readEntered;
+  const pendingRead = new Promise(resolve => { releaseRead = resolve; });
+  const reading = new Promise(resolve => { readEntered = resolve; });
+  try {
+    await new Promise(setImmediate);
+    for (let number = 0; number < 5; number++) {
+      await prepareRecoveryPackage(processor, `prior${number}`, number === 4 ? 61 : 64);
+      await processor.message({ t: 'mendosave-package-cancel', packageId: `prior${number}` });
+    }
+    const retained = structuredClone(backend.data.nova_recovered);
+    assert.equal(retained.length, 317);
+    const originalMessage = backend.message;
+    let block = true;
+    backend.message = async (message, sender) => {
+      if (block && message.t === 'mendosave-recovery-read') { block = false; readEntered(); await pendingRead; }
+      return originalMessage(message, sender);
+    };
+    const beginning = processor.message({ t: 'mendosave-package-begin', packageId: 'reserved', mode: 'zip', title: 'Reserved',
+      items: [{ id: 'first', label: 'First' }, { id: 'second', label: 'Second' }] });
+    await reading;
+    const parking = parkStandaloneAudio(processor, 'fitsOutsideReservation');
+    await new Promise(setImmediate);
+    assert.equal(backend.data.nova_recovered.length, 317, 'standalone index changes wait for package admission');
+    releaseRead();
+    assert.equal((await beginning).ok, true);
+    assert.equal((await parking).recovered, true);
+    assert.equal(backend.data.nova_recovered.length, 318);
+    const beforeBlocked = [...files.keys()];
+    assert.notEqual((await parkStandaloneAudio(processor, 'cannotConsumeReservedSlots')).recovered, true);
+    assert.equal(backend.data.nova_recovered.length, 318);
+    assert.deepEqual([...files.keys()], beforeBlocked, 'a refused new parking cannot leave hidden bytes or remove prior inputs');
+    await processor.message({ t: 'mendosave-package-cancel', packageId: 'reserved' });
+    assert.equal((await parkStandaloneAudio(processor, 'fitsAfterCancellation')).recovered, true);
+    assert.equal(backend.data.nova_recovered.length, 319);
+    assert.deepEqual(structuredClone(backend.data.nova_recovered.slice(0, 317)), retained);
+    for (const entry of retained) assert.equal(await files.get(entry.id).text(), entry.filename.slice(0, -4));
+  } finally { releaseRead(); processor.close(); }
+});
 
 test('cancelling recovery stops further native dialogs and automatic retry of the remaining files', async () => {
   let saves = 0;
@@ -678,8 +885,10 @@ for (const fault of ['index write', 'index read', 'createWritable']) {
       park('existing');
       state.entries[0].manualOnly = true;
       const original = JSON.parse(JSON.stringify(state.entries));
+      if (fault === 'index read') failure = false;
       assert.equal((await processor.message({ t: 'mendosave-package-begin', packageId: 'zipFailure', mode: 'zip', title: 'Test',
         items: [{ id: 'mp3', label: 'MP3' }, { id: 'second', label: 'Second' }] })).ok, true);
+      failure = true;
       await processor.message({ t: 'mendosave-package-next', packageId: 'zipFailure', index: 0 });
       assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'failedEntry', packageId: 'zipFailure',
         packageIndex: 0, filename: 'new.mp3', format: 'mp3', audioMime: 'audio/mpeg' })).ok, true);
