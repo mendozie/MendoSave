@@ -45,6 +45,7 @@ Internal/native review выявил повторное чтение non-Instagra
 | Позиция Instagram | Wide Reel: общая ось с лайком, нижний край значка на 14 px выше него. Узкий Instagram не всегда показывает rail; проверен bounded fallback. Меню/пакет помещаются в viewport |
 | Files/ZIP | Все четыре engine/session сочетания: Cancel 0/3, retry, MP4 + исходный M4A + TXT отдельно и ZIP. Full/endpoint decode, UTF-8, CRC и exact extracted bytes прошли |
 | Финальная build7 | После полного restart Zen и в свежем Edge: MP3 + TXT и progressive MP4 + M4A + TXT, files/ZIP, full/endpoint decode и exact extracted bytes прошли. Edge дополнительно Cancel 0/3 → retry; recovery index 0 → 0 без изменения |
+| Упакованный кандидат без входа | Zen: установлен готовый XPI, MP3 + TXT files/ZIP и три source UI surveys прошли. Edge: распакованы и сверены все 67 entries готового ZIP и 67 served assets; MP3 + TXT files/ZIP, полные bytes/decode, wide/narrow и Back с request counter 2 → 2 прошли. Login UI подтверждает anonymous состояние; recovery index не менялся |
 | Adaptive MP4 | Финальный Zen: 720 × 1280 H.264/AAC, M4A и TXT сохранены отдельно и в ZIP, извлечённые файлы полностью декодированы. Между независимыми mux runs MP4 отличаются 10 bytes creation/modification timestamps в пяти header boxes; все остальные bytes совпадают. Это не whole-file equality и не наблюдение prepared inputs того же adaptive ZIP |
 | SPA | Вошедший Zen: доверенный переход к следующему Reel сбросил прежнее меню/выбор и потребовал новое чтение |
 | Coub/YouTube | Реальные меню Zen: metadata 1 → 1 → 1 при Back/reopen. YouTube lightweight caption probe 1 → 2 → 3 допустим; основной info не перечитывается. Scroll Coub 59 → 59 → 59 и YouTube 178 → 178 → 178 сохранён через Back и Escape/reopen; resize проверен |
@@ -68,6 +69,25 @@ Screenshots, JSON, отрицательные отчёты, контрольны
 
 ## Передача
 
-Review текущего UI-среза завершён, заканчивается проверка отдельно упакованного unsigned кандидата. Его каталог - `artifacts/mendosave-0.4.0-ui-b/`; прежний `artifacts/mendosave-0.4.0/` сохраняется без перезаписи. Предыдущие два managed review исходного Instagram-среза относятся к его собственному блоку.
+Unsigned кандидат сохранён отдельно в `artifacts/mendosave-0.4.0-ui-b/`. Его source revision - **`be84a2031b3fd0a656da125dc8a79cf52c7215a4`**, `dirty: false`, `signed: false`. Runtime совпадает с managed-reviewed `f024c680081779047b78e0fffe08f2dfab8da705`; последующая коррекция касается только теста VK и документов. Более поздние документы передачи не меняют этот frozen source archive.
+
+| Файл | Bytes | SHA-256 |
+|---|---:|---|
+| `mendosave-0.4.0-firefox-unsigned.xpi` | 34569401 | `732b4c07d1a911dbf83c1bc80b72104fa742c09d3e4b527b0d0db3ab281fe6b0` |
+| `mendosave-0.4.0-chromium-unsigned.zip` | 34570384 | `919d39d56ce8d54c669b54dd0dfa50b3ad02ffb4aed9a8baf252c79d51f1a89f` |
+| `mendosave-0.4.0-source.zip` | 36395675 | `e32c434dc5b82d640f7980ee82537558c626691f6ebe1d68f90f0ccf8f78317e` |
+
+В каждом browser archive 67 файлов, в source - 191. Проверены CRC, полный состав, bytes сборки и Git source. Receipt и `SHA256SUMS` прочитаны обратно. SHA-256 receipt: `f16aee8b7d47ea5779f640ed20972e16943849c2790029b98fafca595bb4e2dc`. Все три локальных архива побайтно совпали с Linux CI artifacts; сравнение Windows/Linux прошло в reproducibility job. Для `be84a20` оба [push](https://github.com/mendozie/MendoSave/actions/runs/38787300671) и [PR](https://github.com/mendozie/MendoSave/actions/runs/38787313252) workflow полностью зелёные. Прежний `artifacts/mendosave-0.4.0/` проверен по сохранённым hashes и не перезаписан.
+
+Для Zen используй временную установку через `about:debugging` → This Firefox → Load Temporary Add-on, выбрав unsigned XPI либо `dist/firefox/manifest.json`. После restart временная установка исчезает. Для Chromium распакуй ZIP, затем загрузи папку с `manifest.json` через developer mode на `edge://extensions` / `chrome://extensions`. Не меняй signature checks; [подробная установка](INSTALLATION.md).
+
+Ручная приёмка интерфейса:
+
+1. Открой Reel: проверь значок справа, подсказку, меню, узкое окно и изменение размера окна.
+2. Открой фото и смешанную карусель: одна карточка на элемент, качество внутри карточки; аудио/TXT раскрываются отдельно.
+3. В пакете отметь несколько элементов и два качества одного элемента. Сверни дополнительные варианты: количество должно учитывать скрытые отметки. «Снять выбор» очищает всё, «Выбрать всё» добавляет основные результаты.
+4. Вернись стрелкой и снова открой пакет: без «Читаю публикацию…», с прежним выбором, качеством и прокруткой. Перейди к другому Reel: старые данные не должны переноситься.
+5. Сохрани фото, MP4, M4A, MP3, TXT и ZIP. Проверь содержимое; отдельно попробуй отмену, повтор и «Скрыть»/возобновление.
+6. На других используемых площадках проверь компактные группы и пакет. На YouTube дополнительно проверь субтитры и Music; способ запуска конкретной площадки должен сохраниться.
 
 PR остаётся draft и не объединяется. Следующий шаг после передачи пакетов - ручная проверка пользователя; merge, подпись и Release требуют нового прямого поручения.
