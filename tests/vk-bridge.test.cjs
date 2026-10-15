@@ -168,11 +168,29 @@ test('VK observer refuses an API redirect to another host', async () => {
 });
 
 test('VK observer rejects an oversized clone without waiting for the native player to consume its original', async () => {
-  const b = bridge({ response: new Response(' '.repeat(2 * 1024 * 1024 + 1)) });
+  const payload = ' '.repeat(2 * 1024 * 1024 + 1);
+  const response = new Response(payload), clones = [];
+  const clone = response.clone.bind(response);
+  // Node 22's Undici can finalize an unreachable clone by cancelling the original
+  // tee branch. Keep the fixture's real clones alive through the ownership check.
+  response.clone = () => { const copy = clone(); clones.push(copy); return copy; };
+  const b = bridge({ response });
   b.request(); await b.window.fetch('https://api.vk.ru/method/video.getEmbed'); await b.settle();
   assert.ok(results(b)[0], 'the observer must classify the oversized response while the original is still unread');
   assert.equal(results(b)[0].code, 'RESPONSE_TOO_LARGE');
-  assert.equal((await (await b.nativeResult).arrayBuffer()).byteLength, 2 * 1024 * 1024 + 1);
+  const original = await b.nativeResult;
+  assert.equal(original.bodyUsed, false);
+  // Run with --expose-gc to cover delayed consumption under CI collection pressure.
+  if (typeof global.gc === 'function') {
+    for (let index = 0; index < 8; index++) { global.gc(); await new Promise(setImmediate); }
+  }
+  assert.equal(original.bodyUsed, false, 'the original remains unread until its native consumer starts');
+  assert.equal(original.body.locked, false);
+  const bytes = await original.arrayBuffer();
+  assert.equal(bytes.byteLength, 2 * 1024 * 1024 + 1);
+  assert.ok(Buffer.from(bytes).equals(Buffer.from(payload)));
+  assert.ok(clones.length > 0);
+  assert.equal(clones[0].bodyUsed, true, 'the observer consumed its clone before the original was read');
 });
 
 for (const [name, response, code] of [

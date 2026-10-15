@@ -28,6 +28,10 @@ Back/reopen того же статичного источника использ
 | Outgoing scan | 0 findings; 7 рассмотренных fixture matches и один сохранённый upstream build path |
 | Internal review | Совокупный UI diff и corrections проверены; значимых открытых findings нет. Поздние Music/port corrections и callers проверены отдельно |
 
+CI первого UI-коммита `f024c68`: push workflow прошёл Windows, Linux и reproducibility, три архива прочитаны обратно и сравнены с полными bytes сборок/Git. В параллельном PR workflow один Linux-тест VK упал при позднем чтении original Response. Отдельный контроль без кода расширения воспроизвёл дефект Node 22.18/Undici: GC недостижимого clone отменяет original tee branch. GC исходного runner не журналировался, поэтому конкретная причинность этого CI-сбоя остаётся выводом из воспроизведения. Fixture удерживает реальные clones до проверки original и проверяет полный payload; production runtime не меняется. Полный suite повторно прошёл 1042/1042; отдельный файл с `--expose-gc` - 17/17, ещё 20 повторов дали 340/340.
+
+Первый managed pass нового UI-среза завершён [без новых findings](https://github.com/mendozie/MendoSave/pull/10#issuecomment-6199492285) для полного head `f024c680081779047b78e0fffe08f2dfab8da705` и base `2a4284b943c1ed90f9eaea689da37c1ac829647f`. Последующая test-only коррекция и документы проверены локально; runtime bytes не изменились, оснований для второго managed pass нет.
+
 Internal/native review выявил повторное чтение non-Instagram меню, потерю disclosure/scroll, недостаточную глубину поиска Reel rail, выход Coub за narrow viewport, лишний TikTok cache, неинвалидированный Instagram snapshot после media failure и отмену work-owned refresh при закрытии меню. Причины исправлены и проверены соответствующими regression tests/native сценариями.
 
 ## Реальные браузеры
@@ -58,12 +62,12 @@ Internal/native review выявил повторное чтение non-Instagra
 
 В длительно работавшем тестовом сеансе build5 MP3 + TXT дважды завершился разрывом связи с обработчиком, 0/2, без файлов. Логи не установили причину. После полного restart **та же frozen build5** в том же профиле успешно сохранила фото + TXT и MP3 + TXT, files/ZIP. Исправленная build7 прошла MP3 + TXT, progressive video + M4A + TXT и adaptive media проверки. Причинная связь найденного startup port defect с первоначальным native-сбоем не доказана; успешный restart не используется как доказательство исправления именно этого сбоя. Исходные отрицательные отчёты сохранены.
 
-Закрытая публикация Instagram не проверена: контрольного примера нет, пользователь разрешил пропуск. TikTok при bounded live-попытке показал landing page без видео/кнопки; этот live-сценарий не подтверждён. Остальные live-площадки за пределами Coub/YouTube заново целиком не проверялись. Popup document проверен во вкладке; физический toolbar popover этим не подтверждён. Другие браузеры/ОС не проверены.
+Закрытая публикация Instagram не проверена: контрольного примера нет, пользователь разрешил пропуск. TikTok при bounded live-попытке показал landing page без видео/кнопки; этот live-сценарий не подтверждён. Остальные live-площадки за пределами Coub/YouTube заново целиком не проверялись. Popup document проверен во вкладке; физический toolbar popover этим не подтверждён. Физический chooser Edge не проверен: Save As автоматизирован через CDP, сохранённые GUID basenames сравнены по полным bytes, ZIP сохранил целевые имена. Другие браузеры/ОС не проверены.
 
 Screenshots, JSON, отрицательные отчёты, контрольные файлы, package receipts и readback остановки собственных browser/driver процессов находятся в игнорируемом `.local/qa/ui-b-15-10-2026/`. Они нужны до ручной приёмки, в Git/архивы не входят. Cookies, токены, browser profiles и подписанные media URLs в публичный отчёт не включены.
 
 ## Передача
 
-Завершаются review текущего UI-среза и проверка отдельно упакованного unsigned кандидата. Его каталог - `artifacts/mendosave-0.4.0-ui-b/`; прежний `artifacts/mendosave-0.4.0/` сохраняется без перезаписи. Предыдущие два managed review исходного Instagram-среза не считаются review нового UI diff.
+Review текущего UI-среза завершён, заканчивается проверка отдельно упакованного unsigned кандидата. Его каталог - `artifacts/mendosave-0.4.0-ui-b/`; прежний `artifacts/mendosave-0.4.0/` сохраняется без перезаписи. Предыдущие два managed review исходного Instagram-среза относятся к его собственному блоку.
 
 PR остаётся draft и не объединяется. Следующий шаг после передачи пакетов - ручная проверка пользователя; merge, подпись и Release требуют нового прямого поручения.
