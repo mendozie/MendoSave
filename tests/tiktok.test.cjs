@@ -25,6 +25,42 @@ test('TikTok rejects metadata for a different video after SPA navigation', async
   assert.doesNotMatch(app.document.querySelector('.mendosave-tiktok-menu').textContent, /Видео ·/);
 });
 
+test('TikTok A to B to A uses updated inline metadata rather than an older item-id cache', async () => {
+  const idA = '6718335390845095173', idB = '9999999999999999999';
+  const item = (id, title) => ({ id, desc: title, author: { uniqueId: 'fixture' }, video: { playAddr: `https://media.invalid/${title}.mp4`, width: 720, height: 1280 } });
+  const app = adapter('tiktok.js', page(item(idA, 'A-old')), `https://www.tiktok.com/@fixture/video/${idA}`, () => { throw Error('Unexpected metadata fetch'); });
+  const open = async () => { app.click(app.document.querySelector('.mendosave-tiktok-btn')); await app.settle(); };
+  const close = () => app.click(app.document.querySelector('.mendo-menu-close'));
+  const navigate = (id, title) => {
+    app.context.location.href = `https://www.tiktok.com/@fixture/video/${id}`;
+    app.document.querySelector('[id^="xgwrapper-"]').id = `xgwrapper-0-${id}`;
+    app.document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__').textContent = JSON.stringify({ __DEFAULT_SCOPE__: { 'webapp.video-detail': { statusCode: 0, itemInfo: { itemStruct: item(id, title) } } } });
+    app.document.dispatchEvent(new app.context.window.Event('visibilitychange'));
+  };
+  await open(); assert.match(app.document.querySelector('.mendo-menu').textContent, /A-old/); close();
+  navigate(idB, 'B'); await open(); assert.match(app.document.querySelector('.mendo-menu').textContent, /TikTokB/); close();
+  navigate(idA, 'A-fresh'); await open();
+  assert.match(app.document.querySelector('.mendo-menu').textContent, /A-fresh/);
+  assert.doesNotMatch(app.document.querySelector('.mendo-menu').textContent, /A-old/);
+  assert.equal(app.requests.length, 0, 'the current inline source is sufficient');
+});
+
+test('TikTok media failure allows same-source reopen and retry to use refreshed media links', async () => {
+  const id = '6718335390845095173';
+  const item = title => ({ id, desc: title, author: { uniqueId: 'fixture' }, video: { playAddr: `https://media.invalid/${title}.mp4`, width: 720, height: 1280 } });
+  const app = adapter('tiktok.js', page(item('expired')), `https://www.tiktok.com/@fixture/video/${id}`, async () => ({ ok: false, status: 403 }));
+  const choose = async () => {
+    app.click(app.document.querySelector('.mendosave-tiktok-btn')); await app.settle();
+    app.click(app.document.querySelector('.mendosave-tiktok-item[role="menuitem"]')); await app.settle();
+  };
+  await choose();
+  assert.match(app.document.querySelector('.mendosave-tiktok-toast').textContent, /403/);
+  app.document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__').textContent = JSON.stringify({ __DEFAULT_SCOPE__: { 'webapp.video-detail': { statusCode: 0, itemInfo: { itemStruct: item('fresh') } } } });
+  await choose();
+  assert.deepEqual(app.requests.map(request => request.url), ['https://media.invalid/expired.mp4', 'https://media.invalid/fresh.mp4']);
+  assert.equal(app.downloads.length, 0);
+});
+
 test('TikTok MP3 aborts when the server returns more bytes than the requested range', async () => {
   const item = { id: '6718335390845095173', music: { playUrl: 'https://media.invalid/sound.m4a' }, video: {} };
   const app = adapter('tiktok.js', page(item), 'https://www.tiktok.com/@scout2015/video/6718335390845095173', async (_url, options) => options.headers?.Range

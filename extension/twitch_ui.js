@@ -92,6 +92,7 @@
   let stopReason = '';
   let injectFrame;
   let menu;
+  const menuState = MendoMenu.createState();
   let menuAnchor;
   let busy = false;
 
@@ -435,6 +436,7 @@
   }
 
   function closeMenu(restoreFocus = false) {
+    menuState.remember(menu);
     document.removeEventListener('keydown', onMenuKeydown, true);
     menu?.remove();
     menu = null;
@@ -453,10 +455,11 @@
     menuAnchor = button;
     menu = document.createElement('div');
     menu.id = MENU_ID;
-    const header = document.createElement('div');
-    header.className = 'mendosave-twitch-menu-title';
-    header.textContent = info.kind === 'clip' ? 'Скачать клип' : 'Скачать запись';
-    menu.append(header);
+    const sourceKey = `${location.href}|${info.kind}:${info.id}`;
+    menuState.route(location.href);
+    menuState.get(sourceKey);
+    MendoMenu.decorate(menu, { title: 'Twitch', subtitle: info.title || (info.kind === 'clip' ? 'Сохранить клип' : 'Сохранить запись'), close: () => closeMenu(true) });
+    const groups = new Map();
     for (const quality of info.qualities) {
       const item = document.createElement('button');
       item.type = 'button';
@@ -467,7 +470,11 @@
         void runDownload(info, quality);
       });
       menu.append(item);
+      const title = quality.sourceName === 'audio_only' && !quality.height ? 'Аудио' : 'Видео';
+      if (!groups.has(title)) groups.set(title, []);
+      groups.get(title).push(item);
     }
+    MendoMenu.compact(menu, { groups: [...groups].map(([title, items]) => ({ title, items })) });
     if (info.qualities.length > 1) globalThis.MendoPackageUI?.add(menu, {
       title: info.title, source: `twitch:${info.kind}:${info.id}`, close: closeMenu,
       back: async () => {
@@ -479,11 +486,16 @@
       options: info.qualities.map((quality) => ({
         id: `twitch-${quality.label}`, label: quality.label, compatibilityKey: quality.label,
         group: quality.sourceName === 'audio_only' && !quality.height ? 'Аудио' : 'Видео',
+        family: quality.sourceName === 'audio_only' && !quality.height ? 'audio' : 'video',
+        title: quality.sourceName === 'audio_only' && !quality.height ? 'Аудио' : 'Видео',
+        detail: quality.label, secondary: quality.sourceName === 'audio_only' && !quality.height,
         run: () => runDownload(info, quality),
       })),
     });
     document.body.append(menu);
     globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-twitch-menu-item,.mendo-package-open');
+    menuState.set(sourceKey, info);
+    menuState.attach(menu, sourceKey, JSON.stringify(info.qualities.map(quality => [quality.label, quality.sourceName, quality.height])));
     document.addEventListener('keydown', onMenuKeydown, true);
     const box = button.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - menu.offsetWidth - 8))}px`;
@@ -520,6 +532,7 @@
         if (bundled) throw error;
         return;
       }
+      menuState.clear();
       toast(`MendoSave: ${String(error?.message || error)}`);
       if (bundled) throw error;
     } finally {
@@ -547,6 +560,10 @@
     const sourceHref = location.href, page = pageKind();
     if (page.kind !== 'clip' && page.kind !== 'vod') return;
     if (busy) return;
+    menuState.route(sourceHref);
+    const sourceKey = `${sourceHref}|${page.kind}:${page.kind === 'clip' ? page.slug : page.id}`;
+    const cachedInfo = menuState.get(sourceKey);
+    if (cachedInfo) { openMenu(button, cachedInfo); return; }
     busy = true;
     const controller = new AbortController();
     let timer, loadingRevision;
@@ -568,6 +585,7 @@
       document.getElementById('mendosave-twitch-toast')?.classList.remove('show');
       openMenu(button, info);
     } catch (error) {
+      if (location.href === sourceHref) menuState.clear();
       if (location.href === sourceHref && button.isConnected) toast(`MendoSave: ${String(error?.message || error)}`);
     } finally {
       clearTimeout(timer);
@@ -809,28 +827,20 @@
   // Brand icon: green ring with the double down-arrows, same as the YouTube
   // button. While recording, the arrows give way to a pulsing red dot.
   function createIcon() {
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(SVG_NS, 'circle');
+    const svg = MendoMenu.icon(document);
+    const ring = svg.querySelector('circle');
     ring.setAttribute('class', 'mendosave-ring');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16');
-    ring.setAttribute('fill', 'none');
     ring.setAttribute('stroke', 'currentColor');
-    ring.setAttribute('stroke-width', '2.4');
-    const arrows = document.createElementNS(SVG_NS, 'path');
+    const arrows = svg.querySelector('path');
     arrows.setAttribute('class', 'mendosave-arrows');
     arrows.setAttribute('fill', 'currentColor');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
     const dot = document.createElementNS(SVG_NS, 'circle');
     dot.setAttribute('class', 'mendosave-rec-dot');
     dot.setAttribute('cx', '18');
     dot.setAttribute('cy', '18');
     dot.setAttribute('r', '7');
     dot.setAttribute('fill', 'currentColor');
-    svg.append(ring, arrows, dot);
+    svg.append(dot);
     return svg;
   }
 
@@ -866,6 +876,7 @@
   }
 
   function ensureButton() {
+    menuState.route(location.href);
     if (pageKind().kind === 'other') {
       document.getElementById(BUTTON_ID)?.remove();
       closeMenu();

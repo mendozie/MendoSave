@@ -80,6 +80,7 @@
   const VIDEO_ID_RE = /\/(?:video|clip)(-?\d+)_(\d+)/;
 
   let menu;
+  const menuState = MendoMenu.createState();
   let menuRequest;
   let cancelMenuFit;
   let busy = false;
@@ -738,6 +739,7 @@
   // ---- menu ------------------------------------------------------------------
 
   function closeMenu() {
+    menuState.remember(menu);
     cancelMenuFit?.(); cancelMenuFit = undefined;
     menuRequest?.controller.abort();
     menuRequest = undefined;
@@ -839,6 +841,7 @@
         if (bundled) throw error;
         return;
       }
+      menuState.clear();
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
       if (bundled) throw error;
@@ -875,13 +878,17 @@
     }
   }
 
-  async function showMenu(button, cachedInfo) {
+  async function showMenu(button) {
     if (packageRunning()) return button;
     closeMenu();
+    menuState.route(location.href);
+    const currentId = videoIdFrom(location.href);
+    const sourceKey = `${location.href}|${currentId?.oid}_${currentId?.id}`;
+    const cachedInfo = menuState.get(sourceKey);
     menu = createElement('div', 'mendosave-vk-menu');
-    const heading = createElement('div', 'mendosave-vk-head', `MendoSave v${chrome.runtime.getManifest().version}`);
+    MendoMenu.decorate(menu, { title: 'VK Видео', subtitle: 'Сохранить видео', close: () => { closeMenu(); button?.focus(); } });
     const loading = createElement('div', 'mendosave-vk-item mendosave-vk-muted', 'Читаю данные видео…');
-    menu.append(heading, loading);
+    menu.append(loading);
     document.body.appendChild(menu);
     positionMenu(button);
     document.addEventListener('click', onOutsideClick, true);
@@ -899,6 +906,8 @@
       loading.remove();
       const choices = buildChoices(info);
       if (!choices.length) throw new Error('у этого видео нет доступных файлов');
+      MendoMenu.decorate(menu, { title: 'VK Видео', subtitle: info.title, close: () => { closeMenu(); button?.focus(); } });
+      const groups = new Map();
       for (const choice of choices) {
         const item = createElement('div', 'mendosave-vk-item');
         item.setAttribute('role', 'button');
@@ -915,31 +924,37 @@
           closeMenu(); void runChoice(info, choice);
         });
         menu.append(item);
+        const title = choice.kind === 'video' ? 'Видео' : 'Аудио';
+        if (!groups.has(title)) groups.set(title, []);
+        groups.get(title).push(item);
       }
+      MendoMenu.compact(menu, { groups: [...groups].map(([title, items]) => ({ title, items })), onToggle: () => positionMenu(button) });
       const opener = choices.length > 1 ? globalThis.MendoPackageUI?.add(menu, {
         title: info.title, source: `vk:${info.oid}_${info.id}`, close: closeMenu,
         back: async () => {
           schedule();
           const anchor = playerShadowRoot()?.querySelector(`.${BUTTON_CLASS}`)
             || document.querySelector(`.${BUTTON_CLASS}`) || (button?.isConnected ? button : null);
-          const current = videoIdFrom(location.href);
-          const reusable = current?.oid === info.oid && current?.id === info.id;
-          return showMenu(anchor, reusable ? info : undefined);
+          return showMenu(anchor);
         },
         options: () => {
           if (!ownsMenu()) { closeMenu(); void showMenu(button); return []; }
           return choices.map(choice => ({
             id: choice.kind === 'video' ? `vk-video-${choice.rung.height}` : `vk-audio-${choice.audioFormat}`,
             label: choice.text, group: choice.kind === 'video' ? 'Видео' : 'Аудио',
+            family: choice.kind, title: choice.kind === 'video' ? 'Видео' : 'Аудио', detail: [choice.text, choice.hint].filter(Boolean).join(' · '), secondary: choice.kind !== 'video',
             run: () => runChoice(info, choice),
           }));
         },
       }) : null;
       bindMenu(button);
+      menuState.set(sourceKey, info);
+      menuState.attach(menu, sourceKey, JSON.stringify(choices.map(choice => [choice.kind, choice.rung?.height, choice.audioFormat, choice.text, choice.hint])));
       positionMenu(button);
       return opener || button;
     } catch (error) {
       if (!ownsMenu() || error?.name === 'AbortError') return;
+      menuState.clear();
       loading.remove();
       menu.append(createElement('div', 'mendosave-vk-item mendosave-vk-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
@@ -1005,22 +1020,7 @@
   // The same ring-and-arrows mark the YouTube button uses, so one extension does
   // not look like two.
   function createIcon() {
-    const namespace = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(namespace, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(namespace, 'circle');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16.9');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#35d477');
-    ring.setAttribute('stroke-width', '2.2');
-    const arrows = document.createElementNS(namespace, 'path');
-    arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
-    svg.append(ring, arrows);
-    return svg;
+    return MendoMenu.icon(document);
   }
 
   // VK's player is a web component and its controls live inside an open shadow
@@ -1036,6 +1036,7 @@
       flex: 0 0 auto;
     }
     .${BUTTON_CLASS}:hover { opacity: 1; }
+    .${BUTTON_CLASS}:focus-visible { outline: 2px solid #55d991; outline-offset: -2px; border-radius: 8px; }
     .${BUTTON_CLASS} svg { width: 26px; height: 26px; display: block; }
   `;
 
@@ -1102,6 +1103,7 @@
   }
 
   function ensureButton() {
+    menuState.route(location.href);
     if (!videoIdFrom(location.pathname)) {
       document.querySelectorAll(`.${BUTTON_CLASS}`).forEach((node) => node.remove());
       return;

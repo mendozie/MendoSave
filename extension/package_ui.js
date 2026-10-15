@@ -2,6 +2,15 @@
   function create({ runtime, document, fetch: fetcher = globalThis.fetch, queue = globalThis.MendoPackageQueue,
     activation = globalThis.MendoMenu }) {
     const maxPackageItems = 64;
+    const previewUrl = value => {
+      if (typeof value !== 'string' || value.length > 8192 || /[\s\\]/.test(value)
+        || !/^https:\/\/[^/:?#]+(?:[/?]|$)/.test(value)) return '';
+      try {
+        const url = new URL(value);
+        return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash
+          && /^(?:[a-z0-9-]+\.)+(?:cdninstagram\.com|fbcdn\.net)$/.test(url.hostname) ? value : '';
+      } catch (error) { return ''; }
+    };
     let current = null;
     let picker = null;
     let rememberedSelection = null;
@@ -186,6 +195,8 @@
           if (!Array.isArray(choices) || choices.length < 2) return;
           const available = choices.map((item, index) => Object.freeze({ id: String(item.id ?? index),
             compatibilityKey: String(item.compatibilityKey ?? item.id ?? index), group: String(item.group || ''),
+            family: String(item.family || item.group || (item.id ?? index)), title: String(item.title || item.group || ''),
+            detail: String(item.detail || item.label), secondary: item.secondary === true, thumbnail: previewUrl(item.thumbnail),
             label: String(item.label), run: item.run }));
           if (picker?.source === String(source)) {
             close?.(); picker.refresh(available, title, back); picker.show(); return;
@@ -198,39 +209,93 @@
           dialog.className = 'mendo-package-dialog';
           dialog.setAttribute('aria-label', `Пакет: ${title}`);
           const heading = document.createElement('h2'); heading.textContent = 'Пакет форматов';
-          const caption = document.createElement('p'); caption.textContent = title;
+          const caption = document.createElement('span'); caption.className = 'mendo-package-source'; caption.textContent = title;
+          caption.title = title; caption.setAttribute('aria-label', `Источник: ${title}`);
           const header = document.createElement('div'); header.className = 'mendo-package-header';
-          const windowBar = document.createElement('div'); windowBar.className = 'mendo-package-windowbar';
           const dragHandle = document.createElement('div'); dragHandle.className = 'mendo-package-drag-handle';
           dragHandle.title = 'Перетащить окно'; dragHandle.setAttribute('aria-hidden', 'true');
           const closeDialog = document.createElement('button'); closeDialog.type = 'button'; closeDialog.dataset.action = 'close';
           closeDialog.className = 'mendo-package-close'; closeDialog.textContent = '×';
-          windowBar.append(dragHandle, closeDialog);
-          const goBack = document.createElement('button'); goBack.type = 'button'; goBack.dataset.action = 'back'; goBack.textContent = '← Назад';
-          const headingGroup = document.createElement('div'); headingGroup.append(heading, caption);
-          header.append(windowBar, goBack, headingGroup);
+          const goBack = document.createElement('button'); goBack.type = 'button'; goBack.dataset.action = 'back';
+          if (activation.icon) goBack.append(activation.icon(document, 'back')); else goBack.textContent = '←';
+          goBack.title = 'Назад'; goBack.setAttribute('aria-label', 'Назад');
+          header.append(goBack, heading, caption, dragHandle, closeDialog);
           const list = document.createElement('div'); list.className = 'mendo-package-list';
           const status = document.createElement('p'); status.setAttribute('role', 'status');
           status.setAttribute('aria-live', 'polite'); status.textContent = 'Выберите файлы. Они будут обработаны по очереди.';
           const progress = document.createElement('progress'); progress.max = 1; progress.value = 0;
+          progress.hidden = true;
           progress.setAttribute('aria-label', 'Общий прогресс пакета');
           const actions = document.createElement('div'); actions.className = 'mendo-package-actions';
+          let cards = [], itemsSignature = '', scrollToRestore = null;
+          const signature = items => JSON.stringify(items.map(item => [item.id, item.compatibilityKey, item.family]));
           const makeRows = items => {
-            let previousGroup = '';
-            return items.map(item => {
-              if (item.group && item.group !== previousGroup) {
-                const heading = document.createElement('h3'); heading.className = 'mendo-package-group'; heading.textContent = item.group;
-                list.append(heading);
-              }
-              previousGroup = item.group;
-              const row = document.createElement('label');
+            cards = [];
+            itemsSignature = signature(items);
+            const remembered = rememberedSelection?.source === String(source) ? rememberedSelection : null;
+            const families = new Map();
+            const result = items.map(item => {
+              const element = document.createElement('label'); element.className = 'mendo-package-option';
               const input = document.createElement('input'); input.type = 'checkbox'; input.value = item.id;
               input.checked = rememberedSelection?.source === String(source)
                 && rememberedSelection.choices.get(item.id) === item.compatibilityKey;
-              const text = document.createElement('span'); text.textContent = item.label;
-              row.append(input, text); list.append(row);
-              return { item, input, text };
+              input.setAttribute('aria-label', item.label);
+              const copy = document.createElement('span'); copy.className = 'mendo-package-option-copy';
+              const text = document.createElement('span'); text.textContent = item.detail;
+              copy.append(text); element.append(input, copy);
+              const row = { item, input, text, element, copy };
+              if (!families.has(item.family)) families.set(item.family, []);
+              families.get(item.family).push(row);
+              return row;
             });
+            for (const [family, members] of families) {
+              const card = document.createElement('section'); card.className = 'mendo-package-card'; card.dataset.family = family;
+              const familySignature = signature(members.map(row => row.item));
+              const saved = remembered?.cards?.get(family);
+              const compatible = saved?.signature === familySignature;
+              const primary = document.createElement('div'); primary.className = 'mendo-package-primary';
+              const heading = document.createElement('span'); heading.className = 'mendo-package-group';
+              heading.textContent = members[0].item.title;
+              const thumbnail = document.createElement('span'); thumbnail.className = 'mendo-package-thumbnail';
+              thumbnail.setAttribute('aria-hidden', 'true');
+              thumbnail.textContent = /^(?:audio|sound)/.test(family) ? '♫' : /^(?:caption|subtitle)/.test(family) ? 'T' : '▧';
+              const imageUrl = members.find(row => row.item.thumbnail)?.item.thumbnail;
+              if (imageUrl) {
+                const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy';
+                image.setAttribute('referrerpolicy', 'no-referrer'); image.src = imageUrl;
+                image.addEventListener('error', () => { image.remove(); }); thumbnail.append(image);
+              }
+              const select = members.length > 1 ? document.createElement('select') : null;
+              const extra = document.createElement('details'); extra.className = 'mendo-package-variants';
+              const summary = document.createElement('summary'); summary.textContent = 'Дополнительные варианты'; extra.append(summary);
+              const extras = document.createElement('div'); extra.append(extras);
+              if (select) {
+                select.setAttribute('aria-label', `Качество: ${members[0].item.title || members[0].item.label}`);
+                for (const row of members) {
+                  const option = document.createElement('option'); option.value = row.item.id; option.textContent = row.item.detail;
+                  option.selected = row.item.id === (compatible ? saved.active : members[0].item.id); select.append(option);
+                }
+              }
+              extra.open = Boolean(compatible && saved.open);
+              const renderPrimary = () => {
+                const active = members.find(row => row.item.id === select?.value) || members[0];
+                if (heading.textContent) active.copy.prepend(heading);
+                active.element.insertBefore(thumbnail, active.copy);
+                const previous = primary.querySelector('label');
+                if (previous !== active.element) {
+                  if (previous) previous.replaceWith(active.element); else primary.prepend(active.element);
+                }
+                if (select && select.parentElement !== primary) primary.append(select);
+                extras.replaceChildren(...members.filter(row => row !== active).map(row => row.element));
+              };
+              select?.addEventListener('change', () => { if (!current) { renderPrimary(); update(); } });
+              renderPrimary(); card.append(primary);
+              if (select) card.append(extra);
+              cards.push({ family, signature: familySignature, members, select, extra, summary });
+              list.append(card);
+            }
+            scrollToRestore = remembered?.signature === itemsSignature ? remembered.scrollTop : 0;
+            return result;
           };
           let rows = makeRows(available);
           const files = document.createElement('button'); files.type = 'button'; files.dataset.mode = 'files'; files.textContent = 'Скачать файлы';
@@ -311,7 +376,10 @@
             resume.hidden = true;
             if (!dialog.hasAttribute('open')) { if (dialog.show) dialog.show(); else dialog.setAttribute('open', ''); }
             updateClose(); fit();
-            (current ? hide : rows.find(row => row.input.checked)?.input || rows[0]?.input)?.focus();
+            (current ? hide : rows.find(row => row.input.checked && row.element.parentElement.classList.contains('mendo-package-primary'))?.input
+              || list.querySelector('.mendo-package-primary input'))?.focus({ preventScroll: true });
+            // A newly created picker has no scrollable layout until it is open.
+            if (scrollToRestore !== null) { list.scrollTop = scrollToRestore; scrollToRestore = null; }
           };
           const conceal = () => {
             if (picker !== panel) return;
@@ -322,20 +390,41 @@
           hide.addEventListener('click', conceal);
           resume.addEventListener('click', show);
           const selection = () => rows.filter(row => row.input.checked);
+          const selectionCount = document.createElement('span'); selectionCount.dataset.role = 'selection-count';
+          const selectAll = document.createElement('button'); selectAll.type = 'button'; selectAll.dataset.action = 'select-all'; selectAll.textContent = 'Выбрать всё';
+          const clear = document.createElement('button'); clear.type = 'button'; clear.dataset.action = 'clear'; clear.textContent = 'Снять выбор';
           const update = () => {
             const count = selection().length, tooMany = count > maxPackageItems;
+            selectionCount.textContent = `Выбрано: ${count} / ${maxPackageItems}`;
+            selectAll.disabled = Boolean(current); clear.disabled = Boolean(current) || count === 0;
+            for (const card of cards) {
+              if (card.select) card.select.disabled = Boolean(current);
+              const hiddenCount = card.members.filter(row => row.input.checked && row.item.id !== card.select?.value).length;
+              card.summary.textContent = `Дополнительные варианты${hiddenCount ? ` · ${hiddenCount} выбрано` : ''}`;
+            }
             files.disabled = Boolean(current) || count === 0 || tooMany;
             zip.disabled = Boolean(current) || count < 2 || tooMany;
             if (!current) {
               status.textContent = tooMany
                 ? `Выбрано ${count} файлов. В пакете может быть не больше ${maxPackageItems}. Снимите лишние отметки.`
-                : `Выберите файлы. Выбрано: ${count} из ${maxPackageItems}. Они будут обработаны по очереди.`;
+                : `Выберите файлы. Доступно вариантов: ${rows.length}.`;
               updateResume();
             }
           };
+          activation.onActivate(selectAll, () => {
+            if (current) return;
+            for (const card of cards) {
+              const primary = card.members.find(row => row.item.id === card.select?.value) || card.members[0];
+              if (!primary.item.secondary) primary.input.checked = true;
+            }
+            update();
+          });
+          activation.onActivate(clear, () => { if (!current) { rows.forEach(row => { row.input.checked = false; }); update(); } });
           const bindRows = () => { rows.forEach(row => row.input.addEventListener('change', update)); update(); };
           const remember = () => { rememberedSelection = { source: String(source),
-            choices: new Map(selection().map(row => [row.item.id, row.item.compatibilityKey])) }; };
+            choices: new Map(selection().map(row => [row.item.id, row.item.compatibilityKey])),
+            cards: new Map(cards.map(card => [card.family, { signature: card.signature, active: card.select?.value,
+              open: card.extra.open }])), signature: itemsSignature, scrollTop: list.scrollTop || 0 }; };
           bindRows();
           const dispose = () => {
             if (picker !== panel || current) return;
@@ -354,8 +443,9 @@
             if (current || picker !== panel) return;
             remember(); list.replaceChildren(); rows = makeRows(items); bindRows();
             title = nextTitle; caption.textContent = title; returnToMenu = nextBack;
+            caption.title = title; caption.setAttribute('aria-label', `Источник: ${title}`);
             dialog.setAttribute('aria-label', `Пакет: ${title}`);
-            progress.value = 0; updateResume();
+            progress.value = 0; progress.hidden = true; updateResume();
           };
           panel = { source: String(source), show, dispose, refresh };
           picker = panel;
@@ -363,10 +453,10 @@
             if (current || picker !== panel) return;
             dispose();
             const target = await returnToMenu?.();
-            if (target?.isConnected) target.focus();
-            else if (opener.isConnected) opener.focus();
+            if (target?.isConnected) target.focus({ preventScroll: true });
+            else if (opener.isConnected) opener.focus({ preventScroll: true });
           };
-          goBack.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); void dismiss(); });
+          activation.onActivate(goBack, event => { event.preventDefault(); event.stopPropagation(); void dismiss(); });
           const abort = async () => {
             const running = current;
             if (!running || running.panel !== panel || running.controller.signal.aborted) return;
@@ -392,7 +482,7 @@
             const checkState = () => {
               if (current !== state || picker !== panel || state.controller.signal.aborted) interrupted('USER_CANCELED');
             };
-            progress.value = 0;
+            progress.value = 0; progress.hidden = false; update();
             status.textContent = 'Подготавливаю пакет…'; updateResume();
             files.disabled = true; zip.disabled = true; goBack.disabled = true; cancel.disabled = false; cancel.hidden = false;
             rows.forEach(row => { row.input.disabled = true; row.text.textContent = row.item.label; });
@@ -453,8 +543,12 @@
             updateResume();
           };
           activation.onActivate(files, () => { void start('files'); }); activation.onActivate(zip, () => { void start('zip'); });
-          const choiceGroup = document.createElement('div'); choiceGroup.className = 'mendo-package-choices'; choiceGroup.append(list, status, progress);
-          actions.append(files, zip, hide, cancel); dialog.append(header, choiceGroup, actions); document.body.append(dialog, resume);
+          const choiceGroup = document.createElement('div'); choiceGroup.className = 'mendo-package-choices'; choiceGroup.append(list);
+          const selectionTools = document.createElement('div'); selectionTools.className = 'mendo-package-selection-tools';
+          selectionTools.append(selectAll, clear);
+          const footer = document.createElement('div'); footer.className = 'mendo-package-footer';
+          selectionTools.prepend(selectionCount); footer.append(selectionTools, status, progress, actions);
+          actions.append(files, zip, hide, cancel); dialog.append(header, choiceGroup, footer); document.body.append(dialog, resume);
           show();
         });
         menu.append(opener);

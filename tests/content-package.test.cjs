@@ -14,6 +14,7 @@ const declarations = tree.body[0].expression.callee.body.body;
 // Execute the delivered menu actions and both media routes. Bootstrap and page
 // bridge transport are replaced at their existing DOM/runtime boundary.
 const names = new Set(['addDownloadItems', 'addSubtitleItems', 'addRadioSelector', 'addFormatSelector',
+  'addLiveSection',
   'openMenu', 'closeMenu', 'videoIdFromLocation', 'startDownload', 'tryDownloadViaSabr', 'downloadViaSabr',
   'downloadSubtitles', 'encodeBase64', 'snapshotPackageOptions', 'mediaResponseError',
   'snapshotSubtitleSource', 'subtitleSourcesMatch',
@@ -71,7 +72,7 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
     },
     callHook: async (command, payload) => {
       hooks.push(command);
-      if (command === 'info') return info;
+      if (command === 'info') return { ...info };
       if (command === 'subs-available') return availability();
       if (command === 'subtitles') return { videoId: payload.source.videoId, source: { ...payload.source }, lang: payload.source.lang, text: 'Fixture subtitle' };
       if (command === 'sabr-start') return { tracks: {
@@ -86,6 +87,7 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
     },
   });
   vm.runInContext(`let menu, menuOpening = false, menuRequest = 0, downloadInProgress = false;
+    const menuState = MendoMenu.createState();
     let packageOptions = [], packageTranscode = false;
     ${flowSource}`, context);
   return { context, document, info, messages, hooks, notifications, settings,
@@ -94,7 +96,7 @@ function harness(finalize = () => ({ ok: true, filename: 'fixture.mp4' })) {
       subtitleState.lang = language; subtitleState.trackId = `fixture:${language}`;
       context.callHook = async (command, payload) => {
         hooks.push(command);
-        if (command === 'info') return info;
+        if (command === 'info') return { ...info };
         if (command === 'subs-available') return availability();
         assert.equal(command, 'subtitles');
         const reply = typeof value === 'function' ? await value(command, payload) : value;
@@ -135,6 +137,65 @@ test('original codec snapshot remains original after the setting later changes t
   h.context.MendoPackageUI.running = true;
   await selected.run();
   assert.equal(h.messages.find(message => message.t === 'mendosave-begin').transcode, false);
+});
+
+test('Back reuses the current validated YouTube menu without repeating metadata hooks', async () => {
+  const h = harness(); await h.openMenu();
+  const picker = h.picker(), reads = h.hooks.filter(command => command === 'info').length;
+  picker.close(); await picker.back();
+  assert.equal(h.hooks.filter(command => command === 'info').length, reads);
+  assert.ok(h.document.querySelector('.mendo-menu-header'));
+  assert.equal(h.snapshot().find(option => option.id === 'video-720').family, 'video');
+  assert.equal(h.snapshot().find(option => option.id === 'audio-mp3').secondary, true);
+});
+
+test('Select all treats audio as the primary result for a YouTube Music art track', async () => {
+  const h = harness(); h.context.IS_MUSIC = true; h.info.musicVideoType = 'MUSIC_VIDEO_TYPE_ATV';
+  await h.openMenu();
+  const menu = h.document.createElement('div'); h.document.body.append(menu);
+  const ui = createPackageUI({ document: h.document, runtime: {} });
+  ui.add(menu, { title: 'Music song', source: 'youtube:fixtureVideo', options: h.snapshot() }).click();
+  assert.equal(h.document.querySelectorAll('input:checked').length, 0);
+  h.click(h.document.querySelector('[data-action="select-all"]'));
+  const selected = [...h.document.querySelectorAll('input')].filter(input => input.checked);
+  assert.deepEqual(selected.map(input => input.value), ['audio-mp3']);
+});
+
+test('YouTube keeps expanded qualities and scroll through Back and ordinary reopen', async () => {
+  const h = harness(); h.info.heights = [360, 480, 720, 1080]; await h.openMenu();
+  let menu = h.document.querySelector('.mendo-menu');
+  h.click(menu.querySelector('.mendo-menu-more')); menu.scrollTop = 173;
+  let picker = h.picker(); picker.close(); await picker.back();
+  menu = h.document.querySelector('.mendo-menu');
+  assert.equal(menu.querySelector('.mendo-menu-more').getAttribute('aria-expanded'), 'true');
+  assert.equal(menu.scrollTop, 173);
+  const reads = h.hooks.filter(command => command === 'info').length;
+  h.click(menu.querySelector('.mendo-menu-close')); await h.openMenu();
+  assert.equal(h.hooks.filter(command => command === 'info').length, reads);
+  menu = h.document.querySelector('.mendo-menu');
+  assert.equal(menu.querySelector('.mendo-menu-more').getAttribute('aria-expanded'), 'true');
+  assert.equal(menu.scrollTop, 173);
+});
+
+test('YouTube live menus re-read live metadata on every open', async () => {
+  const h = harness(); h.info.isLive = true;
+  await h.context.openMenu({ stopPropagation() {} });
+  h.click(h.document.querySelector('.mendo-menu-close'));
+  await h.context.openMenu({ stopPropagation() {} });
+  assert.equal(h.hooks.filter(command => command === 'info').length, 2);
+});
+
+test('cached YouTube metadata still refreshes the selected subtitle track on reopen', async () => {
+  const h = harness(); await h.openMenu();
+  h.click(h.document.querySelector('.mendo-menu-close'));
+  h.subtitleState.lang = 'ru'; h.subtitleState.trackId = 'fixture:ru'; h.subtitleState.revision++;
+  h.info.sourceRevision = h.subtitleState.revision;
+  await h.openMenu();
+  assert.match(h.document.querySelector('.mendo-menu').textContent, /SRT · RU/);
+  assert.doesNotMatch(h.document.querySelector('.mendo-menu').textContent, /SRT · EN/);
+  assert.equal(h.hooks.filter(command => command === 'info').length, 2, 'only a changed source revision requires a new owning info read');
+  h.click(h.document.querySelector('.mendo-menu-close')); await h.openMenu();
+  assert.equal(h.hooks.filter(command => command === 'info').length, 2, 'an unchanged track reuses the validated media snapshot');
 });
 
 test('SRT download preserves actual cue times instead of extending short lines into later cues', async () => {

@@ -343,6 +343,32 @@ test('startup sweep removes owned temporary UUID files and preserves recovery an
   await io.handle({ t: 'mendosave-blob-abort', transferId }, sender);
 });
 
+test('startup sweep leaves unrelated ports to their owner while rejecting package and transfer connections', async () => {
+  let release, entered;
+  const sweepStarted = new Promise(resolve => { entered = resolve; });
+  const blocked = new Promise(resolve => { release = resolve; });
+  const base = fixture();
+  const { io } = fixture({ storage: {
+    getDirectory: async () => { entered(); await blocked; return base.storage.getDirectory(); },
+  } });
+  const starting = io.initialize();
+  await sweepStarted;
+  try {
+    for (const name of ['mendosave-producer', 'mendosave-processor', 'mendosave-twitch-recording:job7', 'elsewhere']) {
+      let disconnected = 0;
+      assert.equal(io.connect({ name, sender, disconnect() { disconnected++; } }), false);
+      assert.equal(disconnected, 0, `${name} belongs to another runtime router`);
+    }
+    for (const name of [`mendosave-transfer:${transferId}`, 'mendosave-package:package7']) {
+      let disconnected = 0;
+      assert.equal(io.connect({ name, sender, disconnect() { disconnected++; } }), false);
+      assert.equal(disconnected, 1, `${name} cannot connect while temporary storage is being swept`);
+    }
+  } finally { release(); await starting; }
+  assert.equal(io.jobsActive(), false);
+  assert.equal(base.files.size, 0);
+});
+
 test('direct output and external work cannot compete with an IO producer for the same position', async () => {
   let busy = true;
   const { io, files } = fixture({ positionBusy: () => busy });

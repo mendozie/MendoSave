@@ -345,6 +345,7 @@
       }
     }
     function connect(port) {
+      if (!port?.name?.startsWith('mendosave-transfer:') && !port?.name?.startsWith('mendosave-package:')) return false;
       if (sweeping) { port.disconnect?.(); return false; }
       if (port?.name?.startsWith('mendosave-transfer:')) {
         const id = port.name.slice('mendosave-transfer:'.length);

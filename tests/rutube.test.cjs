@@ -70,7 +70,7 @@ function adapter(media = fixture, overrides = {}) {
 
 test('Rutube public VOD streams ordered bytes and keeps the API duration in seconds', async () => {
   const a = adapter(); a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
+  a.click(a.document.querySelector('.mendosave-rt-item[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.find((m) => m.t === 'mendosave-begin').duration, 54.312);
   assert.equal(a.messages.filter((m) => m.t === 'mendosave-chunk').map((m) => m.b64).join(','), 'RwEC,RwEC');
   assert.equal(a.messages.filter((m) => m.t === 'mendosave-finalize').length, 1);
@@ -79,7 +79,7 @@ test('Rutube public VOD streams ordered bytes and keeps the API duration in seco
 test('Rutube refuses a rolling playlist instead of saving its current window as a complete VOD', async () => {
   const a = adapter(fixture.replace('#EXT-X-ENDLIST', ''));
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
+  a.click(a.document.querySelector('.mendosave-rt-item[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-begin'), false);
   assert.match(a.document.querySelector('.mendosave-rt-toast').textContent, /завершён|трансляц/);
 });
@@ -87,7 +87,7 @@ test('Rutube refuses a rolling playlist instead of saving its current window as 
 test('Rutube refuses encrypted HLS before a processor job or media request starts', async () => {
   const a = adapter(fixture.replace('#EXTINF:4.000,', '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:4.000,'));
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
+  a.click(a.document.querySelector('.mendosave-rt-item[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-begin'), false);
   assert.equal(a.requests.some((url) => url.endsWith('.ts') || url.endsWith('key.bin')), false);
   assert.match(a.document.querySelector('.mendosave-rt-toast').textContent, /зашифрован/);
@@ -104,14 +104,14 @@ test('Rutube menu can be dismissed while playback options are still loading', as
 test('Rutube quality choices can be activated with Enter', async () => {
   const a = adapter(); a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
   const event = new UserEvent('keydown', { bubbles: true, cancelable: true }); event.key = 'Enter';
-  a.document.querySelector('[role="menuitem"]').dispatchEvent(event); await a.settle();
+  a.document.querySelector('.mendosave-rt-item[role="menuitem"]').dispatchEvent(event); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-finalize'), true);
 });
 
 test('Rutube aborts its job when finalization fails so prepared chunks are released', async () => {
   const a = adapter(fixture, { finalizeError: true });
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
+  a.click(a.document.querySelector('.mendosave-rt-item[role="menuitem"]')); await a.settle();
   assert.equal(a.messages.some((m) => m.t === 'mendosave-abort'), true);
   assert.match(a.document.querySelector('.mendosave-rt-toast').textContent, /mux failed/);
 });
@@ -123,7 +123,7 @@ test('Rutube transfers exact bytes from network views whose foreign constructor 
   segment[segment.length - 1] = 0xee;
   const a = adapter(fixture, { foreignViews: true, segmentBytes: segment });
   a.click(a.document.getElementById('mendosave-rutube-btn')); await a.settle();
-  a.click(a.document.querySelector('[role="menuitem"]')); await a.settle();
+  a.click(a.document.querySelector('.mendosave-rt-item[role="menuitem"]')); await a.settle();
   assert.equal(a.errors.length, 0, a.errors[0]?.message);
   const chunks = a.messages.filter((m) => m.t === 'mendosave-chunk');
   assert.equal(chunks.length, 4, 'each of two segments crosses the 4 MiB transfer boundary');

@@ -65,6 +65,7 @@ function harness(packageRun = true, autoAck = true) {
     reportError: async () => {}, console,
   });
   context.MendoMenu = require('../extension/menu.js');
+  context.menuState = context.MendoMenu.createState();
   context.MendoDiagnostics = require('../extension/diagnostics.js');
   vm.runInContext(`let toastHideTimer, downloadInProgress = false; ${flow}`, context);
   const info = { title: 'Fixture', duration: 10, videoId: 'fixtureVideo', isLive: false };

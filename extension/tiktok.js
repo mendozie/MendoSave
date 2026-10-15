@@ -82,6 +82,7 @@
   const PLAYER_ID = /xgwrapper-(?:\d+-)?(\d{6,})/;
 
   let menu;
+  const menuState = MendoMenu.createState();
   let menuAnchor;
   let busy = false;
   let toastBox;
@@ -227,11 +228,10 @@
     };
   }
 
-  const itemCache = new Map();
-
   async function loadItem(id, href) {
-    const cached = itemCache.get(id);
-    if (cached) return cached;
+    // Successful ordinary-menu metadata is cached by menuState with source,
+    // route and ownership guards. A second id-only cache would revive expired
+    // URLs after that state has been invalidated by navigation or a failure.
     // The page currently open already carries its own item; anything else is
     // fetched as HTML from the same origin, which needs no headers at all.
     if (videoIdFrom(location.pathname) === id) {
@@ -240,9 +240,7 @@
         try {
           const item = itemFromUniversal(JSON.parse(inline.textContent));
           if (item && String(item.id) === id) {
-            const described = describe(item);
-            itemCache.set(id, described);
-            return described;
+            return describe(item);
           }
         } catch (error) { /* fall through to the fetch */ }
       }
@@ -253,9 +251,7 @@
     const item = itemFromUniversal(parseUniversalData(await response.text()));
     if (!item) throw new Error('в странице нет данных видео (TikTok мог потребовать вход)');
     if (String(item.id) !== id) throw new Error('TikTok вернул данные другого видео; обновите страницу');
-    const described = describe(item);
-    itemCache.set(id, described);
-    return described;
+    return describe(item);
   }
 
   // ---- transfer --------------------------------------------------------------
@@ -532,6 +528,7 @@
         if (bundled) throw error;
         return;
       }
+      menuState.clear();
       notification.set(`Ошибка: ${String(error?.message || error).slice(0, 140)}`, 1);
       notification.hide(8000);
       if (bundled) throw error;
@@ -626,6 +623,7 @@
   // ---- menu ------------------------------------------------------------------
 
   function closeMenu(restoreFocus = false) {
+    menuState.remember(menu);
     menu?.remove();
     menu = undefined;
     if (restoreFocus && menuAnchor?.isConnected) menuAnchor.focus();
@@ -699,14 +697,16 @@
     menuAnchor = button;
     menu = createElement('div', 'mendosave-tiktok-menu');
     const openedMenu = menu, sourceHref = location.href;
+    menuState.route(sourceHref);
+    const sourceKey = `${sourceHref}|${entry.id}`;
+    const cachedInfo = menuState.get(sourceKey);
     const rail = button.closest(RAIL_SELECTOR);
     const current = () => {
       if (menu !== openedMenu) return false;
       if (location.href !== sourceHref || (rail && entryForRail(rail)?.id !== entry.id)) { closeMenu(); return false; }
       return true;
     };
-    menu.append(createElement('div', 'mendosave-tiktok-head',
-      `MendoSave v${chrome.runtime.getManifest().version}`));
+    MendoMenu.decorate(menu, { title: 'TikTok', subtitle: 'Сохранить видео', close: () => closeMenu(true) });
     const loading = createElement('div', 'mendosave-tiktok-item mendosave-tiktok-muted', 'Читаю данные видео…');
     menu.append(loading);
     document.body.appendChild(menu);
@@ -715,15 +715,15 @@
     document.addEventListener('keydown', onMenuKeydown, true);
 
     try {
-      const info = await loadItem(entry.id, entry.href);
+      const info = cachedInfo || await loadItem(entry.id, entry.href);
       if (!current()) return;
       entry.info = info;
       loading.remove();
-      menu.append(createElement('div', 'mendosave-tiktok-menu-note',
-        `${info.author}${info.title && info.title !== info.id ? ` — ${info.title}` : ''}`));
+      MendoMenu.decorate(menu, { title: 'TikTok', subtitle: info.title || info.author, close: () => closeMenu(true) });
 
+      const videos = [];
       for (const rung of info.rungs) {
-        addItem(
+        videos.push(addItem(
           `Видео · ${rung.label}`,
           // The size leads the hint: the rungs are ordered by bitrate, so the
           // resolution alone does not tell the viewer which file is bigger.
@@ -731,24 +731,30 @@
             formatBytes(rung.size), rung.best ? 'макс. битрейт' : '', 'исходный поток']
             .filter(Boolean).join(' · '),
           () => void runChoice(entry, { kind: 'video', rung }),
-        );
+        ));
       }
+      MendoMenu.compact(menu, { groups: [{ title: 'Видео', items: videos }], onToggle: () => positionMenu(button) });
+      const audio = [];
       if (info.music.url) {
-        addItem('Только звук · исходный файл', 'без перекодирования',
-          () => void runChoice(entry, { kind: 'sound', audioFormat: 'original' }));
-        addItem('Только звук · MP3', 'перекодирование',
-          () => void runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }));
+        audio.push(addItem('Только звук · исходный файл', 'без перекодирования',
+          () => void runChoice(entry, { kind: 'sound', audioFormat: 'original' })));
+        audio.push(addItem('Только звук · MP3', 'перекодирование',
+          () => void runChoice(entry, { kind: 'sound', audioFormat: 'mp3' })));
       }
+      MendoMenu.compact(menu, { groups: [{ title: 'Аудио', items: audio }] });
       const options = info.rungs.map((rung, index) => ({
         id: `tiktok-video-${encodeURIComponent(rung.gear)}-${rung.bitrate}-${rung.width}-${rung.pixelHeight}-${rung.size}`,
         label: `Видео · ${rung.label}`,
         compatibilityKey: JSON.stringify([rung.gear, rung.bitrate, rung.width, rung.pixelHeight, rung.size]), group: 'Видео',
+        family: 'video', title: 'Видео', detail: [rung.label, formatBytes(rung.size)].filter(Boolean).join(' · '),
         run: () => runChoice(entry, { kind: 'video', rung }),
       }));
       if (info.music.url) options.push(
         { id: 'tiktok-sound-original', label: 'Только звук · исходный файл', group: 'Аудио',
+          family: 'audio', title: 'Аудио', detail: 'Исходный файл · без перекодирования', secondary: true,
           run: () => runChoice(entry, { kind: 'sound', audioFormat: 'original' }) },
         { id: 'tiktok-sound-mp3', label: 'Только звук · MP3', group: 'Аудио',
+          family: 'audio', title: 'Аудио', detail: 'MP3 · перекодирование', secondary: true,
           run: () => runChoice(entry, { kind: 'sound', audioFormat: 'mp3' }) },
       );
       if (options.length > 1) globalThis.MendoPackageUI?.add(menu, {
@@ -766,9 +772,15 @@
         },
       });
       globalThis.MendoMenu?.bind(menu, () => closeMenu(true), '.mendosave-tiktok-item[role="button"],.mendo-package-open');
+      menuState.set(sourceKey, info, () => {
+        const owner = button.isConnected && button.closest(RAIL_SELECTOR);
+        return Boolean(owner && entryForRail(owner)?.id === entry.id);
+      });
+      menuState.attach(menu, sourceKey, JSON.stringify(options.map(option => [option.id, option.compatibilityKey])));
       positionMenu(button);
     } catch (error) {
       if (!current()) return;
+      menuState.clear();
       loading.remove();
       menu.append(createElement('div', 'mendosave-tiktok-item mendosave-tiktok-muted',
         `Ошибка: ${String(error?.message || error).slice(0, 120)}`));
@@ -790,22 +802,7 @@
   // ---- mounting ----------------------------------------------------------------
 
   function createIcon() {
-    const namespace = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(namespace, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('aria-hidden', 'true');
-    const ring = document.createElementNS(namespace, 'circle');
-    ring.setAttribute('cx', '18');
-    ring.setAttribute('cy', '18');
-    ring.setAttribute('r', '16.9');
-    ring.setAttribute('fill', 'none');
-    ring.setAttribute('stroke', '#35d477');
-    ring.setAttribute('stroke-width', '2.2');
-    const arrows = document.createElementNS(namespace, 'path');
-    arrows.setAttribute('fill', '#35d477');
-    arrows.setAttribute('d', 'M16 6h4v14l5-5 3 3-10 10L8 18l3-3 5 5V6z M7 28h22v3H7z');
-    svg.append(ring, arrows);
-    return svg;
+    return MendoMenu.icon(document);
   }
 
   // Into the action column, above the avatar — the place the viewer already
@@ -837,6 +834,7 @@
   }
 
   function ensureButtons() {
+    menuState.route(location.href);
     for (const rail of document.querySelectorAll(RAIL_SELECTOR)) {
       if (rail.getBoundingClientRect().width > 0) mountInRail(rail);
     }
