@@ -1,6 +1,6 @@
 # Mozilla reviewer build instructions
 
-Prepared submission: MendoSave 0.4.0. The owner accepted the compact interface and authorized Mozilla signing and GitHub distribution on 15-10-2026. Actual submission/signing and final package receipts are recorded in [release verification](RELEASE_VERIFICATION_040.md). Historical 0.3.3 receipts remain in their [separate report](RELEASE_VERIFICATION_033.md).
+Submission: MendoSave 0.4.0, approved and signed on 15-10-2026 (version 6582334 / file 5126466). Source/runtime revision: `456b157241167cd1aa36d576c8ef0ec1e2f2ed66`. The owner accepted the compact interface and authorized Mozilla signing and GitHub distribution. Actual submission/signing and final package receipts are recorded in [release verification](RELEASE_VERIFICATION_040.md). Historical 0.3.3 receipts remain in their [separate report](RELEASE_VERIFICATION_033.md).
 
 Add-on ID: `mendosave@mendozie`, self-distributed (unlisted), updating published 0.3.3. No public AMO listing or update server is part of this submission. Media is processed locally; there is no analytics, processing server or Native Messaging.
 
@@ -10,7 +10,7 @@ New functionality: Instagram Reels, videos, photos, complete mixed carousels, au
 
 The source archive contains the extension, browser-specific host, build scripts, lockfile, bundled libraries, licenses and provenance. Extract it into an empty directory and run commands from its root.
 
-Tested local environment: Windows with Node.js 22.18.0 / npm 10.9.3. Final Windows 2025 and Ubuntu 24.04 CI and archive reproducibility are recorded for the exact revision in [release verification](RELEASE_VERIFICATION_040.md). Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
+Tested local environment: Windows with Node.js 22.18.0 / npm 10.9.3. Windows 2025 and Ubuntu 24.04 CI passed 1051 tests each and archive reproducibility for the frozen revision; [release verification](RELEASE_VERIFICATION_040.md). Node.js must satisfy `^22.13.0 || >=24`; download it from [nodejs.org](https://nodejs.org/en/download).
 
 ```sh
 npm ci --ignore-scripts

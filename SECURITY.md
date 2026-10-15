@@ -1,6 +1,6 @@
 # Сообщить о проблеме безопасности
 
-Текущий выпуск MendoSave - 0.3.3. Поддерживаемая исходная версия и фактический статус проверок находятся в [README](README.md), [релизной проверке](docs/RELEASE_VERIFICATION_033.md) и [ROADMAP](docs/ROADMAP.md).
+Текущий выпуск MendoSave - 0.4.0. Поддерживаемая исходная версия и фактический статус проверок находятся в [README](README.md), [релизной проверке](docs/RELEASE_VERIFICATION_040.md), [security review 0.4.0](docs/SECURITY_REVIEW_040.md) и [ROADMAP](docs/ROADMAP.md).
 
 Не размещай cookies, токены, подписанные медиассылки, приватные файлы или exploit против чужих учётных записей в публичном issue. Если в GitHub доступен раздел Security → Report a vulnerability, используй его. Если private reporting недоступен, свяжись с владельцем через [профиль mendozie](https://github.com/mendozie), не раскрывая подробности публично. Приватный канал и SLA сейчас не заявляются как настроенные.
 
@@ -13,3 +13,5 @@
 Security scan должен охватывать фактический repository и supply chain. Browser QA и outgoing text scanner дополняют его, но не заменяют. Отказ сайта, отсутствие доступного материала или запрещённый браузером codec сами по себе не являются уязвимостью. Если они приводят к потере данных или обходу границы доверия, такой эффект входит в review.
 
 Исправления проверяются regression tests на затронутой границе и применимым browser/file сценарием. Необнаруженные findings в одном проходе не означают доказанное отсутствие всех уязвимостей.
+
+Перед выпуском 0.4.0 Standard repository scan выявил три medium findings в vendor parser. Исправления MP4/FLAC/AV1 проверены targeted tests и независимым correction review; managed review релизного head завершён без новых findings. Исходный scan и частичная coverage WASM/native source сохранены в [отчёте 0.4.0](docs/SECURITY_REVIEW_040.md). Это ограниченный результат проверки, а не гарантия отсутствия других уязвимостей.

@@ -1,6 +1,6 @@
 # Изменения
 
-## 0.4.0 - кандидат, не выпущен
+## 0.4.0 - 15-10-2026
 
 - Адаптер открытой публикации Instagram: Reels, видео, фото, целые смешанные карусели, описание автора в TXT и отдельное исходное аудио/MP3 из видео.
 - Последовательный пакет до 64 выбранных результатов; действующий предел размера ZIP сохранён.
@@ -15,7 +15,9 @@
 - Шапка пакета выравнивает заголовок и источник по baseline, кнопки - по центрам; SVG «Назад», перемещение и закрытие имеют согласованную геометрию.
 - MP4 проверяет физический диапазон chunk до lookup и использует общий prefix index вместо повторных сумм. Пустой FLAC завершает lookup на EOF; AV1 проверяет unsigned длину OBU и наличие payload до обхода.
 
-Подготовка выпуска - в [релизном отчёте](docs/RELEASE_VERIFICATION_040.md), область security review - в [отчёте](docs/SECURITY_REVIEW_040.md). Прежние проверки сохранены в [отчёте интерфейса B](docs/UI_B_VERIFICATION.md) и [исходном отчёте Instagram](docs/INSTAGRAM_VERIFICATION.md).
+Mozilla подписала unlisted XPI; [Release 0.4.0](https://github.com/mendozie/MendoSave/releases/tag/v0.4.0) опубликован. Релизный source/runtime commit - `456b157241167cd1aa36d576c8ef0ec1e2f2ed66`. Windows/Linux CI прошёл по 1051/1051 tests и подтвердил воспроизводимость неподписанных архивов; managed review этого head завершён без findings. Постоянное обновление 0.3.3 → 0.4.0 сохранило ID/UUID и все пять настроек после полного перезапуска Zen; затронутые header controls повторно проверены на подписанном пакете при 1440×1000 и 360×800. Все шесть Release assets скачаны обратно и сверены по полным bytes/hashes, три архива прошли CRC.
+
+Отчёт и изменения проходят через [PR #10](https://github.com/mendozie/MendoSave/pull/10); актуальный merge state доступен по ссылке. Новый полный media-проход не выполнялся; закрытая публикация Instagram и прежние ограничения остаются отмечены в [релизном отчёте](docs/RELEASE_VERIFICATION_040.md). Область security review и исходные findings сохранены в [отчёте](docs/SECURITY_REVIEW_040.md). Прежние проверки - в [отчёте интерфейса B](docs/UI_B_VERIFICATION.md) и [исходном отчёте Instagram](docs/INSTAGRAM_VERIFICATION.md).
 
 ## 0.3.3 - 13-10-2026
 
