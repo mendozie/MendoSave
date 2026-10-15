@@ -39,7 +39,8 @@ function icon(document, name = 'download') {
     svg.append(ring, arrows);
   } else {
     const path = document.createElementNS(namespace, 'path');
-    path.setAttribute('d', { back: 'm14 6-6 6 6 6M8 12h12', close: 'm6 6 12 12M18 6 6 18', chevron: 'm7 10 5 5 5-5' }[name] || 'm7 10 5 5 5-5');
+    path.setAttribute('d', { back: 'm12 6-6 6 6 6M6 12h12', close: 'm6 6 12 12M18 6 6 18', chevron: 'm7 10 5 5 5-5',
+      grip: 'M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01' }[name] || 'm7 10 5 5 5-5');
     path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'currentColor');
     path.setAttribute('stroke-width', '1.8'); path.setAttribute('stroke-linecap', 'round'); path.setAttribute('stroke-linejoin', 'round');
     svg.append(path);

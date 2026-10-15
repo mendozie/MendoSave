@@ -37,7 +37,7 @@
     "bitRebuildVerified": false,
     "originalSha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68",
     "originalExactDownloadMatch": true,
-    "modification": "Deterministic parser bounds and readonly physical MP4 sample extent projection; scripts/patch-mediabunny.cjs; corresponding full MPL source files and PATCH.md are included",
+    "modification": "Deterministic parser work/metadata bounds, terminal empty-FLAC lookup, unsigned bounded AV1 OBU lengths and readonly physical MP4 sample extent projection; scripts/patch-mediabunny.cjs; five corresponding full MPL source files and PATCH.md are included",
     "transformRoundTripVerified": true
   },
   "files": [
@@ -50,16 +50,16 @@
     },
     {
       "path": "mediabunny.min.mjs",
-      "bytes": 647016,
-      "sha256": "01c2aed114c87822d1024067912b4853583184dc39c8531370929c46ebaec9f5",
+      "bytes": 648219,
+      "sha256": "9ce416761bc48aa3c7450a6e463a079aaa261454c82879abf8d3d394f8c372fa",
       "modified": true,
       "source": "https://cdn.jsdelivr.net/npm/mediabunny@1.51.0/+esm",
       "originalSha256": "2db7ec3a0e7a6ddacee901cd38db62a066c8c446bc37e4e38d4047d07a39fc68"
     },
     {
       "path": "isobmff-demuxer.ts",
-      "bytes": 121314,
-      "sha256": "9d49d1cddb4e50cc982316721d7a1d81e541d5feae0e404d1e6a046e396353bf",
+      "bytes": 122549,
+      "sha256": "84706902552127887158fbf93623b69f0873bcc0aaef35dd9302fe6f2d1b5179",
       "modified": true,
       "source": "npm:mediabunny@1.51.0/src/isobmff/isobmff-demuxer.ts",
       "originalSha256": "bde5d41fdd4db0c4574be69e2e02f4732ade675366efaf030f52215a80eb76a8"
@@ -74,8 +74,8 @@
     },
     {
       "path": "PATCH.md",
-      "bytes": 4461,
-      "sha256": "901c60f3794d8ea0ba476dc860c59329ead793cbd5c921e6de75c8cae56e2c39",
+      "bytes": 6030,
+      "sha256": "c066d375efb92455643ec288206c3c4bbff94586054ffdf57ac966b9585b09db",
       "modified": false,
       "source": "MendoSave local transformation documentation"
     },
@@ -86,6 +86,22 @@
       "originalSha256": "b15f691d7d9b17fe518fe9afd678eaa6d2f67eec961cb7a9257cc1c54c9ab4ec",
       "bytes": 2690,
       "sha256": "1b80620ed1e8f429ba449aad7a113a4ec0dea9d2ed19c26ff94bc300fa256508"
+    },
+    {
+      "path": "flac-demuxer.ts",
+      "modified": true,
+      "source": "npm:mediabunny@1.51.0/src/flac/flac-demuxer.ts",
+      "originalSha256": "7895b67f19d0bee698b1d9227616ea75589330bb0e5adafeee972f6759194c7a",
+      "bytes": 21615,
+      "sha256": "4c73ed304924b821e18cb2619713fb94047e84e2db63afc5d53f9e7ea16956aa"
+    },
+    {
+      "path": "codec-data.ts",
+      "modified": true,
+      "source": "npm:mediabunny@1.51.0/src/codec-data.ts",
+      "originalSha256": "77f2b6736f24e691ebb1d62b5dee321e8284069857ed5b1c04d2fdbc7fa27519",
+      "bytes": 92861,
+      "sha256": "287cfcbdda9c3cfd55c97541e35787a3a0ab6a5c860c9d7efe670330d5b6511d"
     }
   ]
 }

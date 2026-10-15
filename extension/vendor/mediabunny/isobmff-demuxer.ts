@@ -3554,6 +3554,8 @@ type SampleInfo = {
 	isKeyFrame: boolean;
 };
 
+const MENDO_MP4_SAMPLE_SIZE_PREFIXES = new WeakMap<SampleTable, Float64Array>();
+
 const getSampleInfo = (sampleTable: SampleTable, sampleIndex: number): SampleInfo | null => {
 	const timingEntryIndex = binarySearchLessOrEqual(sampleTable.sampleTimingEntries, sampleIndex, x => x.startIndex);
 	const timingEntry = sampleTable.sampleTimingEntries[timingEntryIndex];
@@ -3585,6 +3587,14 @@ const getSampleInfo = (sampleTable: SampleTable, sampleIndex: number): SampleInf
 
 	const startSampleIndexOfChunk = chunkEntry.startSampleIndex
 		+ (chunkIndex - chunkEntry.startChunkIndex) * chunkEntry.samplesPerChunk;
+	const endSampleIndexOfChunk = startSampleIndexOfChunk + chunkEntry.samplesPerChunk;
+	if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= sampleTable.chunkOffsets.length
+		|| !Number.isSafeInteger(startSampleIndexOfChunk) || startSampleIndexOfChunk < 0
+		|| !Number.isSafeInteger(chunkEntry.samplesPerChunk) || chunkEntry.samplesPerChunk < 1
+		|| !Number.isSafeInteger(endSampleIndexOfChunk) || !Number.isSafeInteger(sampleIndex)
+		|| sampleIndex < startSampleIndexOfChunk || sampleIndex >= endSampleIndexOfChunk) {
+		throw new Error("Invalid MP4 chunk range");
+	}
 	let chunkSize = 0;
 	let sampleOffset = chunkOffset;
 
@@ -3592,14 +3602,24 @@ const getSampleInfo = (sampleTable: SampleTable, sampleIndex: number): SampleInf
 		sampleOffset += sampleSize * (sampleIndex - startSampleIndexOfChunk);
 		chunkSize += sampleSize * chunkEntry.samplesPerChunk;
 	} else {
-		for (let i = startSampleIndexOfChunk; i < startSampleIndexOfChunk + chunkEntry.samplesPerChunk; i++) {
-			const sampleSize = sampleTable.sampleSizes[i]!;
-
-			if (i < sampleIndex) {
-				sampleOffset += sampleSize;
-			}
-			chunkSize += sampleSize;
+		if (endSampleIndexOfChunk > sampleTable.sampleSizes.length
+			|| sampleTable.sampleSizes.length > MENDO_MAX_EXPANDED_MP4_SAMPLES * 4) {
+			throw new Error("Invalid MP4 chunk range");
 		}
+		let prefix = MENDO_MP4_SAMPLE_SIZE_PREFIXES.get(sampleTable);
+		if (!prefix) {
+			prefix = new Float64Array(sampleTable.sampleSizes.length + 1);
+			for (let i = 0; i < sampleTable.sampleSizes.length; i++) {
+				const sum = prefix[i]! + sampleTable.sampleSizes[i]!;
+				if (!Number.isSafeInteger(sum) || sum < prefix[i]!) {
+					throw new Error("Invalid MP4 chunk range");
+				}
+				prefix[i + 1] = sum;
+			}
+			MENDO_MP4_SAMPLE_SIZE_PREFIXES.set(sampleTable, prefix);
+		}
+		sampleOffset += prefix[sampleIndex]! - prefix[startSampleIndexOfChunk]!;
+		chunkSize = prefix[endSampleIndexOfChunk]! - prefix[startSampleIndexOfChunk]!;
 	}
 
 	let duration = timingEntry.delta;
