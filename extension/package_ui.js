@@ -1,6 +1,7 @@
 (() => {
   function create({ runtime, document, fetch: fetcher = globalThis.fetch, queue = globalThis.MendoPackageQueue,
     activation = globalThis.MendoMenu }) {
+    const maxPackageItems = 64;
     let current = null;
     let picker = null;
     let rememberedSelection = null;
@@ -118,10 +119,11 @@
         return fetcher(url, current ? { ...options, signal: options.signal
           ? AbortSignal.any([options.signal, current.controller.signal]) : current.controller.signal } : options);
       },
-      async saveBlob(blob, filename) {
+      async saveBlob(blob, filename, { signal: callerSignal } = {}) {
         check();
         const controller = new AbortController();
-        const signal = current?.controller.signal || controller.signal;
+        const signals = [controller.signal, current?.controller.signal, callerSignal].filter(Boolean);
+        const signal = signals.length > 1 ? AbortSignal.any(signals) : controller.signal;
         let disconnectedError;
         const checkTransfer = () => {
           check();
@@ -131,7 +133,13 @@
         const producer = await api.acquireProcessor({ signal, onDisconnect(error) {
           disconnectedError = error; controller.abort();
         } });
-        let transferId, finished = false, opened = false, port;
+        let transferId, finished = false, opened = false, port, abortPromise;
+        const abortTransfer = () => {
+          if (opened && !finished) abortPromise ||= producer.send({ t: 'mendosave-blob-abort', transferId }).catch(() => {});
+          return abortPromise;
+        };
+        const onAbort = () => { void abortTransfer(); };
+        signal.addEventListener('abort', onAbort, { once: true });
         try {
           transferId = globalThis.crypto.randomUUID();
           checkTransfer();
@@ -157,8 +165,12 @@
           checkTransfer();
           finished = true;
           return result.filename || filename;
+        } catch (error) {
+          checkTransfer();
+          throw error;
         } finally {
-          if (opened && !finished) await producer.send({ t: 'mendosave-blob-abort', transferId }).catch(() => {});
+          signal.removeEventListener('abort', onAbort);
+          if (opened && !finished) await abortTransfer();
           try { port?.disconnect(); } catch (error) {}
           producer.release();
         }
@@ -310,7 +322,17 @@
           hide.addEventListener('click', conceal);
           resume.addEventListener('click', show);
           const selection = () => rows.filter(row => row.input.checked);
-          const update = () => { files.disabled = selection().length === 0; zip.disabled = selection().length < 2; };
+          const update = () => {
+            const count = selection().length, tooMany = count > maxPackageItems;
+            files.disabled = Boolean(current) || count === 0 || tooMany;
+            zip.disabled = Boolean(current) || count < 2 || tooMany;
+            if (!current) {
+              status.textContent = tooMany
+                ? `Выбрано ${count} файлов. В пакете может быть не больше ${maxPackageItems}. Снимите лишние отметки.`
+                : `Выберите файлы. Выбрано: ${count} из ${maxPackageItems}. Они будут обработаны по очереди.`;
+              updateResume();
+            }
+          };
           const bindRows = () => { rows.forEach(row => row.input.addEventListener('change', update)); update(); };
           const remember = () => { rememberedSelection = { source: String(source),
             choices: new Map(selection().map(row => [row.item.id, row.item.compatibilityKey])) }; };
@@ -333,7 +355,7 @@
             remember(); list.replaceChildren(); rows = makeRows(items); bindRows();
             title = nextTitle; caption.textContent = title; returnToMenu = nextBack;
             dialog.setAttribute('aria-label', `Пакет: ${title}`);
-            progress.value = 0; status.textContent = 'Выберите файлы. Они будут обработаны по очереди.'; updateResume();
+            progress.value = 0; updateResume();
           };
           panel = { source: String(source), show, dispose, refresh };
           picker = panel;
@@ -364,7 +386,7 @@
           const start = async mode => {
             if (current || picker !== panel) return;
             const selected = selection();
-            if (!selected.length || (mode === 'zip' && selected.length < 2)) return;
+            if (!selected.length || selected.length > maxPackageItems || (mode === 'zip' && selected.length < 2)) { update(); return; }
             const state = { id: globalThis.crypto.randomUUID(), index: -1, controller: new AbortController(), jobs: new Set(), downloads: new Set(), abort, panel };
             current = state;
             const checkState = () => {

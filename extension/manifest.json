@@ -1,14 +1,17 @@
 {
   "manifest_version": 3,
   "name": "MendoSave",
-  "version": "0.3.3",
-  "description": "Локальное сохранение видео, аудио и субтитров. Выбор форматов, пакеты и ZIP.",
+  "version": "0.4.0",
+  "description": "Локальное сохранение фото, видео, аудио и субтитров. Выбор форматов, пакеты и ZIP.",
   "permissions": [
     "downloads",
     "offscreen",
     "storage"
   ],
   "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://*.cdninstagram.com/*",
+    "https://*.fbcdn.net/*",
     "https://www.youtube.com/*",
     "https://music.youtube.com/*",
     "https://i.ytimg.com/*",
@@ -45,6 +48,21 @@
     }
   },
   "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["instagram_source.js", "instagram_bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["menu.js", "package_queue.js", "package_ui.js", "instagram_source.js", "instagram_media.js", "instagram.js"],
+      "css": ["package_ui.css", "instagram.css"],
+      "run_at": "document_idle",
+      "world": "ISOLATED",
+      "all_frames": false
+    },
     {
       "matches": [
         "https://www.youtube.com/*",

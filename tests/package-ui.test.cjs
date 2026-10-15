@@ -9,6 +9,51 @@ function create(options) {
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+test('package preflight blocks 65 choices before any work and recovers at 64 without dropping selections', async t => {
+  for (const mode of ['files', 'zip']) await t.test(mode, async () => {
+    const { document } = parseHTML('<html><body><div id="menu"></div></body></html>');
+    const packets = [], ran = [];
+    const options = Array.from({ length: 65 }, (_, index) => ({ id: `item-${index}`, label: `Item ${index}`,
+      async run() { ran.push(index); return `item-${index}.txt`; },
+    }));
+    const ui = create({ document, queue: require('../extension/package_queue.js'), runtime: {
+      async sendMessage(message) { packets.push(message); return { ok: true, filename: 'Clip.zip' }; },
+    } });
+    ui.add(document.getElementById('menu'), { title: 'Clip', options });
+    document.querySelector('.mendo-package-open').click();
+    const dialog = document.querySelector('dialog');
+    let inputs = [...dialog.querySelectorAll('input')];
+    const change = (input, checked) => { input.checked = checked; input.dispatchEvent(new document.defaultView.Event('change')); };
+    for (const input of inputs) change(input, true);
+    const files = dialog.querySelector('[data-mode="files"]'), zip = dialog.querySelector('[data-mode="zip"]');
+    assert.equal(files.disabled, true); assert.equal(zip.disabled, true);
+    const status = dialog.querySelector('[role="status"]');
+    assert.match(status.textContent, /65/); assert.match(status.textContent, /не больше 64/);
+    assert.equal(inputs.filter(input => input.checked).length, 65, 'the user can revise every selected choice');
+    files.click(); zip.click();
+    for (const [button, key] of [[files, 'Enter'], [zip, ' ']]) {
+      const event = new UserEvent('keydown', { bubbles: true, cancelable: true }); event.key = key; button.dispatchEvent(event);
+    }
+    await new Promise(setImmediate);
+    assert.equal(ui.running, false); assert.deepEqual(packets, []); assert.deepEqual(ran, []);
+    document.querySelector('.mendo-package-open').click();
+    inputs = [...dialog.querySelectorAll('input')];
+    assert.equal(inputs.filter(input => input.checked).length, 65, 'refresh retains the selection for the same source');
+    assert.equal(files.disabled && zip.disabled, true);
+    assert.match(status.textContent, /65.*не больше 64/, 'refresh cannot replace the preflight warning with the idle prompt');
+    change(inputs[64], false);
+    assert.equal(files.disabled, false); assert.equal(zip.disabled, false);
+    assert.doesNotMatch(status.textContent, /Снимите/);
+    dialog.querySelector(`[data-mode="${mode}"]`).click();
+    while (ui.running) await new Promise(setImmediate);
+    const started = packets.find(message => message.t === 'mendosave-package-begin');
+    assert.equal(started.mode, mode);
+    assert.deepEqual(started.items.map(item => item.id), options.slice(0, 64).map(item => item.id));
+    assert.deepEqual(ran, Array.from({ length: 64 }, (_, index) => index));
+    assert.match(status.textContent, /Готово/);
+  });
+});
+
 test('Blob preparation waits for producer readiness and retains its lease until native finish settles', async () => {
   const transport = producerPorts({ autoAck: false }), calls = [];
   let finish;
@@ -167,6 +212,51 @@ test('Blob host loss during asynchronous byte reading prevents a later chunk or 
   while (!calls.includes('mendosave-blob-open')) await new Promise(setImmediate);
   transport.ports[0].disconnect(); read(Uint8Array.of(1, 2, 3).buffer); await rejected;
   assert.deepEqual(calls, ['mendosave-ensure', 'mendosave-blob-open', 'mendosave-blob-abort']);
+});
+
+test('a pre-aborted Blob caller never acquires a producer or opens a transfer', async () => {
+  const controller = new AbortController(), transport = producerPorts(), calls = [];
+  controller.abort();
+  const ui = create({ runtime: { connect: transport.connect,
+    async sendMessage(message) { calls.push(message.t); return { ok: true }; },
+  } });
+  await assert.rejects(ui.saveBlob(new Blob(['bytes']), 'photo.jpg', { signal: controller.signal }), { name: 'AbortError' });
+  assert.deepEqual(transport.ports, []); assert.deepEqual(calls, []);
+});
+
+test('caller cancellation aborts Blob transfer or Save As immediately and drains cleanup before producer release', async t => {
+  for (const phase of ['read', 'chunk', 'finish']) await t.test(phase, async () => {
+    const controller = new AbortController(), transport = producerPorts(), calls = [];
+    let entered, releaseBoundary, releaseCleanup;
+    const reached = new Promise(resolve => { entered = resolve; });
+    const boundary = new Promise(resolve => { releaseBoundary = resolve; });
+    const cleanup = new Promise(resolve => { releaseCleanup = resolve; });
+    const blob = { type: 'image/jpeg', size: 3, slice: () => ({ async arrayBuffer() {
+      if (phase === 'read') { entered(); await boundary; }
+      return Uint8Array.of(1, 2, 3).buffer;
+    } }) };
+    const ui = create({ runtime: { connect: transport.connect,
+      async sendMessage(message) {
+        calls.push(message.t);
+        if (message.t === `mendosave-blob-${phase}`) { entered(); await boundary; }
+        if (message.t === 'mendosave-blob-abort') await cleanup;
+        return { ok: true, filename: 'photo.jpg' };
+      },
+    } });
+    const saving = ui.saveBlob(blob, 'photo.jpg', { signal: controller.signal });
+    const rejected = assert.rejects(saving, { name: 'AbortError' });
+    try {
+      await reached; controller.abort(); await new Promise(setImmediate);
+      assert.equal(calls.includes('mendosave-blob-abort'), true, 'abort reaches the host while the original operation is pending');
+      assert.equal(transport.ports[0].disconnected, false);
+      releaseBoundary(); await new Promise(setImmediate);
+      assert.equal(transport.ports[0].disconnected, false, 'abort cleanup still owns the producer');
+      releaseCleanup(); await rejected;
+      assert.equal(transport.ports[0].disconnected, true);
+      assert.equal(calls.filter(name => name === 'mendosave-blob-abort').length, 1);
+      if (phase !== 'finish') assert.equal(calls.includes('mendosave-blob-finish'), false);
+    } finally { releaseBoundary(); releaseCleanup(); await rejected; }
+  });
 });
 
 test('Blob transfer ID creation failure releases a ready producer without opening host transfer state', async () => {

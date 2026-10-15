@@ -49,6 +49,80 @@ function processorContext(sendMessage, Engine, Clock = Date, Worker, State = {})
   return { message, close() { for (const timer of timers) clearInterval(timer); } };
 }
 
+test('strict original audio never falls back to AAC encoding when stream copy fails', async () => {
+  const executions = [], saves = [];
+  const processor = processorContext(message => {
+    if (message.t === 'mendosave-save') { saves.push(message); return { ok: true, id: 42 }; }
+    if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
+    return { ok: true };
+  }, class {
+    on() {} async load() {} terminate() {} async writeFile() {} async deleteFile() {}
+    async exec(args) { executions.push([...args]); return args[args.indexOf('-c:a') + 1] === 'copy' ? 1 : 0; }
+    async readFile() { return new Uint8Array([1, 2, 3]); }
+  });
+  const source = Buffer.concat(['ftyp', 'moov', 'mdat'].map(type => Buffer.from([0, 0, 0, 8, ...Buffer.from(type)])));
+  try {
+    assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'original', filename: 'Original.m4a',
+      format: 'mp3', audioFormat: 'original', audioCopyOnly: true, audioMime: 'audio/mp4; codecs="mp4a.40.2"' })).ok, true);
+    assert.equal((await processor.message({ t: 'mendosave-chunk', jobId: 'original', track: 'audio', b64: source.toString('base64') })).ok, true);
+    const result = await processor.message({ t: 'mendosave-finalize', jobId: 'original' });
+    assert.equal(result.ok, false, 'copy failure must not silently produce a lossy replacement');
+    assert.equal(executions.length, 1);
+    assert.equal(executions[0][executions[0].indexOf('-c:a') + 1], 'copy');
+    assert.deepEqual(saves, []);
+    assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'after', format: 'mp3' })).ok, true);
+    await processor.message({ t: 'mendosave-abort', jobId: 'after' });
+  } finally { processor.close(); }
+});
+
+test('invalid copy-only audio requests are rejected before claiming the processor', async () => {
+  const processor = processorContext();
+  const original = { t: 'mendosave-begin', jobId: 'invalid-original', format: 'mp3',
+    audioFormat: 'original', audioCopyOnly: true, audioMime: 'audio/mp4; codecs="mp4a.40.2"' };
+  try {
+    for (const invalid of [
+      ...[null, 'true', 1, {}, []].map(audioCopyOnly => ({ audioCopyOnly })),
+      { format: 'mp4' }, { audioFormat: 'mp3' }, { audioFormat: undefined },
+      { audioMime: 'audio/mpeg' }, { audioMime: 'audio/mp4' },
+      { audioCaptureRate: 2 }, { audioCaptureRate: 1.00001 }, { audioCaptureRate: '1' }, { audioCaptureRate: 0 },
+    ]) {
+      const result = await processor.message({ ...original, ...invalid });
+      assert.equal(result.ok, false, JSON.stringify(invalid));
+      assert.match(result.error, /параметр/i);
+    }
+    assert.equal((await processor.message({ ...original, jobId: 'valid-original', audioCaptureRate: 1 })).ok, true);
+    await processor.message({ t: 'mendosave-abort', jobId: 'valid-original' });
+  } finally { processor.close(); }
+});
+
+test('copy-only audio can save M4A while ordinary original-audio jobs retain the AAC fallback', async t => {
+  for (const audioCopyOnly of [true, false, undefined]) await t.test(String(audioCopyOnly), async () => {
+    const executions = [], saves = [];
+    const source = Buffer.concat(['ftyp', 'moov', 'mdat'].map(type => Buffer.from([0, 0, 0, 8, ...Buffer.from(type)])));
+    const processor = processorContext(message => {
+      if (message.t === 'mendosave-save') { saves.push(message); return { ok: true, id: 42 }; }
+      if (message.t === 'mendosave-download-state') return { ok: true, state: 'complete' };
+      return { ok: true };
+    }, class {
+      on() {} async load() {} terminate() {} async writeFile() {} async deleteFile() {}
+      async exec(args) {
+        const codec = args[args.indexOf('-c:a') + 1]; executions.push(codec);
+        return audioCopyOnly === true || codec !== 'copy' ? 0 : 1;
+      }
+      async readFile() { return new Uint8Array(source); }
+    });
+    try {
+      assert.equal((await processor.message({ t: 'mendosave-begin', jobId: 'audio', filename: 'Audio.mp3',
+        format: 'mp3', audioFormat: 'original', audioCopyOnly, audioMime: 'audio/mp4; codecs="mp4a.40.2"' })).ok, true);
+      await processor.message({ t: 'mendosave-chunk', jobId: 'audio', track: 'audio', b64: source.toString('base64') });
+      const result = await processor.message({ t: 'mendosave-finalize', jobId: 'audio' });
+      assert.equal(result.ok, true); assert.equal(result.filename, 'Audio.m4a');
+      assert.deepEqual(executions, audioCopyOnly === true ? ['copy'] : ['copy', 'aac']);
+      assert.equal(saves.length, 1); assert.equal(saves[0].filename, 'Audio.m4a');
+    } finally { processor.close(); }
+  });
+});
+
 test('staging enforces per-track and aggregate byte budgets and releases rejected data', async () => {
   const processor = processorContext(undefined, undefined, Date, undefined, { smallStagingBudget: true });
   try {

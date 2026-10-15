@@ -1,5 +1,7 @@
 # Mozilla reviewer build instructions
 
+This document records the 0.3.3 submission. The current branch contains an unsigned 0.4.0 Instagram candidate for manual acceptance; it has not been submitted to Mozilla. See [candidate verification](INSTAGRAM_VERIFICATION.md) for its added permissions, checks and installation steps.
+
 Submission: MendoSave 0.3.3, add-on ID `mendosave@mendozie`, self-distributed (unlisted). This updates the published 0.3.1 add-on and supersedes the intermediate 0.3.2 submission after PR review. The owner authorized public GitHub distribution after a release privacy audit. No public AMO listing or update server is part of this submission.
 
 ## Build the submitted Firefox package
